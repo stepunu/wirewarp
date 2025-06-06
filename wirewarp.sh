@@ -26,9 +26,12 @@ install_packages() {
 
   if [ ${#packages_to_install[@]} -gt 0 ]; then
     # Use echo for this initial step as whiptail might not be installed yet.
-    echo "Installing missing packages: ${packages_to_install[*]}..."
+    echo "Updating package lists..."
     apt-get update >/dev/null
-    apt-get install -y "${packages_to_install[@]}" >/dev/null
+    echo "Installing missing packages: ${packages_to_install[*]}..."
+    # Force non-interactive mode to prevent prompts from hanging the script.
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages_to_install[@]}"
+    echo "Package installation complete."
   fi
 }
 
