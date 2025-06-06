@@ -1,6 +1,6 @@
-# WireGuard Transparent Tunnel for Game Servers
+# WireWarp
 
-This project provides an interactive script to set up a transparent network tunnel. This allows a virtual machine (e.g., a Windows VM on Proxmox) on a local network to use the public IP address of a remote VPS. This is ideal for hosting game servers or other services from home, behind a NAT, while appearing to have a static public IP.
+WireWarp is an interactive script to set up a transparent WireGuard tunnel. This allows a virtual machine (e.g., a Windows VM on Proxmox) on a local network to use the public IP address of a remote VPS. This is ideal for hosting game servers or other services from home, behind a NAT, while appearing to have a static public IP.
 
 ## Architecture
 
@@ -23,41 +23,41 @@ This project now uses a single, interactive script. You can run it directly from
 curl -sSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh | sudo bash
 ```
 
-The script will present a menu. Follow the steps in order:
+The script will present a menu. Follow the steps in order for the initial setup.
 
-### Step 1: Initialize VPS
-*   Run the script on your **remote Ubuntu VPS**.
-*   Choose option `1`.
-*   The script will install WireGuard, generate keys, and output the **VPS Public Key**.
-*   **Copy the public key.** You'll need it for the next step.
+### Setup Workflow
+1.  **[VPS] Step 1: Initialize VPS**
+    *   Run the script on your **remote Ubuntu VPS** and choose option `1`.
+    *   The script will install WireGuard, generate keys, and output the **VPS Public Key**.
+    *   **Copy the public key.** You'll need it for the next step.
 
-### Step 2: Initialize Proxmox Host
-*   Run the same script on your **local Proxmox host**.
-*   Choose option `2`.
-*   The script will ask you for:
-    *   Your VPS's public IP or DDNS hostname.
-    *   The VPS public key you just copied.
-    *   The VPS public IP again (this is used to configure the firewall rules).
-*   It will then configure the Proxmox side of the tunnel and output the **Proxmox Public Key**.
-*   **Copy this public key.** A reboot of Proxmox is recommended after this step.
+2.  **[Proxmox] Step 2: Initialize Proxmox Host**
+    *   Run the same script on your **local Proxmox host** and choose option `2`.
+    *   The script will ask for the VPS details and the public key you just copied.
+    *   It will configure the Proxmox side of the tunnel and output the **Proxmox Public Key**.
+    *   **Copy this public key.** A reboot of Proxmox is recommended.
 
-### Step 3: Complete VPS Setup
-*   Run the script one last time on your **remote Ubuntu VPS**.
-*   Choose option `3`.
-*   The script will ask you for:
-    *   The Proxmox public key you just copied.
-    *   Your Proxmox server's public IP or DDNS hostname.
-    *   Your VPS's public IP address.
-*   It will create the final WireGuard configuration, install a port management helper script, and start the tunnel.
+3.  **[VPS] Step 3: Complete VPS Setup**
+    *   Run the script one last time on your **remote Ubuntu VPS** and choose option `3`.
+    *   The script will ask for the Proxmox public key.
+    *   It will create the final WireGuard configuration and start the tunnel.
 
-Your tunnel is now active!
+### Operations
+After setup, you can use the script for maintenance:
+
+*   **[VPS] Manage Forwarded Ports (Option 4):** Add or remove port forwarding rules for your VM. Can be run at any time on the VPS after the initial setup is complete.
+*   **[All] Check Tunnel Status (Option 5):** Run on either the VPS or Proxmox to see the live status of the WireGuard interface.
+*   **[All] Uninstall WireWarp (Option 6):** Run on either the VPS or Proxmox to completely remove all changes made by the script.
 
 ### Windows VM Setup
-
-After the scripts are done, configure your Windows VM:
+After the tunnel is active, configure your Windows VM:
 1.  Add a second network device to the VM, connected to the new `vmbr1` bridge.
-2.  Statically configure the IP address of this new network card to be the **public IP of your VPS**, with a gateway of `10.0.0.1`.
-3.  Ensure your LAN-facing network card in the VM has **no gateway** set.
+2.  Statically configure the IPv4 settings for this new network card (the "WAN" adapter):
+    *   **IP address:** The public IP of your VPS.
+    *   **Subnet mask:** `255.255.255.0` (or `/24`).
+    *   **Default gateway:** `10.0.0.1` (the tunnel IP of the VPS).
+    *   **Preferred DNS server:** `1.1.1.1` (or the DNS you chose during setup).
+3.  Ensure your original LAN-facing network card has **no default gateway** set, so only local traffic goes through it.
 
 ### Port Forwarding
 

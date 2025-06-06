@@ -1,11 +1,12 @@
 #!/bin/bash
 
-# A unified script to set up a WireGuard transparent tunnel.
+# WireWarp: A unified script to set up a WireGuard transparent tunnel.
 
 set -e
 
 # --- Helper Functions ---
 
+# Check if the script is run as root
 check_root() {
   if [ "$(id -u)" -ne 0 ]; then
     echo "This script must be run as root. Please use sudo." >&2
@@ -58,6 +59,8 @@ proxmox_init() {
   read -p "Enter the public IP of your VPS (this will be the VM's IP): " VM_PUBLIC_IP
   read -p "Enter the WireGuard port from Step 1 [51820]: " WIREGUARD_PORT
   WIREGUARD_PORT=${WIREGUARD_PORT:-51820}
+  read -p "Enter DNS server for the tunnel interface [1.1.1.1]: " DNS_SERVER
+  DNS_SERVER=${DNS_SERVER:-1.1.1.1}
 
   WIREGUARD_PROXMOX_TUNNEL_IP="10.0.0.2"
   TUNNEL_BRIDGE="vmbr1"
@@ -72,7 +75,6 @@ proxmox_init() {
 
   echo "Generating WireGuard keys for Proxmox..."
   wg genkey | tee /etc/wireguard/proxmox_private.key | wg pubkey > /etc/wireguard/proxmox_public.key
-  PROXMOX_PUBLIC_KEY=$(cat /etc/wireguard/proxmox_public.key)
   chmod 600 /etc/wireguard/proxmox_private.key
 
   echo "Configuring WireGuard interface (wg0)..."
@@ -80,6 +82,7 @@ proxmox_init() {
 [Interface]
 Address = ${WIREGUARD_PROXMOX_TUNNEL_IP}/24
 PrivateKey = $(cat /etc/wireguard/proxmox_private.key)
+DNS = ${DNS_SERVER}
 PostUp = iptables -A FORWARD -i ${TUNNEL_BRIDGE} -o wg0 -j ACCEPT
 PostUp = iptables -A FORWARD -i wg0 -o ${TUNNEL_BRIDGE} -m state --state RELATED,ESTABLISHED -j ACCEPT
 PostUp = iptables -t nat -A POSTROUTING -s ${VM_PUBLIC_IP} -o wg0 -j MASQUERADE
@@ -94,15 +97,17 @@ PersistentKeepalive = 25
 EOL
 
   echo "Configuring network bridge '${TUNNEL_BRIDGE}'..."
-  if ! grep -q "iface ${TUNNEL_BRIDGE}" /etc/network/interfaces; then
+  # Add a unique identifier for safe removal
+  if ! grep -q "# WireWarp Tunnel Bridge" /etc/network/interfaces; then
     cat >> /etc/network/interfaces << EOL
 
-# Bridge for WireGuard-tunneled VMs
+# WireWarp Tunnel Bridge - Start
 auto ${TUNNEL_BRIDGE}
 iface ${TUNNEL_BRIDGE} inet manual
     bridge_ports none
     bridge_stp off
     bridge_fd 0
+# WireWarp Tunnel Bridge - End
 EOL
   fi
 
@@ -112,6 +117,7 @@ EOL
   ifup ${TUNNEL_BRIDGE} || echo "Bridge '${TUNNEL_BRIDGE}' is already up or requires a reboot."
   netfilter-persistent save >/dev/null
 
+  PROXMOX_PUBLIC_KEY=$(cat /etc/wireguard/proxmox_public.key)
   echo "--- Proxmox Initialization Complete ---"
   echo "✅ Success!"
   echo
@@ -159,84 +165,9 @@ PublicKey = ${WIREGUARD_PROXMOX_PUBLIC_KEY}
 Endpoint = ${PROXMOX_ENDPOINT}:${WIREGUARD_PORT}
 AllowedIPs = ${WIREGUARD_PROXMOX_TUNNEL_IP}/32, ${VPS_PUBLIC_IP}/32
 EOL
-
-  echo "Installing port management script to /usr/local/bin/manage-ports.sh..."
-  cat > /usr/local/bin/manage-ports.sh << EOL_MANAGE
-#!/bin/bash
-set -e
-
-# --- Configuration (injected by WireWarp script) ---
-VPS_PUBLIC_INTERFACE="${VPS_PUBLIC_INTERFACE}"
-PROXMOX_TUNNEL_IP="${WIREGUARD_PROXMOX_TUNNEL_IP}"
-# --- End Configuration ---
-
-ACTION=\$1
-PROTO=\$2
-PORT=\$3
-
-# Function to add or remove a single iptables rule
-manage_rule() {
-  local l_action=\$1
-  local l_proto=\$2
-  local l_port=\$3
-
-  # Use grep-friendly rule for checking to avoid issues with iptables-save format
-  local grep_rule="-A PREROUTING -i \${VPS_PUBLIC_INTERFACE} -p \${l_proto} -m \${l_proto} --dport \${l_port} -j DNAT --to-destination \${PROXMOX_TUNNEL_IP}"
-  local rule_exists=false
-  if iptables-save | grep -- "\$grep_rule" > /dev/null 2>&1; then
-    rule_exists=true
-  fi
-
-  if [ "\$l_action" == "add" ]; then
-    if [ "\$rule_exists" = true ]; then
-      echo "Rule for \${l_proto}/\${l_port} already exists."
-    else
-      iptables -t nat -A PREROUTING -i \${VPS_PUBLIC_INTERFACE} -p \${l_proto} --dport \${l_port} -j DNAT --to-destination \${PROXMOX_TUNNEL_IP}
-      echo "Port \${l_proto}/\${l_port} forwarded to \${PROXMOX_TUNNEL_IP}."
-    fi
-  elif [ "\$l_action" == "remove" ]; then
-    if [ "\$rule_exists" = true ]; then
-      iptables -t nat -D PREROUTING -i \${VPS_PUBLIC_INTERFACE} -p \${l_proto} --dport \${l_port} -j DNAT --to-destination \${PROXMOX_TUNNEL_IP}
-      echo "Port forwarding for \${l_proto}/\${l_port} removed."
-    else
-      echo "Rule for \${l_proto}/\${l_port} does not exist."
-    fi
-  fi
-}
-
-if [ "\$(id -u)" -ne 0 ]; then
-  echo "This script must be run as root." >&2
-  exit 1
-fi
-
-if [ -z "\$ACTION" ] || [ -z "\$PROTO" ] || [ -z "\$PORT" ]; then
-  echo "Usage: \$0 <add|remove> <tcp|udp|both> <port>"
-  echo "Example: \$0 add both 27016"
-  exit 1
-fi
-
-case "\$PROTO" in
-  tcp|udp)
-    manage_rule "\$ACTION" "\$PROTO" "\$PORT"
-    ;;
-  both)
-    echo "Managing rules for both TCP and UDP on port \${PORT}..."
-    manage_rule "\$ACTION" "tcp" "\$PORT"
-    manage_rule "\$ACTION" "udp" "\$PORT"
-    ;;
-  *)
-    echo "Invalid protocol. Use 'tcp', 'udp', or 'both'." >&2
-    exit 1
-    ;;
-esac
-
-# Save the rules once after all operations have been attempted
-echo "Saving persistent firewall rules..."
-netfilter-persistent save >/dev/null
-echo "Done."
-
-EOL_MANAGE
-  chmod +x /usr/local/bin/manage-ports.sh
+  # Persist the config values needed by the port manager
+  echo "VPS_PUBLIC_INTERFACE=${VPS_PUBLIC_INTERFACE}" > /etc/wireguard/wirewarp.conf
+  echo "WIREGUARD_PROXMOX_TUNNEL_IP=${WIREGUARD_PROXMOX_TUNNEL_IP}" >> /etc/wireguard/wirewarp.conf
 
   echo "Enabling and starting WireGuard service..."
   systemctl enable wg-quick@wg0 >/dev/null
@@ -245,42 +176,148 @@ EOL_MANAGE
 
   echo "--- VPS Completion Finished ---"
   echo "✅ Success! Your WireGuard tunnel is now fully configured and active."
-  echo "To manage ports, use '/usr/local/bin/manage-ports.sh add tcp 27016'"
+  echo "You can now use this script to manage forwarded ports."
   echo "To check tunnel status, run 'sudo wg show'"
+}
+
+# Function to manage ports on the VPS
+manage_ports_vps() {
+    check_root
+    if [ ! -f /etc/wireguard/wirewarp.conf ]; then
+        echo "Error: Could not find the WireWarp config file. Please run Step 3 on the VPS first." >&2
+        exit 1
+    fi
+    source /etc/wireguard/wirewarp.conf
+
+    read -p "Action <add|remove>: " ACTION
+    read -p "Protocol <tcp|udp|both>: " PROTO
+    read -p "Port number: " PORT
+
+    # Function to add or remove a single iptables rule
+    manage_rule() {
+        local l_action=$1
+        local l_proto=$2
+        local l_port=$3
+        local grep_rule="-A PREROUTING -i ${VPS_PUBLIC_INTERFACE} -p ${l_proto} -m ${l_proto} --dport ${l_port} -j DNAT --to-destination ${WIREGUARD_PROXMOX_TUNNEL_IP}"
+        local rule_exists=false
+        if iptables-save | grep -- "$grep_rule" > /dev/null 2>&1; then
+            rule_exists=true
+        fi
+
+        if [ "$l_action" == "add" ]; then
+            if [ "$rule_exists" = true ]; then
+                echo "Rule for ${l_proto}/${l_port} already exists."
+            else
+                iptables -t nat -A PREROUTING -i ${VPS_PUBLIC_INTERFACE} -p ${l_proto} --dport ${l_port} -j DNAT --to-destination ${WIREGUARD_PROXMOX_TUNNEL_IP}
+                echo "Port ${l_proto}/${l_port} forwarded to ${WIREGUARD_PROXMOX_TUNNEL_IP}."
+            fi
+        elif [ "$l_action" == "remove" ]; then
+            if [ "$rule_exists" = true ]; then
+                iptables -t nat -D PREROUTING -i ${VPS_PUBLIC_INTERFACE} -p ${l_proto} --dport ${l_port} -j DNAT --to-destination ${WIREGUARD_PROXMOX_TUNNEL_IP}
+                echo "Port forwarding for ${l_proto}/${l_port} removed."
+            else
+                echo "Rule for ${l_proto}/${l_port} does not exist."
+            fi
+        fi
+    }
+
+    case "$PROTO" in
+        tcp|udp)
+            manage_rule "$ACTION" "$PROTO" "$PORT"
+            ;;
+        both)
+            echo "Managing rules for both TCP and UDP on port ${PORT}..."
+            manage_rule "$ACTION" "tcp" "$PORT"
+            manage_rule "$ACTION" "udp" "$PORT"
+            ;;
+        *)
+            echo "Invalid protocol. Use 'tcp', 'udp', or 'both'." >&2
+            exit 1
+            ;;
+    esac
+
+    echo "Saving persistent firewall rules..."
+    netfilter-persistent save >/dev/null
+    echo "Done."
+}
+
+# Function to check WireGuard status
+check_status() {
+    check_root
+    if ! command -v wg &> /dev/null; then
+        echo "WireGuard tools are not installed. Please run one of the setup steps first." >&2
+        exit 1
+    fi
+    echo "--- WireGuard Status ---"
+    wg show
+    echo "------------------------"
+}
+
+# Function to uninstall WireWarp
+uninstall() {
+    check_root
+    read -p "Are you sure you want to completely uninstall WireWarp? This is irreversible. [y/N]: " CONFIRM
+    if [[ ! "$CONFIRM" =~ ^[yY]$ ]]; then
+        echo "Uninstall cancelled."
+        exit 0
+    fi
+
+    echo "Stopping and disabling WireGuard service..."
+    systemctl stop wg-quick@wg0 >/dev/null 2>&1 || true
+    systemctl disable wg-quick@wg0 >/dev/null 2>&1 || true
+
+    if [ -f /etc/wireguard/vps_private.key ]; then
+        echo "Detected VPS installation. Cleaning up..."
+        # Port forwarding rules will be removed when iptables-persistent is purged.
+        rm -rf /etc/wireguard
+        echo "Purging WireGuard and iptables-persistent packages..."
+        apt-get purge -y wireguard iptables-persistent >/dev/null
+        echo "VPS cleanup complete. A reboot is recommended."
+    elif [ -f /etc/wireguard/proxmox_private.key ]; then
+        echo "Detected Proxmox installation. Cleaning up..."
+        ifdown vmbr1 >/dev/null 2>&1 || true
+        # This is safer than a blind sed command. It removes the block between the unique comments.
+        sed -i '/# WireWarp Tunnel Bridge - Start/,/# WireWarp Tunnel Bridge - End/d' /etc/network/interfaces
+        rm -rf /etc/wireguard
+        echo "Purging WireGuard and iptables-persistent packages..."
+        apt-get purge -y wireguard iptables-persistent >/dev/null
+        echo "Proxmox cleanup complete. A reboot is recommended."
+    else
+        echo "No WireWarp installation detected."
+    fi
+    echo "✅ Uninstall complete."
 }
 
 # --- Main Menu ---
 
 echo "================================================="
-echo " WireGuard Transparent Tunnel Setup Script"
+echo " WireWarp - WireGuard Transparent Tunnel Script"
 echo "================================================="
-echo "Which part of the setup are you running?"
+echo "What do you want to do?"
 echo
+echo "   --- SETUP ---"
 echo "   1) [VPS]       Step 1: Initialize VPS"
 echo "   2) [Proxmox]   Step 2: Initialize Proxmox Host"
 echo "   3) [VPS]       Step 3: Complete VPS Setup"
 echo
-echo "   4) Exit"
+echo "   --- OPERATIONS ---"
+echo "   4) [VPS]       Manage Forwarded Ports"
+echo "   5) [All]       Check Tunnel Status"
+echo
+echo "   --- DANGER ---"
+echo "   6) [All]       Uninstall WireWarp"
+echo "   7) Exit"
 echo
 
-read -p "Enter your choice [1-4]: " choice
+read -p "Enter your choice [1-7]: " choice
 
 case $choice in
-  1)
-    vps_init
-    ;;
-  2)
-    proxmox_init
-    ;;
-  3)
-    vps_complete
-    ;;
-  4)
-    echo "Exiting."
-    exit 0
-    ;;
-  *)
-    echo "Invalid option. Please try again."
-    exit 1
-    ;;
+  1) vps_init ;;
+  2) proxmox_init ;;
+  3) vps_complete ;;
+  4) manage_ports_vps ;;
+  5) check_status ;;
+  6) uninstall ;;
+  7) echo "Exiting."; exit 0 ;;
+  *) echo "Invalid option. Please try again."; exit 1 ;;
 esac 
