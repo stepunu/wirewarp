@@ -20,7 +20,7 @@ This project now uses a single, interactive script. You can run it directly from
 
 **Run the script using:**
 ```bash
-curl -sSL <your_gitea_raw_url>/wirewarp.sh | sudo bash
+curl -sSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh | sudo bash
 ```
 
 The script will present a menu. Follow the steps in order:
