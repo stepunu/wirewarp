@@ -72,8 +72,8 @@ vps_init() {
   chmod 600 /etc/wireguard/vps_private.key
 
   echo "Enabling IP forwarding..."
-  sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
-  sysctl -p >/dev/null
+  sed -i 's/^#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
   echo "--- VPS Initialization Complete ---"
   echo "✅ Success!"
