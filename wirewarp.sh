@@ -21,7 +21,7 @@ vps_init() {
   check_root
   echo "--- Running Step 1: VPS Initialization ---"
   
-  read -p "Enter the public network interface of your VPS [eth0]: " VPS_PUBLIC_INTERFACE
+  read -p "Enter the public network interface of your VPS [eth0]: " VPS_PUBLIC_INTERFACE < /dev/tty
   VPS_PUBLIC_INTERFACE=${VPS_PUBLIC_INTERFACE:-eth0}
   WIREGUARD_PORT="51820"
   WIREGUARD_VPS_TUNNEL_IP="10.0.0.1"
@@ -54,12 +54,12 @@ proxmox_init() {
   check_root
   echo "--- Running Step 2: Proxmox Initialization ---"
 
-  read -p "Enter the public IP or DDNS hostname of your VPS: " VPS_ENDPOINT
-  read -p "Paste the VPS Public Key you just generated: " WIREGUARD_VPS_PUBLIC_KEY
-  read -p "Enter the public IP of your VPS (this will be the VM's IP): " VM_PUBLIC_IP
-  read -p "Enter the WireGuard port from Step 1 [51820]: " WIREGUARD_PORT
+  read -p "Enter the public IP or DDNS hostname of your VPS: " VPS_ENDPOINT < /dev/tty
+  read -p "Paste the VPS Public Key you just generated: " WIREGUARD_VPS_PUBLIC_KEY < /dev/tty
+  read -p "Enter the public IP of your VPS (this will be the VM's IP): " VM_PUBLIC_IP < /dev/tty
+  read -p "Enter the WireGuard port from Step 1 [51820]: " WIREGUARD_PORT < /dev/tty
   WIREGUARD_PORT=${WIREGUARD_PORT:-51820}
-  read -p "Enter DNS server for the tunnel interface [1.1.1.1]: " DNS_SERVER
+  read -p "Enter DNS server for the tunnel interface [1.1.1.1]: " DNS_SERVER < /dev/tty
   DNS_SERVER=${DNS_SERVER:-1.1.1.1}
 
   WIREGUARD_PROXMOX_TUNNEL_IP="10.0.0.2"
@@ -134,10 +134,10 @@ vps_complete() {
   check_root
   echo "--- Running Step 3: VPS Completion ---"
 
-  read -p "Paste the Proxmox Public Key from Step 2: " WIREGUARD_PROXMOX_PUBLIC_KEY
-  read -p "Enter your Proxmox server's public IP or DDNS hostname: " PROXMOX_ENDPOINT
-  read -p "Enter the public IP of this VPS: " VPS_PUBLIC_IP
-  read -p "Enter the public network interface of this VPS [eth0]: " VPS_PUBLIC_INTERFACE
+  read -p "Paste the Proxmox Public Key from Step 2: " WIREGUARD_PROXMOX_PUBLIC_KEY < /dev/tty
+  read -p "Enter your Proxmox server's public IP or DDNS hostname: " PROXMOX_ENDPOINT < /dev/tty
+  read -p "Enter the public IP of this VPS: " VPS_PUBLIC_IP < /dev/tty
+  read -p "Enter the public network interface of this VPS [eth0]: " VPS_PUBLIC_INTERFACE < /dev/tty
   VPS_PUBLIC_INTERFACE=${VPS_PUBLIC_INTERFACE:-eth0}
 
   WIREGUARD_PORT="51820"
@@ -189,9 +189,9 @@ manage_ports_vps() {
     fi
     source /etc/wireguard/wirewarp.conf
 
-    read -p "Action <add|remove>: " ACTION
-    read -p "Protocol <tcp|udp|both>: " PROTO
-    read -p "Port number: " PORT
+    read -p "Action <add|remove>: " ACTION < /dev/tty
+    read -p "Protocol <tcp|udp|both>: " PROTO < /dev/tty
+    read -p "Port number: " PORT < /dev/tty
 
     # Function to add or remove a single iptables rule
     manage_rule() {
@@ -256,7 +256,7 @@ check_status() {
 # Function to uninstall WireWarp
 uninstall() {
     check_root
-    read -p "Are you sure you want to completely uninstall WireWarp? This is irreversible. [y/N]: " CONFIRM
+    read -p "Are you sure you want to completely uninstall WireWarp? This is irreversible. [y/N]: " CONFIRM < /dev/tty
     if [[ ! "$CONFIRM" =~ ^[yY]$ ]]; then
         echo "Uninstall cancelled."
         exit 0
@@ -309,7 +309,7 @@ echo "   6) [All]       Uninstall WireWarp"
 echo "   7) Exit"
 echo
 
-read -p "Enter your choice [1-7]: " choice
+read -p "Enter your choice [1-7]: " choice < /dev/tty
 
 case $choice in
   1) vps_init ;;
