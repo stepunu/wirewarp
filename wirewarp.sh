@@ -14,6 +14,43 @@ check_root() {
   fi
 }
 
+# Function to check for and install missing packages
+install_packages() {
+  local packages_to_install=()
+  for pkg in "$@"; do
+    if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+      packages_to_install+=("$pkg")
+    fi
+  done
+
+  if [ ${#packages_to_install[@]} -gt 0 ]; then
+    echo "Installing missing packages: ${packages_to_install[*]}..."
+    apt-get update >/dev/null
+    apt-get install -y "${packages_to_install[@]}" >/dev/null
+  else
+    echo "All required packages are already installed."
+  fi
+}
+
+# Function to check for existing WireWarp/WireGuard configs before setup
+check_existing_config() {
+    if [ -f /etc/wireguard/wg0.conf ] || [ -f /etc/wireguard/vps_private.key ] || [ -f /etc/wireguard/proxmox_private.key ]; then
+        echo "WARNING: An existing WireGuard configuration was found." >&2
+        echo "Continuing will overwrite the existing wg0.conf and any related keys." >&2
+        read -p "Do you want to continue and overwrite? [y/N]: " CONFIRM < /dev/tty
+        if [[ ! "$CONFIRM" =~ ^[yY]$ ]]; then
+            echo "Operation cancelled by user."
+            exit 1
+        fi
+        # If user confirms, stop the service before modifying and clean up old files
+        echo "Stopping WireGuard service before making changes..."
+        systemctl stop wg-quick@wg0 >/dev/null 2>&1 || true
+        rm -f /etc/wireguard/*.key /etc/wireguard/wg0.conf /etc/wireguard/wirewarp.conf
+    fi
+    # Ensure the directory exists for a clean slate
+    mkdir -p /etc/wireguard
+}
+
 # --- Main Logic Functions ---
 
 # Function for Step 1: Initialize VPS
@@ -21,13 +58,13 @@ vps_init() {
   check_root
   echo "--- Running Step 1: VPS Initialization ---"
   
+  check_existing_config
+  install_packages wireguard curl
+
   read -p "Enter the public network interface of your VPS [eth0]: " VPS_PUBLIC_INTERFACE < /dev/tty
   VPS_PUBLIC_INTERFACE=${VPS_PUBLIC_INTERFACE:-eth0}
   WIREGUARD_PORT="51820"
   WIREGUARD_VPS_TUNNEL_IP="10.0.0.1"
-
-  echo "Installing WireGuard..."
-  apt-get update >/dev/null && apt-get install -y wireguard >/dev/null
 
   echo "Generating WireGuard keys..."
   wg genkey | tee /etc/wireguard/vps_private.key | wg pubkey > /etc/wireguard/vps_public.key
@@ -54,6 +91,9 @@ proxmox_init() {
   check_root
   echo "--- Running Step 2: Proxmox Initialization ---"
 
+  check_existing_config
+  install_packages wireguard iptables-persistent curl
+
   read -p "Enter the public IP or DDNS hostname of your VPS: " VPS_ENDPOINT < /dev/tty
   read -p "Paste the VPS Public Key you just generated: " WIREGUARD_VPS_PUBLIC_KEY < /dev/tty
   read -p "Enter the public IP of your VPS (this will be the VM's IP): " VM_PUBLIC_IP < /dev/tty
@@ -69,9 +109,6 @@ proxmox_init() {
     echo "Error: Missing required information." >&2
     exit 1
   fi
-
-  echo "Installing WireGuard and iptables-persistent..."
-  apt-get update >/dev/null && apt-get install -y wireguard iptables-persistent >/dev/null
 
   echo "Generating WireGuard keys for Proxmox..."
   wg genkey | tee /etc/wireguard/proxmox_private.key | wg pubkey > /etc/wireguard/proxmox_public.key
@@ -134,6 +171,12 @@ vps_complete() {
   check_root
   echo "--- Running Step 3: VPS Completion ---"
 
+  if [ ! -f /etc/wireguard/vps_private.key ]; then
+    echo "Error: VPS private key not found. Please run Step 1 on this VPS first." >&2
+    exit 1
+  fi
+  install_packages iptables-persistent curl
+
   read -p "Paste the Proxmox Public Key from Step 2: " WIREGUARD_PROXMOX_PUBLIC_KEY < /dev/tty
   read -p "Enter your Proxmox server's public IP or DDNS hostname: " PROXMOX_ENDPOINT < /dev/tty
   read -p "Enter the public IP of this VPS: " VPS_PUBLIC_IP < /dev/tty
@@ -148,9 +191,6 @@ vps_complete() {
     echo "Error: Missing required information." >&2
     exit 1
   fi
-
-  echo "Installing prerequisite packages..."
-  apt-get update >/dev/null && apt-get install -y iptables-persistent curl >/dev/null
 
   echo "Creating final WireGuard configuration..."
   cat > /etc/wireguard/wg0.conf << EOL
