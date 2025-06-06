@@ -59,6 +59,10 @@ vps_init() {
   install_packages wireguard curl whiptail
 
   VPS_PUBLIC_INTERFACE=$(whiptail --title "VPS Setup" --inputbox "Enter the public network interface of your VPS:" 10 60 "eth0" 3>&1 1>&2 2>&3)
+  if [ -z "$VPS_PUBLIC_INTERFACE" ]; then
+    whiptail --title "Error" --msgbox "Input cannot be empty." 8 78
+    exit 1
+  fi
   WIREGUARD_PORT="51820"
   WIREGUARD_VPS_TUNNEL_IP="10.0.0.1"
 
@@ -86,8 +90,14 @@ proxmox_init() {
   WIREGUARD_PORT=$(whiptail --title "Proxmox Setup" --inputbox "Enter the WireGuard port from Step 1:" 10 60 "51820" 3>&1 1>&2 2>&3)
   DNS_SERVER=$(whiptail --title "Proxmox Setup" --inputbox "Enter DNS server for the tunnel interface:" 10 60 "1.1.1.1" 3>&1 1>&2 2>&3)
 
+  if [ -z "$VPS_ENDPOINT" ] || [ -z "$WIREGUARD_VPS_PUBLIC_KEY" ] || [ -z "$VM_PUBLIC_IP" ] || [ -z "$WIREGUARD_PORT" ] || [ -z "$DNS_SERVER" ]; then
+    whiptail --title "Error" --msgbox "All fields are mandatory. Aborting." 8 78
+    exit 1
+  fi
+
   WIREGUARD_PROXMOX_TUNNEL_IP="10.0.0.2"
   TUNNEL_BRIDGE="vmbr1"
+  WIREGUARD_VPS_TUNNEL_IP="10.0.0.1"
 
   whiptail --title "Proxmox Setup" --infobox "Generating WireGuard keys for Proxmox..." 8 78
   wg genkey | tee /etc/wireguard/proxmox_private.key | wg pubkey > /etc/wireguard/proxmox_public.key
@@ -99,15 +109,30 @@ proxmox_init() {
 Address = ${WIREGUARD_PROXMOX_TUNNEL_IP}/24
 PrivateKey = $(cat /etc/wireguard/proxmox_private.key)
 DNS = ${DNS_SERVER}
+Table = off
+
+# --- Policy Routing for the VM ---
+# When the interface comes up, create a new routing table that sends all traffic
+# via the WireGuard tunnel. Then add a rule that says any traffic coming *from*
+# the VM's public IP should use this new routing table.
+# This leaves the Proxmox host's main routing table untouched.
+PostUp = ip rule add from ${VM_PUBLIC_IP} table 123
+PostUp = ip route add default via ${WIREGUARD_VPS_TUNNEL_IP} dev wg0 table 123
 PostUp = iptables -A FORWARD -i ${TUNNEL_BRIDGE} -o wg0 -j ACCEPT
 PostUp = iptables -A FORWARD -i wg0 -o ${TUNNEL_BRIDGE} -m state --state RELATED,ESTABLISHED -j ACCEPT
 PostUp = iptables -t nat -A POSTROUTING -s ${VM_PUBLIC_IP} -o wg0 -j MASQUERADE
+
+PostDown = ip rule del from ${VM_PUBLIC_IP} table 123
+PostDown = ip route del default via ${WIREGUARD_VPS_TUNNEL_IP} dev wg0 table 123
 PostDown = iptables -D FORWARD -i ${TUNNEL_BRIDGE} -o wg0 -j ACCEPT
 PostDown = iptables -D FORWARD -i wg0 -o ${TUNNEL_BRIDGE} -m state --state RELATED,ESTABLISHED -j ACCEPT
 PostDown = iptables -t nat -D POSTROUTING -s ${VM_PUBLIC_IP} -o wg0 -j MASQUERADE
+
 [Peer]
 PublicKey = ${WIREGUARD_VPS_PUBLIC_KEY}
 Endpoint = ${VPS_ENDPOINT}:${WIREGUARD_PORT}
+# 0.0.0.0/0 is needed here so WireGuard knows it's *allowed* to encrypt traffic for any destination.
+# The `Table = off` and policy routing rules prevent this from hijacking the host's route.
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOL
@@ -150,6 +175,11 @@ vps_complete() {
   VPS_PUBLIC_IP=$(whiptail --title "VPS Completion" --inputbox "Enter the public IP of this VPS:" 10 60 "" 3>&1 1>&2 2>&3)
   VPS_PUBLIC_INTERFACE=$(whiptail --title "VPS Completion" --inputbox "Enter the public network interface of this VPS:" 10 60 "eth0" 3>&1 1>&2 2>&3)
   
+  if [ -z "$WIREGUARD_PROXMOX_PUBLIC_KEY" ] || [ -z "$PROXMOX_ENDPOINT" ] || [ -z "$VPS_PUBLIC_IP" ] || [ -z "$VPS_PUBLIC_INTERFACE" ]; then
+    whiptail --title "Error" --msgbox "All fields are mandatory. Aborting." 8 78
+    exit 1
+  fi
+
   WIREGUARD_PORT="51820"
   WIREGUARD_VPS_TUNNEL_IP="10.0.0.1"
   WIREGUARD_PROXMOX_TUNNEL_IP="10.0.0.2"
@@ -188,9 +218,14 @@ manage_ports_vps() {
     fi
     source /etc/wireguard/wirewarp.conf
 
-    ACTION=$(whiptail --title "Port Management" --menu "Choose an action:" 15 60 2 "add" "Add a new port forward" "remove" "Remove an existing port forward" 3>&1 1>&2 2>&3)
-    PROTO=$(whiptail --title "Port Management" --menu "Choose a protocol:" 15 60 3 "tcp" "" "udp" "" "both" "Forward both TCP and UDP" 3>&1 1>&2 2>&3)
+    ACTION=$(whiptail --title "Port Management" --menu "Choose an action:" 15 60 2 "add" "Add a new port forward" "remove" "Remove an existing port forward" 3>&2 2>&1 1>&3)
+    PROTO=$(whiptail --title "Port Management" --menu "Choose a protocol:" 15 60 3 "tcp" "" "udp" "" "both" "Forward both TCP and UDP" 3>&2 2>&1 1>&3)
     PORT=$(whiptail --title "Port Management" --inputbox "Enter the port number:" 10 60 "" 3>&1 1>&2 2>&3)
+
+    if [ -z "$ACTION" ] || [ -z "$PROTO" ] || [ -z "$PORT" ]; then
+      whiptail --title "Error" --msgbox "All fields are mandatory. Aborting." 8 78
+      exit 1
+    fi
 
     manage_rule() {
         local l_action=$1
