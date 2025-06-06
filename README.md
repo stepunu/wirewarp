@@ -16,21 +16,20 @@ The setup consists of three main components:
 
 ## How to Use
 
-This project now uses a single, interactive script. You can run it directly from your Gitea server or any shell using `curl`.
+This project now uses a single, interactive script. You can run it directly from your Gitea server or any shell.
 
-**Run the script using:**
+**To run the script, use the following command.** It needs to be run with root privileges.
 
-The script needs to be run with root privileges.
-
-*   On most systems, you can use `sudo`:
+*   On systems that use `sudo`:
     ```bash
-    curl -sSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh | sudo bash
+    bash -c "$(curl -fsSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh)" --
     ```
 
-*   On systems without `sudo` (like Proxmox, where you are often logged in as `root`), run the command directly:
+*   On systems where you are already the `root` user (like Proxmox):
     ```bash
-    curl -sSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh | bash
+    bash -c "$(curl -fsSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh)" --
     ```
+    *(Note: You can use the same command for both, but `sudo` is omitted if you're already root).*
 
 The script will present a menu. Follow the steps in order for the initial setup.
 
