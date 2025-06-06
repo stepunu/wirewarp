@@ -16,22 +16,19 @@ The setup consists of three main components:
 
 ## How to Use
 
-This project now uses a single, interactive script. You can run it directly from your Gitea server or any shell.
+This project uses a single, interactive script. To run it, use the following command. It needs to be run with root privileges.
 
-**To run the script, use the following command.** It needs to be run with root privileges.
-
-*   On systems that use `sudo`:
+*   On systems that use `sudo` (like Ubuntu):
     ```bash
-    bash -c "$(curl -fsSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh)" --
+    sudo bash -c "$(curl -fsSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh)"
     ```
 
-*   On systems where you are already the `root` user (like Proxmox):
+*   On systems where you are already `root` (like Proxmox):
     ```bash
-    bash -c "$(curl -fsSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh)" --
+    bash -c "$(curl -fsSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh)"
     ```
-    *(Note: You can use the same command for both, but `sudo` is omitted if you're already root).*
 
-The script will present a menu. Follow the steps in order for the initial setup.
+The script will launch a menu-driven interface. Follow the steps in order for the initial setup.
 
 ### Setup Workflow
 1.  **[VPS] Step 1: Initialize VPS**

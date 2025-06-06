@@ -2,7 +2,8 @@
 
 # WireWarp: A unified script to set up a WireGuard transparent tunnel using a TUI.
 
-set -e
+set -euo pipefail
+shopt -s inherit_errexit nullglob
 
 # --- Helper Functions ---
 
@@ -24,7 +25,8 @@ install_packages() {
   done
 
   if [ ${#packages_to_install[@]} -gt 0 ]; then
-    whiptail --title "Package Installation" --infobox "Installing missing packages: ${packages_to_install[*]}..." 8 78
+    # Use echo for this initial step as whiptail might not be installed yet.
+    echo "Installing missing packages: ${packages_to_install[*]}..."
     apt-get update >/dev/null
     apt-get install -y "${packages_to_install[@]}" >/dev/null
   fi
@@ -33,7 +35,7 @@ install_packages() {
 # Function to check for existing WireWarp/WireGuard configs before setup
 check_existing_config() {
     if [ -f /etc/wireguard/wg0.conf ] || [ -f /etc/wireguard/vps_private.key ] || [ -f /etc/wireguard/proxmox_private.key ]; then
-        if (whiptail --title "Existing Configuration Found" --yesno "WARNING: An existing WireGuard configuration was found.\n\nContinuing will overwrite the existing wg0.conf and any related keys.\n\nDo you want to continue and overwrite?" 12 78); then
+        if (whiptail --title "Existing Configuration Found" --yesno "WARNING: An existing WireGuard configuration was found.\n\nContinuing will overwrite the existing wg0.conf and any related keys.\n\nDo you want to continue and overwrite?" 12 78 3>&2 2>&1 1>&3); then
             whiptail --title "Overwrite Confirmed" --infobox "Stopping WireGuard service and removing old configuration..." 8 78
             systemctl stop wg-quick@wg0 >/dev/null 2>&1 || true
             rm -f /etc/wireguard/*.key /etc/wireguard/wg0.conf /etc/wireguard/wirewarp.conf
@@ -292,7 +294,7 @@ while true; do
     "4" "[VPS] Manage Forwarded Ports" \
     "5" "[All] Check Tunnel Status" \
     "6" "[All] Uninstall WireWarp" \
-    "7" "Exit" 3>&1 1>&2 2>&3)
+    "7" "Exit" 3>&2 2>&1 1>&3)
   
   case $CHOICE in
     1) vps_init ;;
