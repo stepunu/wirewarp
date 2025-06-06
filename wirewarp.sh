@@ -161,39 +161,80 @@ AllowedIPs = ${WIREGUARD_PROXMOX_TUNNEL_IP}/32, ${VPS_PUBLIC_IP}/32
 EOL
 
   echo "Installing port management script to /usr/local/bin/manage-ports.sh..."
-  cat > /usr/local/bin/manage-ports.sh << 'EOL_MANAGE'
+  cat > /usr/local/bin/manage-ports.sh << EOL_MANAGE
 #!/bin/bash
 set -e
+
+# --- Configuration (injected by WireWarp script) ---
 VPS_PUBLIC_INTERFACE="${VPS_PUBLIC_INTERFACE}"
 PROXMOX_TUNNEL_IP="${WIREGUARD_PROXMOX_TUNNEL_IP}"
+# --- End Configuration ---
+
 ACTION=\$1
 PROTO=\$2
 PORT=\$3
-if [ "\$(id -u)" -ne 0 ]; then echo "This script must be run as root." >&2; exit 1; fi
+
+# Function to add or remove a single iptables rule
+manage_rule() {
+  local l_action=\$1
+  local l_proto=\$2
+  local l_port=\$3
+
+  # Use grep-friendly rule for checking to avoid issues with iptables-save format
+  local grep_rule="-A PREROUTING -i \${VPS_PUBLIC_INTERFACE} -p \${l_proto} -m \${l_proto} --dport \${l_port} -j DNAT --to-destination \${PROXMOX_TUNNEL_IP}"
+  local rule_exists=false
+  if iptables-save | grep -- "\$grep_rule" > /dev/null 2>&1; then
+    rule_exists=true
+  fi
+
+  if [ "\$l_action" == "add" ]; then
+    if [ "\$rule_exists" = true ]; then
+      echo "Rule for \${l_proto}/\${l_port} already exists."
+    else
+      iptables -t nat -A PREROUTING -i \${VPS_PUBLIC_INTERFACE} -p \${l_proto} --dport \${l_port} -j DNAT --to-destination \${PROXMOX_TUNNEL_IP}
+      echo "Port \${l_proto}/\${l_port} forwarded to \${PROXMOX_TUNNEL_IP}."
+    fi
+  elif [ "\$l_action" == "remove" ]; then
+    if [ "\$rule_exists" = true ]; then
+      iptables -t nat -D PREROUTING -i \${VPS_PUBLIC_INTERFACE} -p \${l_proto} --dport \${l_port} -j DNAT --to-destination \${PROXMOX_TUNNEL_IP}
+      echo "Port forwarding for \${l_proto}/\${l_port} removed."
+    else
+      echo "Rule for \${l_proto}/\${l_port} does not exist."
+    fi
+  fi
+}
+
+if [ "\$(id -u)" -ne 0 ]; then
+  echo "This script must be run as root." >&2
+  exit 1
+fi
+
 if [ -z "\$ACTION" ] || [ -z "\$PROTO" ] || [ -z "\$PORT" ]; then
-  echo "Usage: \$0 <add|remove> <tcp|udp> <port>"; exit 1;
+  echo "Usage: \$0 <add|remove> <tcp|udp|both> <port>"
+  echo "Example: \$0 add both 27016"
+  exit 1
 fi
-RULE_SPEC="-t nat -A PREROUTING -i \${VPS_PUBLIC_INTERFACE} -p \${PROTO} --dport \${PORT} -j DNAT --to-destination \${PROXMOX_TUNNEL_IP}"
-GREP_RULE="-A PREROUTING -i \${VPS_PUBLIC_INTERFACE} -p \${PROTO} -m \${PROTO} --dport \${PORT} -j DNAT --to-destination \${PROXMOX_TUNNEL_IP}"
-if [ "\$ACTION" == "add" ]; then
-  if ! iptables-save | grep -- "\$GREP_RULE" > /dev/null 2>&1; then
-    iptables \$RULE_SPEC
-    netfilter-persistent save >/dev/null
-    echo "Port \${PROTO}/\${PORT} forwarded to \${PROXMOX_TUNNEL_IP}."
-  else
-    echo "Rule for \${PROTO}/\${PORT} already exists."
-  fi
-elif [ "\$ACTION" == "remove" ]; then
-  if iptables-save | grep -- "\$GREP_RULE" > /dev/null 2>&1; then
-    iptables -t nat -D PREROUTING -i \${VPS_PUBLIC_INTERFACE} -p \${PROTO} --dport \${PORT} -j DNAT --to-destination \${PROXMOX_TUNNEL_IP}
-    netfilter-persistent save >/dev/null
-    echo "Port forwarding for \${PROTO}/\${PORT} removed."
-  else
-    echo "Rule for \${PROTO}/\${PORT} does not exist."
-  fi
-else
-  echo "Invalid action. Use 'add' or 'remove'." >&2; exit 1;
-fi
+
+case "\$PROTO" in
+  tcp|udp)
+    manage_rule "\$ACTION" "\$PROTO" "\$PORT"
+    ;;
+  both)
+    echo "Managing rules for both TCP and UDP on port \${PORT}..."
+    manage_rule "\$ACTION" "tcp" "\$PORT"
+    manage_rule "\$ACTION" "udp" "\$PORT"
+    ;;
+  *)
+    echo "Invalid protocol. Use 'tcp', 'udp', or 'both'." >&2
+    exit 1
+    ;;
+esac
+
+# Save the rules once after all operations have been attempted
+echo "Saving persistent firewall rules..."
+netfilter-persistent save >/dev/null
+echo "Done."
+
 EOL_MANAGE
   chmod +x /usr/local/bin/manage-ports.sh
 

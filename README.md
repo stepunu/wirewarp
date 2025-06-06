@@ -61,14 +61,19 @@ After the scripts are done, configure your Windows VM:
 
 ### Port Forwarding
 
-To open ports for your game server, SSH into your **remote VPS** and use the helper script.
+To open ports for your game server, SSH into your **remote VPS** and use the helper script. The script can manage `tcp`, `udp`, or `both` protocols simultaneously.
 
-**To add a port:**
+**To add a port for both TCP and UDP (ideal for game servers):**
 ```bash
-/usr/local/bin/manage-ports.sh add tcp 27016
+/usr/local/bin/manage-ports.sh add both 27016
+```
+
+**To add a single port:**
+```bash
+/usr/local/bin/manage-ports.sh add tcp 80
 ```
 
 **To remove a port:**
 ```bash
-/usr/local/bin/manage-ports.sh remove tcp 27016
+/usr/local/bin/manage-ports.sh remove both 27016
 ``` 
