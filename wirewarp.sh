@@ -44,14 +44,14 @@ cleanup_corrupted_files() {
         find /etc/wireguard/peers -type f ! -name "*.conf" ! -name "*.info" -delete 2>/dev/null || true
         
         # Remove any .info files that don't contain PEER_NAME
-        for f in /etc/wireguard/peers/*.info 2>/dev/null; do
+        for f in /etc/wireguard/peers/*.info; do
             if [ -f "$f" ] && ! grep -q '^PEER_NAME=' "$f" 2>/dev/null; then
                 rm -f "$f" 2>/dev/null || true
             fi
         done
         
         # Remove any .conf files that don't contain PublicKey
-        for f in /etc/wireguard/peers/*.conf 2>/dev/null; do
+        for f in /etc/wireguard/peers/*.conf; do
             if [ -f "$f" ] && ! grep -q '^PublicKey =' "$f" 2>/dev/null; then
                 rm -f "$f" 2>/dev/null || true
             fi
