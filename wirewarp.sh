@@ -106,8 +106,8 @@ vps_init() {
 Address = ${WIREGUARD_VPS_IP}/24
 ListenPort = ${WIREGUARD_PORT}
 PrivateKey = $(cat /etc/wireguard/vps_private.key)
-PostUp = iptables -A FORWARD -i %i -o ${VPS_PUBLIC_INTERFACE} -j ACCEPT; iptables -A FORWARD -i ${VPS_PUBLIC_INTERFACE} -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -A POSTROUTING -o ${VPS_PUBLIC_INTERFACE} -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -o ${VPS_PUBLIC_INTERFACE} -j ACCEPT; iptables -D FORWARD -i ${VPS_PUBLIC_INTERFACE} -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -D POSTROUTING -o ${VPS_PUBLIC_INTERFACE} -j MASQUERADE
+PostUp = iptables -A FORWARD -i %i -o ${VPS_PUBLIC_INTERFACE} -j ACCEPT; iptables -A FORWARD -i ${VPS_PUBLIC_INTERFACE} -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o ${VPS_PUBLIC_INTERFACE} -j MASQUERADE; ip route add 10.99.0.0/16 dev %i
+PostDown = iptables -D FORWARD -i %i -o ${VPS_PUBLIC_INTERFACE} -j ACCEPT; iptables -D FORWARD -i ${VPS_PUBLIC_INTERFACE} -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o ${VPS_PUBLIC_INTERFACE} -j MASQUERADE; ip route del 10.99.0.0/16 dev %i || true
 EOL
 
   # Save VPS configuration for later use
@@ -454,6 +454,49 @@ view_ports_vps() {
     fi
 }
 
+# Function to fix routing issues in existing installations
+fix_routing() {
+    check_root
+    if [ ! -f /etc/wireguard/wg0.conf ]; then
+        whiptail --title "Error" --msgbox "No WireGuard configuration found. Please initialize first." 8 78
+        return
+    fi
+    
+    if [ ! -f /etc/wireguard/wirewarp.conf ]; then
+        whiptail --title "Error" --msgbox "WireWarp configuration not found. This might not be a WireWarp installation." 8 78
+        return
+    fi
+    
+    source /etc/wireguard/wirewarp.conf
+    
+    # Check if route already exists
+    if ip route show | grep -q "10.99.0.0/16 dev wg0"; then
+        whiptail --title "Info" --msgbox "VM network routing is already configured correctly." 8 78
+        return
+    fi
+    
+    if (whiptail --title "Fix Routing Issue" --yesno "This will update your WireGuard configuration to fix port forwarding routing issues.\n\nThis will:\n• Add VM network routes (10.99.0.0/16)\n• Update FORWARD rules to allow new connections\n• Restart WireGuard service\n\nContinue?" 15 78); then
+        whiptail --title "Fixing Routing" --infobox "Updating WireGuard configuration..." 8 78
+        
+        # Stop WireGuard
+        systemctl stop wg-quick@wg0 >/dev/null 2>&1 || true
+        
+        # Update the configuration
+        sed -i "s|PostUp = .*|PostUp = iptables -A FORWARD -i %i -o ${VPS_PUBLIC_INTERFACE} -j ACCEPT; iptables -A FORWARD -i ${VPS_PUBLIC_INTERFACE} -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o ${VPS_PUBLIC_INTERFACE} -j MASQUERADE; ip route add 10.99.0.0/16 dev %i|" /etc/wireguard/wg0.conf
+        sed -i "s|PostDown = .*|PostDown = iptables -D FORWARD -i %i -o ${VPS_PUBLIC_INTERFACE} -j ACCEPT; iptables -D FORWARD -i ${VPS_PUBLIC_INTERFACE} -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o ${VPS_PUBLIC_INTERFACE} -j MASQUERADE; ip route del 10.99.0.0/16 dev %i \|\| true|" /etc/wireguard/wg0.conf
+        
+        # Restart WireGuard
+        systemctl start wg-quick@wg0
+        
+        # Test routing
+        if ip route show | grep -q "10.99.0.0/16 dev wg0"; then
+            whiptail --title "✅ Routing Fixed" --msgbox "Routing has been fixed successfully!\n\nVM network routes are now properly configured.\nPort forwarding should work correctly now." 10 78
+        else
+            whiptail --title "⚠️ Warning" --msgbox "Configuration updated but route may not be active.\nPlease check 'ip route show' and restart WireGuard if needed." 8 78
+        fi
+    fi
+}
+
 # Function to check WireGuard status
 check_status() {
     check_root
@@ -466,6 +509,18 @@ check_status() {
     if [ -z "$wg_status" ]; then
         wg_status="WireGuard interface (wg0) is not active or does not exist."
     fi
+    
+    # Also show routing information for VPS installations
+    if [ -f /etc/wireguard/vps_private.key ]; then
+        vm_route_status=""
+        if ip route show | grep -q "10.99.0.0/16 dev wg0"; then
+            vm_route_status="\n\n✅ VM Network Routing: CONFIGURED"
+        else
+            vm_route_status="\n\n❌ VM Network Routing: MISSING\n(Use 'Fix Routing Issues' option if port forwarding doesn't work)"
+        fi
+        wg_status="${wg_status}${vm_route_status}"
+    fi
+    
     whiptail --title "WireGuard Status" --msgbox "$wg_status" 20 78
 }
 
@@ -522,14 +577,15 @@ install_packages whiptail
 cleanup_corrupted_files  # Clean up any corrupted files from previous failed runs
 
 while true; do
-  CHOICE=$(whiptail --title "WireWarp - Multi-Tunnel Manager" --menu "What do you want to do?" 20 78 7 \
+  CHOICE=$(whiptail --title "WireWarp - Multi-Tunnel Manager" --menu "What do you want to do?" 22 78 8 \
     "1" "[VPS] Initialize Server" \
     "2" "[VPS] Add New Peer" \
     "3" "[VPS] Remove Peer" \
     "4" "[VPS] Manage Ports for a Peer" \
     "5" "[VPS] View Ports for a Peer" \
-    "6" "[All] Check Tunnel Status" \
-    "7" "[All] Uninstall WireWarp" 3>&2 2>&1 1>&3)
+    "6" "[VPS] Fix Routing Issues" \
+    "7" "[All] Check Tunnel Status" \
+    "8" "[All] Uninstall WireWarp" 3>&2 2>&1 1>&3)
   
   case $CHOICE in
     1) vps_init ;;
@@ -537,8 +593,9 @@ while true; do
     3) remove_peer_vps ;;
     4) manage_ports_vps ;;
     5) view_ports_vps ;;
-    6) check_status ;;
-    7) uninstall ;;
+    6) fix_routing ;;
+    7) check_status ;;
+    8) uninstall ;;
     *) break ;; # Exit on Esc/Cancel
   esac
 done 
