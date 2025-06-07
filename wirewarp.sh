@@ -37,8 +37,33 @@ install_packages() {
   fi
 }
 
+# Function to clean up any corrupted or invalid files
+cleanup_corrupted_files() {
+    if [ -d /etc/wireguard/peers ]; then
+        # Remove any files that don't match our expected patterns or contain invalid data
+        find /etc/wireguard/peers -type f ! -name "*.conf" ! -name "*.info" -delete 2>/dev/null || true
+        
+        # Remove any .info files that don't contain PEER_NAME
+        for f in /etc/wireguard/peers/*.info 2>/dev/null; do
+            if [ -f "$f" ] && ! grep -q '^PEER_NAME=' "$f" 2>/dev/null; then
+                rm -f "$f" 2>/dev/null || true
+            fi
+        done
+        
+        # Remove any .conf files that don't contain PublicKey
+        for f in /etc/wireguard/peers/*.conf 2>/dev/null; do
+            if [ -f "$f" ] && ! grep -q '^PublicKey =' "$f" 2>/dev/null; then
+                rm -f "$f" 2>/dev/null || true
+            fi
+        done
+    fi
+}
+
 # Function to check for existing WireWarp/WireGuard configs before setup
 check_existing_config() {
+    # Clean up any corrupted files first
+    cleanup_corrupted_files
+    
     # This function is now only relevant for a full uninstall/reinstall.
     # Peer management will handle its own files.
     if [ "$1" == "init" ]; then
@@ -109,8 +134,18 @@ add_peer_vps() {
   PEER_NAME=$(whiptail --title "Add New Peer" --inputbox "Enter a unique name for this peer (e.g., proxmox_home, office_pc):" 10 60 "" 3>&1 1>&2 2>&3)
   if [ -z "$PEER_NAME" ]; then whiptail --title "Error" --msgbox "Peer name cannot be empty." 8 78; exit 1; fi
   
-  LAST_PEER_NUM=$(ls /etc/wireguard/peers/ 2>/dev/null | grep -o '^[0-9]\+' | sort -n | tail -1)
-  [ -z "$LAST_PEER_NUM" ] && LAST_PEER_NUM=1
+  # Find the highest peer number from existing .info files
+  LAST_PEER_NUM=1
+  if [ -d /etc/wireguard/peers ]; then
+    for f in /etc/wireguard/peers/*.info; do
+      if [ -f "$f" ]; then
+        local peer_num=$(basename "$f" | grep -o '^[0-9]\+' 2>/dev/null || echo "0")
+        if [[ "$peer_num" =~ ^[0-9]+$ ]] && [ "$peer_num" -gt "$LAST_PEER_NUM" ]; then
+          LAST_PEER_NUM=$peer_num
+        fi
+      fi
+    done
+  fi
   NEXT_PEER_NUM=$((LAST_PEER_NUM + 1))
 
   WIREGUARD_PROXMOX_IP="10.0.0.${NEXT_PEER_NUM}"
@@ -151,17 +186,29 @@ add_peer_vps() {
 # Function to remove a peer
 remove_peer_vps() {
     check_root
-    if [ -z "$(ls -A /etc/wireguard/peers/*.info 2>/dev/null)" ]; then
+    
+    # Check if peers directory exists and has .info files
+    if [ ! -d /etc/wireguard/peers ] || [ -z "$(find /etc/wireguard/peers -name "*.info" -type f 2>/dev/null)" ]; then
         whiptail --title "Info" --msgbox "No peers found to remove." 8 78
         return
     fi
 
     local options=()
     for f in /etc/wireguard/peers/*.info; do
-        local peer_name=$(grep 'PEER_NAME' "$f" | cut -d'=' -f2)
-        local base_filename=$(basename "$f" .info)
-        options+=("$base_filename" "Peer: ${peer_name}")
+        # Ensure the file exists and is a regular file
+        if [ -f "$f" ]; then
+            local peer_name=$(grep '^PEER_NAME=' "$f" 2>/dev/null | cut -d'=' -f2)
+            local base_filename=$(basename "$f" .info)
+            if [ -n "$peer_name" ]; then
+                options+=("$base_filename" "Peer: ${peer_name}")
+            fi
+        fi
     done
+    
+    if [ ${#options[@]} -eq 0 ]; then
+        whiptail --title "Info" --msgbox "No valid peers found to remove." 8 78
+        return
+    fi
 
     PEER_TO_REMOVE=$(whiptail --title "Remove Peer" --menu "Select a peer to remove:" 20 78 12 "${options[@]}" 3>&2 2>&1 1>&3) || true
     
@@ -179,17 +226,29 @@ remove_peer_vps() {
 # Function to manage ports for a specific peer
 manage_ports_vps() {
     check_root
-    if [ -z "$(ls -A /etc/wireguard/peers/*.info 2>/dev/null)" ]; then
+    
+    # Check if peers directory exists and has .info files
+    if [ ! -d /etc/wireguard/peers ] || [ -z "$(find /etc/wireguard/peers -name "*.info" -type f 2>/dev/null)" ]; then
         whiptail --title "Info" --msgbox "No peers found. Please add a peer before managing ports." 8 78
         return
     fi
     
     local options=()
     for f in /etc/wireguard/peers/*.info; do
-        local peer_name=$(grep 'PEER_NAME' "$f" | cut -d'=' -f2)
-        local base_filename=$(basename "$f")
-        options+=("$base_filename" "Peer: ${peer_name}")
+        # Ensure the file exists and is a regular file
+        if [ -f "$f" ]; then
+            local peer_name=$(grep '^PEER_NAME=' "$f" 2>/dev/null | cut -d'=' -f2)
+            local base_filename=$(basename "$f")
+            if [ -n "$peer_name" ]; then
+                options+=("$base_filename" "Peer: ${peer_name}")
+            fi
+        fi
     done
+    
+    if [ ${#options[@]} -eq 0 ]; then
+        whiptail --title "Info" --msgbox "No valid peers found for port management." 8 78
+        return
+    fi
 
     PEER_INFO_FILE=$(whiptail --title "Manage Ports" --menu "Select a peer to manage ports for:" 20 78 12 "${options[@]}" 3>&2 2>&1 1>&3) || true
     
@@ -250,17 +309,29 @@ manage_ports_vps() {
 # Function to view ports for a specific peer
 view_ports_vps() {
     check_root
-    if [ -z "$(ls -A /etc/wireguard/peers/*.info 2>/dev/null)" ]; then
+    
+    # Check if peers directory exists and has .info files
+    if [ ! -d /etc/wireguard/peers ] || [ -z "$(find /etc/wireguard/peers -name "*.info" -type f 2>/dev/null)" ]; then
         whiptail --title "Info" --msgbox "No peers found to view ports for." 8 78
         return
     fi
     
     local options=()
     for f in /etc/wireguard/peers/*.info; do
-        local peer_name=$(grep 'PEER_NAME' "$f" | cut -d'=' -f2)
-        local base_filename=$(basename "$f")
-        options+=("$base_filename" "Peer: ${peer_name}")
+        # Ensure the file exists and is a regular file
+        if [ -f "$f" ]; then
+            local peer_name=$(grep '^PEER_NAME=' "$f" 2>/dev/null | cut -d'=' -f2)
+            local base_filename=$(basename "$f")
+            if [ -n "$peer_name" ]; then
+                options+=("$base_filename" "Peer: ${peer_name}")
+            fi
+        fi
     done
+    
+    if [ ${#options[@]} -eq 0 ]; then
+        whiptail --title "Info" --msgbox "No valid peers found to view ports for." 8 78
+        return
+    fi
 
     PEER_INFO_FILE=$(whiptail --title "View Ports" --menu "Select a peer to view ports for:" 20 78 12 "${options[@]}" 3>&2 2>&1 1>&3) || true
 
@@ -330,6 +401,7 @@ uninstall() {
 # --- Main Menu ---
 check_root
 install_packages whiptail
+cleanup_corrupted_files  # Clean up any corrupted files from previous failed runs
 
 while true; do
   CHOICE=$(whiptail --title "WireWarp - Multi-Tunnel Manager" --menu "What do you want to do?" 20 78 7 \
