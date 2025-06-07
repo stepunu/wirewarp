@@ -32,6 +32,7 @@ apt-get update >/dev/null
 DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard iptables-persistent >/dev/null
 
 echo "--- Configuring WireGuard Interface (wg0) ---"
+mkdir -p /etc/wireguard
 cat > /etc/wireguard/wg0.conf << EOL
 [Interface]
 Address = ${PEER_TUNNEL_IP}/24
