@@ -61,8 +61,8 @@ check_existing_config() {
 # Step 1: Initialize VPS (Server-side)
 vps_init() {
   check_root
+  install_packages wireguard curl whiptail netfilter-persistent
   check_existing_config "init"
-  install_packages wireguard curl whiptail
 
   VPS_PUBLIC_INTERFACE=$(whiptail --title "VPS Setup (Step 1)" --inputbox "Enter the public network interface of your VPS:" 10 60 "eth0" 3>&1 1>&2 2>&3)
   WIREGUARD_PORT="51820"
@@ -84,6 +84,10 @@ PrivateKey = $(cat /etc/wireguard/vps_private.key)
 PostUp = iptables -A FORWARD -i %i -o ${VPS_PUBLIC_INTERFACE} -j ACCEPT; iptables -A FORWARD -i ${VPS_PUBLIC_INTERFACE} -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -A POSTROUTING -o ${VPS_PUBLIC_INTERFACE} -j MASQUERADE
 PostDown = iptables -D FORWARD -i %i -o ${VPS_PUBLIC_INTERFACE} -j ACCEPT; iptables -D FORWARD -i ${VPS_PUBLIC_INTERFACE} -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -D POSTROUTING -o ${VPS_PUBLIC_INTERFACE} -j MASQUERADE
 EOL
+
+  # Save VPS configuration for later use
+  echo "VPS_PUBLIC_INTERFACE=${VPS_PUBLIC_INTERFACE}" > /etc/wireguard/wirewarp.conf
+  echo "WIREGUARD_PORT=${WIREGUARD_PORT}" >> /etc/wireguard/wirewarp.conf
 
   systemctl enable wg-quick@wg0 >/dev/null
   systemctl restart wg-quick@wg0
@@ -147,26 +151,26 @@ add_peer_vps() {
 # Function to remove a peer
 remove_peer_vps() {
     check_root
-    if [ -z "$(ls -A /etc/wireguard/peers/*.conf 2>/dev/null)" ]; then
+    if [ -z "$(ls -A /etc/wireguard/peers/*.info 2>/dev/null)" ]; then
         whiptail --title "Info" --msgbox "No peers found to remove." 8 78
         return
     fi
 
     local options=()
-    for f in /etc/wireguard/peers/*.conf; do
-        local peer_name=$(grep '# Name:' "$f" | cut -d' ' -f3)
-        local base_filename=$(basename "$f")
+    for f in /etc/wireguard/peers/*.info; do
+        local peer_name=$(grep 'PEER_NAME' "$f" | cut -d'=' -f2)
+        local base_filename=$(basename "$f" .info)
         options+=("$base_filename" "Peer: ${peer_name}")
     done
 
     PEER_TO_REMOVE=$(whiptail --title "Remove Peer" --menu "Select a peer to remove:" 20 78 12 "${options[@]}" 3>&2 2>&1 1>&3) || true
     
     if [ -n "$PEER_TO_REMOVE" ]; then
-        local peer_public_key=$(grep 'PublicKey' "/etc/wireguard/peers/${PEER_TO_REMOVE}" | awk '{print $3}')
+        local peer_public_key=$(grep 'PublicKey' "/etc/wireguard/peers/${PEER_TO_REMOVE}.conf" | awk '{print $3}')
         whiptail --title "Removing Peer" --infobox "Removing peer ${peer_public_key}..." 8 78
         wg set wg0 peer "${peer_public_key}" remove
-        rm "/etc/wireguard/peers/${PEER_TO_REMOVE}"
-        rm "/etc/wireguard/peers/${PEER_TO_REMOVE%.conf}.info"
+        rm "/etc/wireguard/peers/${PEER_TO_REMOVE}.conf"
+        rm "/etc/wireguard/peers/${PEER_TO_REMOVE}.info"
         wg-quick save wg0
         whiptail --title "Success" --msgbox "Peer ${PEER_TO_REMOVE} and its configurations have been removed." 8 78
     fi
@@ -191,6 +195,12 @@ manage_ports_vps() {
     
     if [ -n "$PEER_INFO_FILE" ]; then
         source "/etc/wireguard/peers/${PEER_INFO_FILE}"
+        
+        # Check if VPS is initialized
+        if [ ! -f /etc/wireguard/wirewarp.conf ]; then
+            whiptail --title "Error" --msgbox "VPS is not initialized. Please run Step 1 (Initialize Server) first." 8 78
+            return
+        fi
         source /etc/wireguard/wirewarp.conf # Get VPS_PUBLIC_INTERFACE
 
         ACTION=$(whiptail --title "Port Management for ${PEER_NAME}" --menu "Choose an action:" 15 60 2 "add" "Add a new port forward" "remove" "Remove an existing port forward" 3>&2 2>&1 1>&3) || true
@@ -227,7 +237,12 @@ manage_ports_vps() {
         esac
 
         whiptail --title "Port Management" --infobox "Saving persistent firewall rules..." 8 78
-        netfilter-persistent save >/dev/null
+        if command -v netfilter-persistent >/dev/null 2>&1; then
+            netfilter-persistent save >/dev/null
+        else
+            # Fallback for systems without netfilter-persistent
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+        fi
         whiptail --title "Success" --msgbox "Port rules updated successfully." 8 78
     fi
 }
@@ -251,6 +266,12 @@ view_ports_vps() {
 
     if [ -n "$PEER_INFO_FILE" ]; then
         source "/etc/wireguard/peers/${PEER_INFO_FILE}"
+        
+        # Check if VPS is initialized
+        if [ ! -f /etc/wireguard/wirewarp.conf ]; then
+            whiptail --title "Error" --msgbox "VPS is not initialized. Please run Step 1 (Initialize Server) first." 8 78
+            return
+        fi
         source /etc/wireguard/wirewarp.conf
         
         local rules=$(iptables-save | grep -- "-A PREROUTING -i ${VPS_PUBLIC_INTERFACE}" | grep -- "-j DNAT --to-destination ${VM_PRIVATE_IP}" || true)
@@ -288,7 +309,12 @@ uninstall() {
         systemctl disable wg-quick@wg0 >/dev/null 2>&1 || true
 
         if [ -f /etc/wireguard/vps_private.key ]; then
-            apt-get purge -y wireguard >/dev/null
+            # Remove iptables rules first
+            if [ -f /etc/wireguard/wirewarp.conf ]; then
+                source /etc/wireguard/wirewarp.conf
+                iptables -t nat -F PREROUTING 2>/dev/null || true
+            fi
+            apt-get purge -y wireguard netfilter-persistent >/dev/null
             rm -rf /etc/wireguard
             whiptail --title "Info" --msgbox "VPS cleanup complete." 8 78
         elif [ -f /etc/wireguard/proxmox_private.key ]; then
