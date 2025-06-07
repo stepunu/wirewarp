@@ -202,22 +202,23 @@ manage_ports_vps() {
     fi
 }
 
-# Function to view ports for a specific peer
+# Function to view forwarded ports on the VPS
 view_ports_vps() {
     check_root
-    PEER_INFO_FILE=$(ls /etc/wireguard/peers/*.info | xargs -n 1 basename | whiptail --title "View Ports" --menu "Select a peer to view ports for:" 20 78 12 3>&1 1>&2 2>&3)
+    if [ ! -f /etc/wireguard/wirewarp.conf ]; then
+        whiptail --title "Error" --msgbox "Could not find the WireWarp config file. Please run Step 3 on the VPS first." 8 78
+        exit 1
+    fi
+    source /etc/wireguard/wirewarp.conf
 
-    if [ -n "$PEER_INFO_FILE" ]; then
-        source "/etc/wireguard/peers/${PEER_INFO_FILE}"
-        source /etc/wireguard/wirewarp.conf
-        local rules=$(iptables-save | grep -- "-A PREROUTING -i ${VPS_PUBLIC_INTERFACE}" | grep -- "-j DNAT --to-destination ${VM_PRIVATE_IP}")
-        
-        if [ -z "$rules" ]; then
-            whiptail --title "Forwarded Ports" --msgbox "No active WireWarp port forwarding rules found." 10 78
-        else
-            local formatted_rules=$(echo "$rules" | awk '{print "Protocol: " $6 ", Port: " $10}')
-            whiptail --title "Active Forwarded Ports" --msgbox "The following ports are being forwarded to ${VM_PRIVATE_IP}:\n\n${formatted_rules}" 20 78
-        fi
+    # Add '|| true' to prevent the script from exiting if grep finds no matches
+    local rules=$(iptables-save | grep -- "-A PREROUTING -i ${VPS_PUBLIC_INTERFACE}" | grep -- "-j DNAT --to-destination ${VM_PRIVATE_IP}" || true)
+    
+    if [ -z "$rules" ]; then
+        whiptail --title "Forwarded Ports" --msgbox "No active WireWarp port forwarding rules found." 10 78
+    else
+        local formatted_rules=$(echo "$rules" | awk '{print "Protocol: " $6 ", Port: " $10}')
+        whiptail --title "Active Forwarded Ports" --msgbox "The following ports are being forwarded to ${VM_PRIVATE_IP}:\n\n${formatted_rules}" 20 78
     fi
 }
 
@@ -228,7 +229,11 @@ check_status() {
         whiptail --title "Error" --msgbox "WireGuard tools are not installed. Please run one of the setup steps first." 8 78
         exit 1
     fi
-    wg_status=$(wg show)
+    # Add '|| true' to prevent the script from exiting if wg show fails (e.g., interface is down)
+    wg_status=$(wg show 2>&1 || true)
+    if [ -z "$wg_status" ]; then
+        wg_status="WireGuard interface (wg0) is not active or does not exist."
+    fi
     whiptail --title "WireGuard Status" --msgbox "$wg_status" 20 78
 }
 
