@@ -112,21 +112,9 @@ DNS = ${DNS_SERVER}
 Table = off
 
 # --- Policy Routing for the VM ---
-# When the interface comes up, create a new routing table that sends all traffic
-# via the WireGuard tunnel. Then add a rule that says any traffic coming *from*
-# the VM's public IP should use this new routing table.
-# This leaves the Proxmox host's main routing table untouched.
-PostUp = ip rule add from ${VM_PUBLIC_IP} table 123
-PostUp = ip route add default via ${WIREGUARD_VPS_TUNNEL_IP} dev wg0 table 123
-PostUp = iptables -A FORWARD -i ${TUNNEL_BRIDGE} -o wg0 -j ACCEPT
-PostUp = iptables -A FORWARD -i wg0 -o ${TUNNEL_BRIDGE} -m state --state RELATED,ESTABLISHED -j ACCEPT
-PostUp = iptables -t nat -A POSTROUTING -s ${VM_PUBLIC_IP} -o wg0 -j MASQUERADE
-
-PostDown = ip rule del from ${VM_PUBLIC_IP} table 123
-PostDown = ip route del default via ${WIREGUARD_VPS_TUNNEL_IP} dev wg0 table 123
-PostDown = iptables -D FORWARD -i ${TUNNEL_BRIDGE} -o wg0 -j ACCEPT
-PostDown = iptables -D FORWARD -i wg0 -o ${TUNNEL_BRIDGE} -m state --state RELATED,ESTABLISHED -j ACCEPT
-PostDown = iptables -t nat -D POSTROUTING -s ${VM_PUBLIC_IP} -o wg0 -j MASQUERADE
+# Use a single PostUp/PostDown line to ensure atomic execution.
+PostUp = ip rule add from ${VM_PUBLIC_IP} table 123; ip route add default via ${WIREGUARD_VPS_TUNNEL_IP} dev %i table 123; iptables -t nat -A POSTROUTING -s ${VM_PUBLIC_IP} -o %i -j MASQUERADE; iptables -A FORWARD -i ${TUNNEL_BRIDGE} -o %i -j ACCEPT; iptables -A FORWARD -i %i -o ${TUNNEL_BRIDGE} -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostDown = ip rule del from ${VM_PUBLIC_IP} table 123; ip route del default via ${WIREGUARD_VPS_TUNNEL_IP} dev %i table 123; iptables -t nat -D POSTROUTING -s ${VM_PUBLIC_IP} -o %i -j MASQUERADE; iptables -D FORWARD -i ${TUNNEL_BRIDGE} -o %i -j ACCEPT; iptables -D FORWARD -i %i -o ${TUNNEL_BRIDGE} -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 [Peer]
 PublicKey = ${WIREGUARD_VPS_PUBLIC_KEY}
