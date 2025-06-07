@@ -147,7 +147,13 @@ add_peer_vps() {
 # Function to remove a peer
 remove_peer_vps() {
     check_root
-    PEER_TO_REMOVE=$(ls /etc/wireguard/peers/*.conf | xargs -n 1 basename | whiptail --title "Remove Peer" --menu "Select a peer to remove:" 20 78 12 3>&1 1>&2 2>&3)
+    if [ -z "$(ls -A /etc/wireguard/peers/*.conf 2>/dev/null)" ]; then
+        whiptail --title "Info" --msgbox "No peers found to remove." 8 78
+        return
+    fi
+
+    # The '|| true' handles the case where the user presses Esc/Cancel in whiptail
+    PEER_TO_REMOVE=$(ls /etc/wireguard/peers/*.conf | xargs -n 1 basename | whiptail --title "Remove Peer" --menu "Select a peer to remove:" 20 78 12 3>&1 1>&2 2>&3) || true
     
     if [ -n "$PEER_TO_REMOVE" ]; then
         PEER_PUBLIC_KEY=$(grep 'PublicKey' "/etc/wireguard/peers/${PEER_TO_REMOVE}" | awk '{print $3}')
@@ -162,7 +168,12 @@ remove_peer_vps() {
 # Function to manage ports for a specific peer
 manage_ports_vps() {
     check_root
-    PEER_INFO_FILE=$(ls /etc/wireguard/peers/*.info | xargs -n 1 basename | whiptail --title "Manage Ports" --menu "Select a peer to manage ports for:" 20 78 12 3>&1 1>&2 2>&3)
+    if [ -z "$(ls -A /etc/wireguard/peers/*.info 2>/dev/null)" ]; then
+        whiptail --title "Info" --msgbox "No peers found. Please add a peer before managing ports." 8 78
+        return
+    fi
+    
+    PEER_INFO_FILE=$(ls /etc/wireguard/peers/*.info | xargs -n 1 basename | whiptail --title "Manage Ports" --menu "Select a peer to manage ports for:" 20 78 12 3>&1 1>&2 2>&3) || true
     
     if [ -n "$PEER_INFO_FILE" ]; then
         source "/etc/wireguard/peers/${PEER_INFO_FILE}"
@@ -202,23 +213,29 @@ manage_ports_vps() {
     fi
 }
 
-# Function to view forwarded ports on the VPS
+# Function to view ports for a specific peer
 view_ports_vps() {
     check_root
-    if [ ! -f /etc/wireguard/wirewarp.conf ]; then
-        whiptail --title "Error" --msgbox "Could not find the WireWarp config file. Please run Step 3 on the VPS first." 8 78
-        exit 1
+    if [ -z "$(ls -A /etc/wireguard/peers/*.info 2>/dev/null)" ]; then
+        whiptail --title "Info" --msgbox "No peers found to view ports for." 8 78
+        return
     fi
-    source /etc/wireguard/wirewarp.conf
-
-    # Add '|| true' to prevent the script from exiting if grep finds no matches
-    local rules=$(iptables-save | grep -- "-A PREROUTING -i ${VPS_PUBLIC_INTERFACE}" | grep -- "-j DNAT --to-destination ${VM_PRIVATE_IP}" || true)
     
-    if [ -z "$rules" ]; then
-        whiptail --title "Forwarded Ports" --msgbox "No active WireWarp port forwarding rules found." 10 78
-    else
-        local formatted_rules=$(echo "$rules" | awk '{print "Protocol: " $6 ", Port: " $10}')
-        whiptail --title "Active Forwarded Ports" --msgbox "The following ports are being forwarded to ${VM_PRIVATE_IP}:\n\n${formatted_rules}" 20 78
+    PEER_INFO_FILE=$(ls /etc/wireguard/peers/*.info | xargs -n 1 basename | whiptail --title "View Ports" --menu "Select a peer to view ports for:" 20 78 12 3>&1 1>&2 2>&3) || true
+
+    if [ -n "$PEER_INFO_FILE" ]; then
+        source "/etc/wireguard/peers/${PEER_INFO_FILE}"
+        source /etc/wireguard/wirewarp.conf
+
+        # Add '|| true' to prevent the script from exiting if grep finds no matches
+        local rules=$(iptables-save | grep -- "-A PREROUTING -i ${VPS_PUBLIC_INTERFACE}" | grep -- "-j DNAT --to-destination ${VM_PRIVATE_IP}" || true)
+        
+        if [ -z "$rules" ]; then
+            whiptail --title "Forwarded Ports" --msgbox "No active WireWarp port forwarding rules found." 10 78
+        else
+            local formatted_rules=$(echo "$rules" | awk '{print "Protocol: " $6 ", Port: " $10}')
+            whiptail --title "Active Forwarded Ports" --msgbox "The following ports are being forwarded to ${VM_PRIVATE_IP}:\n\n${formatted_rules}" 20 78
+        fi
     fi
 }
 
