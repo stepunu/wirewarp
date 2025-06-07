@@ -1,52 +1,47 @@
 # WireWarp
 
-WireWarp is an interactive script to set up a robust, NAT-based WireGuard tunnel. This allows a virtual machine (e.g., a Windows VM on Proxmox) on a local network to have all of its traffic routed through the public IP of a remote VPS. This is ideal for hosting game servers or other services from home.
+WireWarp is an interactive script to set up a robust, NAT-based WireGuard server that can manage multiple client tunnels. This allows virtual machines on different remote networks to have all of their traffic securely routed through the public IP of a central VPS.
 
-## Architecture (Final)
+## Architecture
 
-This new, more stable architecture uses a standard NAT-based approach that is simpler and avoids platform-specific networking bugs.
+This architecture uses a standard NAT-based approach that is simple, secure, and universally compatible.
 
-1.  **Remote VPS (Ubuntu):** Runs a WireGuard server. All traffic from the tunnel is NAT'd, and it forwards specific ports to the Windows VM's private IP address.
-2.  **Proxmox Host (Debian-based):** Runs a WireGuard client and acts as a simple router for the Windows VM. It gives the VM internet access via the tunnel.
-3.  **Windows VM:** Has two network interfaces.
-    *   **NIC 1 (WAN):** Connected to a private Proxmox bridge (`vmbr1`). It has a private IP address and uses the Proxmox host as its gateway. All its traffic goes through the tunnel.
-    *   **NIC 2 (LAN):** Connected to your main Proxmox bridge (`vmbr0`). This provides access to your local network for RDP and file sharing.
+1.  **WireWarp Server (VPS):** Runs the main WireGuard service and a management script. It dynamically adds and removes clients (peers).
+2.  **WireWarp Client (e.g., Proxmox Host):** Runs a simple, non-interactive script to configure itself as a peer to the server. It acts as a router for its local VMs.
+3.  **Windows VM:** Is configured with a private IP address and uses its local Proxmox host as its gateway.
 
 ## How to Use
 
-To run the script, use the following command. It needs to be run with root privileges.
+The project now consists of two scripts:
+*   `wirewarp.sh`: The interactive management script for your central VPS.
+*   `wirewarp-client.sh`: The non-interactive setup script for your client machines.
 
-*   On systems that use `sudo` (like Ubuntu):
+### Server Setup (VPS)
+Run the interactive script on your central VPS. It will guide you through the process.
+```bash
+sudo bash -c "$(curl -fsSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh)"
+```
+
+1.  **Initialize Server (Option 1):** Run this once to set up the main WireGuard service on your VPS. It will display the server's public key, which you will need when adding clients.
+2.  **Add New Peer (Option 2):** Run this for every new client (e.g., every Proxmox host) you want to connect.
+    *   It will ask for a name for the peer.
+    *   It will then generate and display a **single command** for you to run on your client machine. This command contains all the necessary keys and IP addresses.
+
+### Client Setup (Proxmox Host)
+1.  **Run the Command:** After adding a peer on the server, copy the complete command that the server script provides you. It will look something like this:
     ```bash
-    sudo bash -c "$(curl -fsSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh)"
+    bash -c "$(curl ...)" -- '<private_key>' '<tunnel_ip>' ...
     ```
-
-*   On systems where you are already `root` (like Proxmox):
-    ```bash
-    bash -c "$(curl -fsSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh)"
-    ```
-
-The script will launch a menu-driven interface.
-
-### Setup Workflow
-1.  **[Uninstall First]** Run the script on both the Proxmox host and the VPS and choose **Option 6: Uninstall WireWarp** to ensure a clean state.
-2.  **[VPS] Step 1: Initialize VPS** - Run option `1` on your remote VPS to generate its keys.
-3.  **[Proxmox] Step 2: Initialize Proxmox Host** - Run option `2` on your Proxmox host. This will create the `vmbr1` bridge and configure the tunnel.
-4.  **[VPS] Step 3: Complete VPS Setup** - Run option `3` on your VPS. This will link the two peers and start the tunnel. At the end, it will display the correct network settings for your Windows VM.
+2.  **Execute it** on your Proxmox host (or other client machine). You will need to replace `YOUR_VPS_IP_OR_HOSTNAME` with the actual public IP of your VPS.
+3.  The client script will automatically configure the WireGuard interface and the local network bridge.
 
 ### Windows VM Setup
-
-After the tunnel is active, configure your Windows VM according to the instructions displayed at the end of Step 3. The settings will be:
-
-*   **Primary Network Card (the one on `vmbr1`):**
-    *   **IP address:** `10.99.0.2`
-    *   **Subnet mask:** `255.255.255.0`
-    *   **Default gateway:** `10.99.0.1`
-    *   **Preferred DNS server:** `1.1.1.1` (or your choice)
-
-*   **Secondary Network Card (the one on `vmbr0` for RDP):**
-    *   Configure with a static IP from your local LAN (e.g., `192.168.20.32`).
-    *   Leave the **Default gateway** field **blank**.
+After the client setup is complete, configure your Windows VM with the IP addresses that the server script provided you when you added the peer. The settings will be:
+*   **IP address:** `10.99.X.2`
+*   **Subnet mask:** `255.255.255.0`
+*   **Default gateway:** `10.99.X.1`
+*   **Preferred DNS server:** `1.1.1.1`
+*   Ensure any other network adapters have **no gateway** set.
 
 ### Operations
 *   **[VPS] Manage Forwarded Ports (Option 4):** Add or remove port forwarding rules for your VM.
