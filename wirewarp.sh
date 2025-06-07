@@ -242,7 +242,7 @@ view_ports_vps() {
     if [ -z "$rules" ]; then
         whiptail --title "Forwarded Ports" --msgbox "No active WireWarp port forwarding rules found." 10 78
     else
-        local formatted_rules=$(echo "$rules" | awk '{print "Protocol: " $6 ", Port: " $8}')
+        local formatted_rules=$(echo "$rules" | awk '{print "Protocol: " $6 ", Port: " $10}')
         whiptail --title "Active Forwarded Ports" --msgbox "The following ports are being forwarded to ${VM_PRIVATE_IP}:\n\n${formatted_rules}" 20 78
     fi
 }
