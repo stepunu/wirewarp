@@ -1,22 +1,20 @@
 # WireWarp
 
-WireWarp is an interactive script to set up a transparent WireGuard tunnel. This allows a virtual machine (e.g., a Windows VM on Proxmox) on a local network to use the public IP address of a remote VPS. This is ideal for hosting game servers or other services from home, behind a NAT, while appearing to have a static public IP.
+WireWarp is an interactive script to set up a robust, NAT-based WireGuard tunnel. This allows a virtual machine (e.g., a Windows VM on Proxmox) on a local network to have all of its traffic routed through the public IP of a remote VPS. This is ideal for hosting game servers or other services from home.
 
-## Architecture
+## Architecture (Final)
 
-The setup consists of three main components:
+This new, more stable architecture uses a standard NAT-based approach that is simpler and avoids platform-specific networking bugs.
 
-1.  **Remote VPS (Ubuntu):** Runs a WireGuard server and handles port forwarding.
-2.  **Proxmox Host (Debian-based):** Runs a WireGuard client and provides a dedicated network bridge to the VM.
-3.  **Windows VM:** Has two network interfaces—one for the tunnel (WAN) and one for the local network (LAN).
-
-<br/>
-
-![WireGuard Transparent Tunnel Architecture](https://mermaid.ink/svg/eyJjb2RlIjoiZ3JhcGggVEQ7XG4gICAgc3ViZ3JhcGggXCJJbnRlcm5ldFwiXG4gICAgICAgIFVzZXJzKFwiR2FtZSBQbGF5ZXJzIC8gVXNlcnNcIik7XG4gICAgZW5kXG5cbiAgICBzdWJncmFwaCBcIlJlbW90ZSBWUFNcIlxuICAgICAgICBkaXJlY3Rpb24gTFI7XG4gICAgICAgIFZQU19JUFtcIlB1YmxpYyBJUFxcbihWUFNfUFVCTElDX0lQKSlcIl07XG4gICAgICAgIFdHX1NlcnZlcltcIldpcmVHdWFyZCBTZXJ2ZXIgKHdnMClcXG4xMC4wLjAuMS8yNFwiXTtcbiAgICAgICAgSVBUYWJsZXNbXCJGaXJld2FsbCAvIE5BVFxcbihQb3J0IEZvcndhcmRpbmcpXCJdO1xuICAgICAgICBWUFNfSVAgLS0gXCJldGgwXCIgLS0-IElQVGFibGVzO1xuICAgICAgICBJUFRhYmxlcyAtLSAgXCJGb3J3YXJkaW5nXCIgLS0-IFdHX1NlcnZlcjtcbiAgICBlbmRcblxuICAgIHN1YmdyYXBoIFwiWW91ciBIb21lIE5ldHdvcmtcIlxuICAgICAgICBkaXJlY3Rpb24gTFI7XG4gICAgICAgIFByb3htb3hfSVBbXCJIb21lIFB1YmxpYyBJUFxcbihQUk9YTU9YX1BVQkxJQ19JUCkpXCJdO1xuICAgICAgICBcbiAgICAgICAgc3ViZ3JhcGggXCJQcm94bW94IEhvc3RcIlxuICAgICAgICAgICAgV0dfQ2xpZW50W1wiV2lyZUd1YXJkIENsaWVudCAod2cwKVxcbjEwLjAuMC4yLzI0XCJdO1xuICAgICAgICAgICAgQnJpZGdlX1dHW1wiTGludXggQnJpZGdlICh2bWJyMSlcIl07XG4gICAgICAgICAgICBCcmlkZ2VfTEFOW1wiTGludXggQnJpZGdlICh2bWJyMClcIl07XG4gICAgICAgICAgICBcbiAgICAgICAgICAgIFdHX0NsaWVudCAtLSAgXCJSb3V0ZXMgdHJhZmZpY1wiIC0tPiBCcmlkZ2VfV0c7XG4gICAgICAgIGVuZFxuXG4gICAgICAgIHN1YmdyYXBoIFwiV2luZG93cyBWTVwiXG4gICAgICAgICAgICBOSUNfV0FOXFwiTklDIDEgKFdBTilcXG5JUDogVlBTX1BVQkxJQ19JUFxcbkdXOiAxMC4wLjAuMVwiXTtcbiAgICAgICAgICAgIE5JQ19MQU5bXCJOSUMgMiAoTEFOKVxcbklQOiAxOTIuMTY4LjEueFxcbk5vIEdhdGV3YXlcIl07XG4gICAgICAgIGVuZFxuXG4gICAgICAgIFByb3htb3hfSVAgLS0gXCJJbnRlcm5ldFwiIC0tPiBCcmlkZ2VfTEFOO1xuICAgICAgICBCcmlkZ2VfTEFOIC0tIFwidmV0aFwiIC0tPiBOSUNfTEFOO1xuICAgICAgICBCcmlkZ2VfV0cgLS0gXCJ2ZXRoXCIgLS0-IE5JQ19XQU47XG4gICAgZW5kXG5cbiAgICBVc2VycyAtLSAgXCJUQ1AvVURQIFRyYWZmaWNcIiAtLT4gVlBTX0lQO1xuICAgIFdHX1NlcnZlciAtLSAgXCJXaXJlR3VhcmQgVHVubmVsXCIgLS0-IFdHX0NsaWVudDtcbiAgICBOSUNfV0FOIC0tIFwiQWxsIEludGVybmV0IFRyYWZmaWNcIiAtLT4gQnJpZGdlX1dHO1xuICAgIE5JQ19MQU4gLS0gXCJMb2NhbCBBY2Nlc3NcIiAtLT4gQnJpZGdlX0xBTjtcbiIsIm1lcm1haWQiOnsidGhlbWUiOiJkZWZhdWx0In0sInVwZGF0ZUVkaXRvciI6ZmFsc2UsImF1dG9TeW5jIjp0cnVlLCJ1cGRhdGVEaWFncmFtIjpmYWxzZX0)
+1.  **Remote VPS (Ubuntu):** Runs a WireGuard server. All traffic from the tunnel is NAT'd, and it forwards specific ports to the Windows VM's private IP address.
+2.  **Proxmox Host (Debian-based):** Runs a WireGuard client and acts as a simple router for the Windows VM. It gives the VM internet access via the tunnel.
+3.  **Windows VM:** Has two network interfaces.
+    *   **NIC 1 (WAN):** Connected to a private Proxmox bridge (`vmbr1`). It has a private IP address and uses the Proxmox host as its gateway. All its traffic goes through the tunnel.
+    *   **NIC 2 (LAN):** Connected to your main Proxmox bridge (`vmbr0`). This provides access to your local network for RDP and file sharing.
 
 ## How to Use
 
-This project uses a single, interactive script. To run it, use the following command. It needs to be run with root privileges.
+To run the script, use the following command. It needs to be run with root privileges.
 
 *   On systems that use `sudo` (like Ubuntu):
     ```bash
@@ -28,41 +26,32 @@ This project uses a single, interactive script. To run it, use the following com
     bash -c "$(curl -fsSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh)"
     ```
 
-The script will launch a menu-driven interface. Follow the steps in order for the initial setup.
+The script will launch a menu-driven interface.
 
 ### Setup Workflow
-1.  **[VPS] Step 1: Initialize VPS**
-    *   Run the script on your **remote Ubuntu VPS** and choose option `1`.
-    *   The script will install WireGuard, generate keys, and output the **VPS Public Key**.
-    *   **Copy the public key.** You'll need it for the next step.
-
-2.  **[Proxmox] Step 2: Initialize Proxmox Host**
-    *   Run the same script on your **local Proxmox host** and choose option `2`.
-    *   The script will ask for the VPS details and the public key you just copied.
-    *   It will configure the Proxmox side of the tunnel and output the **Proxmox Public Key**.
-    *   **Copy this public key.** A reboot of Proxmox is recommended.
-
-3.  **[VPS] Step 3: Complete VPS Setup**
-    *   Run the script one last time on your **remote Ubuntu VPS** and choose option `3`.
-    *   The script will ask for the Proxmox public key.
-    *   It will create the final WireGuard configuration and start the tunnel.
-
-### Operations
-After setup, you can use the script for maintenance:
-
-*   **[VPS] Manage Forwarded Ports (Option 4):** Add or remove port forwarding rules for your VM. Can be run at any time on the VPS after the initial setup is complete.
-*   **[All] Check Tunnel Status (Option 5):** Run on either the VPS or Proxmox to see the live status of the WireGuard interface.
-*   **[All] Uninstall WireWarp (Option 6):** Run on either the VPS or Proxmox to completely remove all changes made by the script.
+1.  **[Uninstall First]** Run the script on both the Proxmox host and the VPS and choose **Option 6: Uninstall WireWarp** to ensure a clean state.
+2.  **[VPS] Step 1: Initialize VPS** - Run option `1` on your remote VPS to generate its keys.
+3.  **[Proxmox] Step 2: Initialize Proxmox Host** - Run option `2` on your Proxmox host. This will create the `vmbr1` bridge and configure the tunnel.
+4.  **[VPS] Step 3: Complete VPS Setup** - Run option `3` on your VPS. This will link the two peers and start the tunnel. At the end, it will display the correct network settings for your Windows VM.
 
 ### Windows VM Setup
-After the tunnel is active, configure your Windows VM:
-1.  Add a second network device to the VM, connected to the new `vmbr1` bridge.
-2.  Statically configure the IPv4 settings for this new network card (the "WAN" adapter):
-    *   **IP address:** The public IP of your VPS.
-    *   **Subnet mask:** `255.255.255.0` (or `/24`).
-    *   **Default gateway:** `10.0.0.1` (the tunnel IP of the VPS).
-    *   **Preferred DNS server:** `1.1.1.1` (or the DNS you chose during setup).
-3.  Ensure your original LAN-facing network card has **no default gateway** set, so only local traffic goes through it.
+
+After the tunnel is active, configure your Windows VM according to the instructions displayed at the end of Step 3. The settings will be:
+
+*   **Primary Network Card (the one on `vmbr1`):**
+    *   **IP address:** `10.99.0.2`
+    *   **Subnet mask:** `255.255.255.0`
+    *   **Default gateway:** `10.99.0.1`
+    *   **Preferred DNS server:** `1.1.1.1` (or your choice)
+
+*   **Secondary Network Card (the one on `vmbr0` for RDP):**
+    *   Configure with a static IP from your local LAN (e.g., `192.168.20.32`).
+    *   Leave the **Default gateway** field **blank**.
+
+### Operations
+*   **[VPS] Manage Forwarded Ports (Option 4):** Add or remove port forwarding rules for your VM.
+*   **[All] Check Tunnel Status (Option 5):** Check the live status of the WireGuard interface.
+*   **[All] Uninstall WireWarp (Option 6):** Completely remove all changes made by the script.
 
 ### Port Forwarding
 

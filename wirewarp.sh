@@ -5,6 +5,15 @@
 set -euo pipefail
 shopt -s inherit_errexit nullglob
 
+# --- Static Network Configuration ---
+# This defines the private network between the Proxmox host and the Windows VM.
+VM_NETWORK="10.99.0.0/24"
+PROXMOX_GW_IP="10.99.0.1"
+VM_PRIVATE_IP="10.99.0.2"
+WIREGUARD_TUNNEL_NET="10.0.0.0/24"
+WIREGUARD_VPS_IP="10.0.0.1"
+WIREGUARD_PROXMOX_IP="10.0.0.2"
+
 # --- Helper Functions ---
 
 # Check if the script is run as root
@@ -25,13 +34,9 @@ install_packages() {
   done
 
   if [ ${#packages_to_install[@]} -gt 0 ]; then
-    # Use echo for this initial step as whiptail might not be installed yet.
-    echo "Updating package lists..."
-    apt-get update >/dev/null
     echo "Installing missing packages: ${packages_to_install[*]}..."
-    # Force non-interactive mode to prevent prompts from hanging the script.
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages_to_install[@]}"
-    echo "Package installation complete."
+    apt-get update >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages_to_install[@]}" >/dev/null
   fi
 }
 
@@ -52,19 +57,14 @@ check_existing_config() {
 
 # --- Main Logic Functions ---
 
-# Function for Step 1: Initialize VPS
+# Step 1: Initialize VPS
 vps_init() {
   check_root
   check_existing_config
   install_packages wireguard curl whiptail
 
-  VPS_PUBLIC_INTERFACE=$(whiptail --title "VPS Setup" --inputbox "Enter the public network interface of your VPS:" 10 60 "eth0" 3>&1 1>&2 2>&3)
-  if [ -z "$VPS_PUBLIC_INTERFACE" ]; then
-    whiptail --title "Error" --msgbox "Input cannot be empty." 8 78
-    exit 1
-  fi
+  VPS_PUBLIC_INTERFACE=$(whiptail --title "VPS Setup (Step 1)" --inputbox "Enter the public network interface of your VPS:" 10 60 "eth0" 3>&1 1>&2 2>&3)
   WIREGUARD_PORT="51820"
-  WIREGUARD_VPS_TUNNEL_IP="10.0.0.1"
 
   whiptail --title "VPS Setup" --infobox "Generating WireGuard keys..." 8 78
   wg genkey | tee /etc/wireguard/vps_private.key | wg pubkey > /etc/wireguard/vps_public.key
@@ -75,29 +75,20 @@ vps_init() {
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
   
   VPS_PUBLIC_KEY=$(cat /etc/wireguard/vps_public.key)
-  whiptail --title "✅ VPS Initialization Complete" --msgbox "Step 1 is complete. Copy the following values. You will need them for Step 2 on your Proxmox host.\n\nVPS Public Key: ${VPS_PUBLIC_KEY}\nVPS WireGuard Port: ${WIREGUARD_PORT}" 14 78
+  whiptail --title "✅ VPS Initialization Complete" --msgbox "Step 1 is complete. Copy the following values for Step 2 on your Proxmox host.\n\nVPS Public Key: ${VPS_PUBLIC_KEY}\nVPS WireGuard Port: ${WIREGUARD_PORT}" 14 78
 }
 
-# Function for Step 2: Initialize Proxmox Host
+# Step 2: Initialize Proxmox Host
 proxmox_init() {
   check_root
   check_existing_config
   install_packages wireguard iptables-persistent curl whiptail
 
-  VPS_ENDPOINT=$(whiptail --title "Proxmox Setup" --inputbox "Enter the public IP or DDNS hostname of your VPS:" 10 60 "" 3>&1 1>&2 2>&3)
-  WIREGUARD_VPS_PUBLIC_KEY=$(whiptail --title "Proxmox Setup" --inputbox "Paste the VPS Public Key from Step 1:" 10 60 "" 3>&1 1>&2 2>&3)
-  VM_PUBLIC_IP=$(whiptail --title "Proxmox Setup" --inputbox "Enter the public IP of your VPS (this is the IP the VM will use):" 10 60 "" 3>&1 1>&2 2>&3)
-  WIREGUARD_PORT=$(whiptail --title "Proxmox Setup" --inputbox "Enter the WireGuard port from Step 1:" 10 60 "51820" 3>&1 1>&2 2>&3)
-  DNS_SERVER=$(whiptail --title "Proxmox Setup" --inputbox "Enter DNS server for the tunnel interface:" 10 60 "1.1.1.1" 3>&1 1>&2 2>&3)
-
-  if [ -z "$VPS_ENDPOINT" ] || [ -z "$WIREGUARD_VPS_PUBLIC_KEY" ] || [ -z "$VM_PUBLIC_IP" ] || [ -z "$WIREGUARD_PORT" ] || [ -z "$DNS_SERVER" ]; then
-    whiptail --title "Error" --msgbox "All fields are mandatory. Aborting." 8 78
-    exit 1
-  fi
-
-  WIREGUARD_PROXMOX_TUNNEL_IP="10.0.0.2"
+  VPS_ENDPOINT=$(whiptail --title "Proxmox Setup (Step 2)" --inputbox "Enter the public IP or DDNS hostname of your VPS:" 10 60 "" 3>&1 1>&2 2>&3)
+  WIREGUARD_VPS_PUBLIC_KEY=$(whiptail --title "Proxmox Setup (Step 2)" --inputbox "Paste the VPS Public Key from Step 1:" 10 60 "" 3>&1 1>&2 2>&3)
+  WIREGUARD_PORT=$(whiptail --title "Proxmox Setup (Step 2)" --inputbox "Enter the WireGuard port from Step 1:" 10 60 "51820" 3>&1 1>&2 2>&3)
+  DNS_SERVER=$(whiptail --title "Proxmox Setup (Step 2)" --inputbox "Enter DNS server for the tunnel interface:" 10 60 "1.1.1.1" 3>&1 1>&2 2>&3)
   TUNNEL_BRIDGE="vmbr1"
-  WIREGUARD_VPS_TUNNEL_IP="10.0.0.1"
 
   whiptail --title "Proxmox Setup" --infobox "Generating WireGuard keys for Proxmox..." 8 78
   wg genkey | tee /etc/wireguard/proxmox_private.key | wg pubkey > /etc/wireguard/proxmox_public.key
@@ -106,33 +97,18 @@ proxmox_init() {
   whiptail --title "Proxmox Setup" --infobox "Configuring WireGuard interface (wg0)..." 8 78
   cat > /etc/wireguard/wg0.conf << EOL
 [Interface]
-Address = ${WIREGUARD_PROXMOX_TUNNEL_IP}/24
+Address = ${WIREGUARD_PROXMOX_IP}/24
 PrivateKey = $(cat /etc/wireguard/proxmox_private.key)
 DNS = ${DNS_SERVER}
-Table = off
-
-# --- Policy Routing for the VM ---
-# Use multiple PostUp/PostDown lines for maximum compatibility and to avoid race conditions.
-# The %i variable is automatically replaced with the interface name (e.g., wg0).
-PostUp = ip rule add from ${VM_PUBLIC_IP} table 123
-PostUp = ip route add default via ${WIREGUARD_VPS_TUNNEL_IP} dev %i table 123
-PostUp = sleep 1
-PostUp = iptables -t nat -A POSTROUTING -s ${VM_PUBLIC_IP} -o %i -j MASQUERADE
+PostUp = iptables -A FORWARD -i %i -o ${TUNNEL_BRIDGE} -j ACCEPT
 PostUp = iptables -A FORWARD -i ${TUNNEL_BRIDGE} -o %i -j ACCEPT
-PostUp = iptables -A FORWARD -i %i -o ${TUNNEL_BRIDGE} -m state --state RELATED,ESTABLISHED -j ACCEPT
-
-PostDown = iptables -D FORWARD -i %i -o ${TUNNEL_BRIDGE} -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -t nat -A POSTROUTING -s ${VM_NETWORK} -o %i -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -o ${TUNNEL_BRIDGE} -j ACCEPT
 PostDown = iptables -D FORWARD -i ${TUNNEL_BRIDGE} -o %i -j ACCEPT
-PostDown = iptables -t nat -D POSTROUTING -s ${VM_PUBLIC_IP} -o %i -j MASQUERADE
-PostDown = sleep 1
-PostDown = ip route del default via ${WIREGUARD_VPS_TUNNEL_IP} dev %i table 123
-PostDown = ip rule del from ${VM_PUBLIC_IP} table 123
-
+PostDown = iptables -t nat -D POSTROUTING -s ${VM_NETWORK} -o %i -j MASQUERADE
 [Peer]
 PublicKey = ${WIREGUARD_VPS_PUBLIC_KEY}
 Endpoint = ${VPS_ENDPOINT}:${WIREGUARD_PORT}
-# 0.0.0.0/0 is needed here so WireGuard knows it's *allowed* to encrypt traffic for any destination.
-# The `Table = off` and policy routing rules prevent this from hijacking the host's route.
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOL
@@ -143,13 +119,19 @@ EOL
 
 # WireWarp Tunnel Bridge - Start
 auto ${TUNNEL_BRIDGE}
-iface ${TUNNEL_BRIDGE} inet manual
-    bridge_ports none
-    bridge_stp off
-    bridge_fd 0
+iface ${TUNNEL_BRIDGE} inet static
+    address ${PROXMOX_GW_IP}
+    netmask 255.255.255.0
+    bridge-ports none
+    bridge-stp off
+    bridge-fd 0
 # WireWarp Tunnel Bridge - End
 EOL
   fi
+  
+  whiptail --title "Proxmox Setup" --infobox "Enabling IP forwarding..." 8 78
+  sed -i 's/^#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
   whiptail --title "Proxmox Setup" --infobox "Enabling and starting services..." 8 78
   systemctl enable wg-quick@wg0 >/dev/null
@@ -158,10 +140,10 @@ EOL
   netfilter-persistent save >/dev/null
 
   PROXMOX_PUBLIC_KEY=$(cat /etc/wireguard/proxmox_public.key)
-  whiptail --title "✅ Proxmox Initialization Complete" --msgbox "Step 2 is complete. Copy the following value. You'll need it for Step 3 back on your VPS.\n\nProxmox Public Key: ${PROXMOX_PUBLIC_KEY}" 12 78
+  whiptail --title "✅ Proxmox Initialization Complete" --msgbox "Step 2 is complete. Copy this public key for Step 3 on your VPS.\n\nProxmox Public Key: ${PROXMOX_PUBLIC_KEY}" 12 78
 }
 
-# Function for Step 3: Complete VPS Setup
+# Step 3: Complete VPS Setup
 vps_complete() {
   check_root
   if [ ! -f /etc/wireguard/vps_private.key ]; then
@@ -170,43 +152,38 @@ vps_complete() {
   fi
   install_packages iptables-persistent curl whiptail
 
-  WIREGUARD_PROXMOX_PUBLIC_KEY=$(whiptail --title "VPS Completion" --inputbox "Paste the Proxmox Public Key from Step 2:" 10 60 "" 3>&1 1>&2 2>&3)
-  PROXMOX_ENDPOINT=$(whiptail --title "VPS Completion" --inputbox "Enter your Proxmox server's public IP or DDNS hostname:" 10 60 "" 3>&1 1>&2 2>&3)
-  VPS_PUBLIC_IP=$(whiptail --title "VPS Completion" --inputbox "Enter the public IP of this VPS:" 10 60 "" 3>&1 1>&2 2>&3)
-  VPS_PUBLIC_INTERFACE=$(whiptail --title "VPS Completion" --inputbox "Enter the public network interface of this VPS:" 10 60 "eth0" 3>&1 1>&2 2>&3)
-  
-  if [ -z "$WIREGUARD_PROXMOX_PUBLIC_KEY" ] || [ -z "$PROXMOX_ENDPOINT" ] || [ -z "$VPS_PUBLIC_IP" ] || [ -z "$VPS_PUBLIC_INTERFACE" ]; then
-    whiptail --title "Error" --msgbox "All fields are mandatory. Aborting." 8 78
-    exit 1
-  fi
-
+  WIREGUARD_PROXMOX_PUBLIC_KEY=$(whiptail --title "VPS Completion (Step 3)" --inputbox "Paste the Proxmox Public Key from Step 2:" 10 60 "" 3>&1 1>&2 2>&3)
+  PROXMOX_ENDPOINT=$(whiptail --title "VPS Completion (Step 3)" --inputbox "Enter your Proxmox server's public IP or DDNS hostname:" 10 60 "" 3>&1 1>&2 2>&3)
+  VPS_PUBLIC_INTERFACE=$(whiptail --title "VPS Completion (Step 3)" --inputbox "Enter the public network interface of this VPS:" 10 60 "eth0" 3>&1 1>&2 2>&3)
   WIREGUARD_PORT="51820"
-  WIREGUARD_VPS_TUNNEL_IP="10.0.0.1"
-  WIREGUARD_PROXMOX_TUNNEL_IP="10.0.0.2"
 
   whiptail --title "VPS Completion" --infobox "Creating final WireGuard configuration..." 8 78
   cat > /etc/wireguard/wg0.conf << EOL
 [Interface]
-Address = ${WIREGUARD_VPS_TUNNEL_IP}/24
+Address = ${WIREGUARD_VPS_IP}/24
 ListenPort = ${WIREGUARD_PORT}
 PrivateKey = $(cat /etc/wireguard/vps_private.key)
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ${VPS_PUBLIC_INTERFACE} -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o ${VPS_PUBLIC_INTERFACE} -j MASQUERADE
+PostUp = iptables -A FORWARD -i %i -o ${VPS_PUBLIC_INTERFACE} -j ACCEPT
+PostUp = iptables -A FORWARD -i ${VPS_PUBLIC_INTERFACE} -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -t nat -A POSTROUTING -o ${VPS_PUBLIC_INTERFACE} -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -o ${VPS_PUBLIC_INTERFACE} -j ACCEPT
+PostDown = iptables -D FORWARD -i ${VPS_PUBLIC_INTERFACE} -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -o ${VPS_PUBLIC_INTERFACE} -j MASQUERADE
 [Peer]
 PublicKey = ${WIREGUARD_PROXMOX_PUBLIC_KEY}
 Endpoint = ${PROXMOX_ENDPOINT}:${WIREGUARD_PORT}
-AllowedIPs = ${WIREGUARD_PROXMOX_TUNNEL_IP}/32, ${VPS_PUBLIC_IP}/32
+AllowedIPs = ${WIREGUARD_PROXMOX_IP}/32, ${VM_NETWORK}
 EOL
   
   echo "VPS_PUBLIC_INTERFACE=${VPS_PUBLIC_INTERFACE}" > /etc/wireguard/wirewarp.conf
-  echo "WIREGUARD_PROXMOX_TUNNEL_IP=${WIREGUARD_PROXMOX_TUNNEL_IP}" >> /etc/wireguard/wirewarp.conf
+  echo "VM_PRIVATE_IP=${VM_PRIVATE_IP}" >> /etc/wireguard/wirewarp.conf
 
   whiptail --title "VPS Completion" --infobox "Enabling and starting WireGuard service..." 8 78
   systemctl enable wg-quick@wg0 >/dev/null
   systemctl restart wg-quick@wg0
   netfilter-persistent save >/dev/null
   
-  whiptail --title "✅ Success!" --msgbox "WireWarp tunnel is now fully configured and active.\n\nYou can use this script again to manage ports, check status, or uninstall." 12 78
+  whiptail --title "✅ Success! Final Configuration for Windows VM" --msgbox "The tunnel is active. Configure your Windows VM's primary network card (the one connected to vmbr1) with these settings:\n\nIP address: ${VM_PRIVATE_IP}\nSubnet mask: 255.255.255.0\nDefault gateway: ${PROXMOX_GW_IP}\n\nPreferred DNS: ${DNS_SERVER:-1.1.1.1} (or any other)\n\nEnsure your second VM network card (for RDP) has no gateway set." 20 78
 }
 
 # Function to manage ports on the VPS
@@ -222,50 +199,27 @@ manage_ports_vps() {
     PROTO=$(whiptail --title "Port Management" --menu "Choose a protocol:" 15 60 3 "tcp" "" "udp" "" "both" "Forward both TCP and UDP" 3>&2 2>&1 1>&3)
     PORT=$(whiptail --title "Port Management" --inputbox "Enter the port number:" 10 60 "" 3>&1 1>&2 2>&3)
 
-    if [ -z "$ACTION" ] || [ -z "$PROTO" ] || [ -z "$PORT" ]; then
-      whiptail --title "Error" --msgbox "All fields are mandatory. Aborting." 8 78
-      exit 1
-    fi
-
     manage_rule() {
-        local l_action=$1
-        local l_proto=$2
-        local l_port=$3
-        local grep_rule="-A PREROUTING -i ${VPS_PUBLIC_INTERFACE} -p ${l_proto} -m ${l_proto} --dport ${l_port} -j DNAT --to-destination ${WIREGUARD_PROXMOX_TUNNEL_IP}"
-        local rule_exists=false
-        if iptables-save | grep -- "$grep_rule" > /dev/null 2>&1; then
-            rule_exists=true
-        fi
-
+        local l_action=$1; local l_proto=$2; local l_port=$3
+        local grep_rule="-A PREROUTING -i ${VPS_PUBLIC_INTERFACE} -p ${l_proto} -m ${l_proto} --dport ${l_port} -j DNAT --to-destination ${VM_PRIVATE_IP}"
         if [ "$l_action" == "add" ]; then
-            if [ "$rule_exists" = true ]; then
-                whiptail --title "Info" --msgbox "Rule for ${l_proto}/${l_port} already exists." 8 78
-            else
-                iptables -t nat -A PREROUTING -i ${VPS_PUBLIC_INTERFACE} -p ${l_proto} --dport ${l_port} -j DNAT --to-destination ${WIREGUARD_PROXMOX_TUNNEL_IP}
-                whiptail --title "Success" --msgbox "Port ${l_proto}/${l_port} forwarded to ${WIREGUARD_PROXMOX_TUNNEL_IP}." 8 78
+            if ! iptables-save | grep -- "$grep_rule" > /dev/null 2>&1; then
+                iptables -t nat -A PREROUTING -i ${VPS_PUBLIC_INTERFACE} -p ${l_proto} --dport ${l_port} -j DNAT --to-destination ${VM_PRIVATE_IP}
+                whiptail --title "Success" --msgbox "Port ${l_proto}/${l_port} forwarded to ${VM_PRIVATE_IP}." 8 78
             fi
         elif [ "$l_action" == "remove" ]; then
-            if [ "$rule_exists" = true ]; then
-                iptables -t nat -D PREROUTING -i ${VPS_PUBLIC_INTERFACE} -p ${l_proto} --dport ${l_port} -j DNAT --to-destination ${WIREGUARD_PROXMOX_TUNNEL_IP}
+            if iptables-save | grep -- "$grep_rule" > /dev/null 2>&1; then
+                iptables -t nat -D PREROUTING -i ${VPS_PUBLIC_INTERFACE} -p ${l_proto} --dport ${l_port} -j DNAT --to-destination ${VM_PRIVATE_IP}
                 whiptail --title "Success" --msgbox "Port forwarding for ${l_proto}/${l_port} removed." 8 78
-            else
-                whiptail --title "Info" --msgbox "Rule for ${l_proto}/${l_port} does not exist." 8 78
             fi
         fi
     }
 
     case "$PROTO" in
-        tcp|udp)
-            manage_rule "$ACTION" "$PROTO" "$PORT"
-            ;;
+        tcp|udp) manage_rule "$ACTION" "$PROTO" "$PORT" ;;
         both)
             whiptail --title "Info" --msgbox "Managing rules for both TCP and UDP on port ${PORT}..." 8 78
-            manage_rule "$ACTION" "tcp" "$PORT"
-            manage_rule "$ACTION" "udp" "$PORT"
-            ;;
-        *)
-            whiptail --title "Error" --msgbox "Invalid protocol. Use 'tcp', 'udp', or 'both'." 8 78
-            exit 1
+            manage_rule "$ACTION" "tcp" "$PORT"; manage_rule "$ACTION" "udp" "$PORT"
             ;;
     esac
 
@@ -281,7 +235,6 @@ check_status() {
         whiptail --title "Error" --msgbox "WireGuard tools are not installed. Please run one of the setup steps first." 8 78
         exit 1
     fi
-    echo "--- WireGuard Status ---"
     wg_status=$(wg show)
     whiptail --title "WireGuard Status" --msgbox "$wg_status" 20 78
 }
@@ -295,29 +248,17 @@ uninstall() {
         systemctl disable wg-quick@wg0 >/dev/null 2>&1 || true
 
         if [ -f /etc/wireguard/vps_private.key ]; then
-            whiptail --title "Info" --msgbox "Detected VPS installation. Cleaning up..." 8 78
-            # Port forwarding rules will be removed when iptables-persistent is purged.
+            apt-get purge -y wireguard >/dev/null
             rm -rf /etc/wireguard
-            whiptail --title "Info" --msgbox "Purging WireGuard and iptables-persistent packages..." 8 78
-            apt-get purge -y wireguard iptables-persistent >/dev/null
-            whiptail --title "Info" --msgbox "VPS cleanup complete. A reboot is recommended." 8 78
+            whiptail --title "Info" --msgbox "VPS cleanup complete." 8 78
         elif [ -f /etc/wireguard/proxmox_private.key ]; then
-            whiptail --title "Info" --msgbox "Detected Proxmox installation. Cleaning up..." 8 78
             ifdown vmbr1 >/dev/null 2>&1 || true
-            # This is safer than a blind sed command. It removes the block between the unique comments.
             sed -i '/# WireWarp Tunnel Bridge - Start/,/# WireWarp Tunnel Bridge - End/d' /etc/network/interfaces
-            rm -rf /etc/wireguard
-            whiptail --title "Info" --msgbox "Purging WireGuard and iptables-persistent packages..." 8 78
             apt-get purge -y wireguard iptables-persistent >/dev/null
+            rm -rf /etc/wireguard
             whiptail --title "Info" --msgbox "Proxmox cleanup complete. A reboot is recommended." 8 78
-        else
-            whiptail --title "Info" --msgbox "No WireWarp installation detected." 8 78
         fi
-        whiptail --title "Uninstalling..." --infobox "Removing WireWarp configuration and packages..." 8 78
-    else
-        echo "Uninstall cancelled."
     fi
-    whiptail --title "✅ Uninstall complete." --msgbox "WireWarp has been successfully uninstalled." 8 78
 }
 
 # --- Main Menu ---
