@@ -264,11 +264,78 @@ manage_ports_vps() {
 
         ACTION=$(whiptail --title "Port Management for ${PEER_NAME}" --menu "Choose an action:" 15 60 2 "add" "Add a new port forward" "remove" "Remove an existing port forward" 3>&2 2>&1 1>&3) || true
         PROTO=$(whiptail --title "Port Management for ${PEER_NAME}" --menu "Choose a protocol:" 15 60 3 "tcp" "" "udp" "" "both" "Forward both TCP and UDP" 3>&2 2>&1 1>&3) || true
-        PORT=$(whiptail --title "Port Management for ${PEER_NAME}" --inputbox "Enter the port number:" 10 60 "" 3>&1 1>&2 2>&3) || true
+        PORT_INPUT=$(whiptail --title "Port Management for ${PEER_NAME}" --inputbox "Enter port(s):\n• Single port: 80\n• Multiple ports: 80,443,8080\n• Port range: 8000-8010\n• Mixed: 80,443,8000-8005" 12 70 "" 3>&1 1>&2 2>&3) || true
 
-        if [ -z "$ACTION" ] || [ -z "$PROTO" ] || [ -z "$PORT" ]; then
+        if [ -z "$ACTION" ] || [ -z "$PROTO" ] || [ -z "$PORT_INPUT" ]; then
           whiptail --title "Error" --msgbox "All fields are mandatory. Aborting." 8 78
           return
+        fi
+        
+        # Function to expand port ranges and comma-separated ports
+        expand_ports() {
+            local input="$1"
+            local ports=()
+            
+            # Split by comma
+            IFS=',' read -ra PORT_PARTS <<< "$input"
+            
+            for part in "${PORT_PARTS[@]}"; do
+                # Trim whitespace
+                part=$(echo "$part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                
+                if [[ "$part" =~ ^[0-9]+-[0-9]+$ ]]; then
+                    # Handle range (e.g., 8000-8010)
+                    local start_port=$(echo "$part" | cut -d'-' -f1)
+                    local end_port=$(echo "$part" | cut -d'-' -f2)
+                    
+                    if [ "$start_port" -le "$end_port" ] && [ "$start_port" -ge 1 ] && [ "$end_port" -le 65535 ]; then
+                        for ((p=start_port; p<=end_port; p++)); do
+                            ports+=("$p")
+                        done
+                    else
+                        whiptail --title "Error" --msgbox "Invalid port range: $part\nRange must be 1-65535 and start <= end." 8 78
+                        return 1
+                    fi
+                elif [[ "$part" =~ ^[0-9]+$ ]]; then
+                    # Handle single port
+                    if [ "$part" -ge 1 ] && [ "$part" -le 65535 ]; then
+                        ports+=("$part")
+                    else
+                        whiptail --title "Error" --msgbox "Invalid port: $part\nPort must be between 1 and 65535." 8 78
+                        return 1
+                    fi
+                else
+                    whiptail --title "Error" --msgbox "Invalid port format: $part\nUse single ports (80), ranges (8000-8010), or comma-separated (80,443)." 10 78
+                    return 1
+                fi
+            done
+            
+            # Remove duplicates and sort
+            printf '%s\n' "${ports[@]}" | sort -nu
+        }
+        
+        # Expand the port input
+        EXPANDED_PORTS=$(expand_ports "$PORT_INPUT")
+        if [ $? -ne 0 ]; then
+            return
+        fi
+        
+        # Convert to array
+        readarray -t PORTS_ARRAY <<< "$EXPANDED_PORTS"
+        
+        if [ ${#PORTS_ARRAY[@]} -eq 0 ]; then
+            whiptail --title "Error" --msgbox "No valid ports found in input: $PORT_INPUT" 8 78
+            return
+        fi
+        
+        # Confirm action for multiple ports
+        if [ ${#PORTS_ARRAY[@]} -gt 1 ]; then
+            local port_list=$(printf '%s, ' "${PORTS_ARRAY[@]}")
+            port_list=${port_list%, }  # Remove trailing comma
+            
+            if ! whiptail --title "Confirm Multiple Ports" --yesno "You are about to $ACTION ${#PORTS_ARRAY[@]} ports for protocol $PROTO:\n\n$port_list\n\nContinue?" 12 78; then
+                return
+            fi
         fi
         
         manage_rule() {
@@ -277,23 +344,54 @@ manage_ports_vps() {
             if [ "$l_action" == "add" ]; then
                 if ! iptables-save | grep -- "$grep_rule" > /dev/null 2>&1; then
                     iptables -t nat -A PREROUTING -i ${VPS_PUBLIC_INTERFACE} -p ${l_proto} --dport ${l_port} -j DNAT --to-destination ${VM_PRIVATE_IP}
-                    whiptail --title "Success" --msgbox "Port ${l_proto}/${l_port} forwarded to ${VM_PRIVATE_IP}." 8 78
+                    echo "✓ Added ${l_proto}/${l_port}"
+                else
+                    echo "! ${l_proto}/${l_port} already exists"
                 fi
             elif [ "$l_action" == "remove" ]; then
                 if iptables-save | grep -- "$grep_rule" > /dev/null 2>&1; then
                     iptables -t nat -D PREROUTING -i ${VPS_PUBLIC_INTERFACE} -p ${l_proto} --dport ${l_port} -j DNAT --to-destination ${VM_PRIVATE_IP}
-                    whiptail --title "Success" --msgbox "Port forwarding for ${l_proto}/${l_port} removed." 8 78
+                    echo "✓ Removed ${l_proto}/${l_port}"
+                else
+                    echo "! ${l_proto}/${l_port} not found"
                 fi
             fi
         }
 
+        # Process all ports
+        whiptail --title "Processing Ports" --infobox "Processing ${#PORTS_ARRAY[@]} port(s)..." 8 78
+        sleep 1
+        
+        # Collect results for display
+        RESULTS=()
+        
         case "$PROTO" in
-            tcp|udp) manage_rule "$ACTION" "$PROTO" "$PORT" ;;
+            tcp|udp) 
+                for port in "${PORTS_ARRAY[@]}"; do
+                    result=$(manage_rule "$ACTION" "$PROTO" "$port")
+                    RESULTS+=("$result")
+                done
+                ;;
             both)
-                whiptail --title "Info" --msgbox "Managing rules for both TCP and UDP on port ${PORT}..." 8 78
-                manage_rule "$ACTION" "tcp" "$PORT"; manage_rule "$ACTION" "udp" "$PORT"
+                for port in "${PORTS_ARRAY[@]}"; do
+                    result_tcp=$(manage_rule "$ACTION" "tcp" "$port")
+                    result_udp=$(manage_rule "$ACTION" "udp" "$port")
+                    RESULTS+=("$result_tcp" "$result_udp")
+                done
                 ;;
         esac
+        
+        # Display results
+        local results_text=""
+        for result in "${RESULTS[@]}"; do
+            results_text+="$result\n"
+        done
+        
+        if [ ${#PORTS_ARRAY[@]} -eq 1 ]; then
+            whiptail --title "Port Management Complete" --msgbox "Result:\n\n$results_text" 10 78
+        else
+            whiptail --title "Bulk Port Management Complete" --msgbox "Processed ${#PORTS_ARRAY[@]} port(s):\n\n$results_text" 20 78
+        fi
 
         whiptail --title "Port Management" --infobox "Saving persistent firewall rules..." 8 78
         if command -v netfilter-persistent >/dev/null 2>&1; then
