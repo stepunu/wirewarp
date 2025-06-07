@@ -152,12 +152,19 @@ remove_peer_vps() {
         return
     fi
 
-    # The '|| true' handles the case where the user presses Esc/Cancel in whiptail
-    PEER_TO_REMOVE=$(ls /etc/wireguard/peers/*.conf | xargs -n 1 basename | whiptail --title "Remove Peer" --menu "Select a peer to remove:" 20 78 12 3>&1 1>&2 2>&3) || true
+    local options=()
+    for f in /etc/wireguard/peers/*.conf; do
+        local peer_name=$(grep '# Name:' "$f" | cut -d' ' -f3)
+        local base_filename=$(basename "$f")
+        options+=("$base_filename" "Peer: ${peer_name}")
+    done
+
+    PEER_TO_REMOVE=$(whiptail --title "Remove Peer" --menu "Select a peer to remove:" 20 78 12 "${options[@]}" 3>&2 2>&1 1>&3) || true
     
     if [ -n "$PEER_TO_REMOVE" ]; then
-        PEER_PUBLIC_KEY=$(grep 'PublicKey' "/etc/wireguard/peers/${PEER_TO_REMOVE}" | awk '{print $3}')
-        wg set wg0 peer "${PEER_PUBLIC_KEY}" remove
+        local peer_public_key=$(grep 'PublicKey' "/etc/wireguard/peers/${PEER_TO_REMOVE}" | awk '{print $3}')
+        whiptail --title "Removing Peer" --infobox "Removing peer ${peer_public_key}..." 8 78
+        wg set wg0 peer "${peer_public_key}" remove
         rm "/etc/wireguard/peers/${PEER_TO_REMOVE}"
         rm "/etc/wireguard/peers/${PEER_TO_REMOVE%.conf}.info"
         wg-quick save wg0
@@ -173,16 +180,28 @@ manage_ports_vps() {
         return
     fi
     
-    PEER_INFO_FILE=$(ls /etc/wireguard/peers/*.info | xargs -n 1 basename | whiptail --title "Manage Ports" --menu "Select a peer to manage ports for:" 20 78 12 3>&1 1>&2 2>&3) || true
+    local options=()
+    for f in /etc/wireguard/peers/*.info; do
+        local peer_name=$(grep 'PEER_NAME' "$f" | cut -d'=' -f2)
+        local base_filename=$(basename "$f")
+        options+=("$base_filename" "Peer: ${peer_name}")
+    done
+
+    PEER_INFO_FILE=$(whiptail --title "Manage Ports" --menu "Select a peer to manage ports for:" 20 78 12 "${options[@]}" 3>&2 2>&1 1>&3) || true
     
     if [ -n "$PEER_INFO_FILE" ]; then
         source "/etc/wireguard/peers/${PEER_INFO_FILE}"
         source /etc/wireguard/wirewarp.conf # Get VPS_PUBLIC_INTERFACE
 
-        ACTION=$(whiptail --title "Port Management for ${PEER_NAME}" --menu "Choose an action:" 15 60 2 "add" "Add a new port forward" "remove" "Remove an existing port forward" 3>&2 2>&1 1>&3)
-        PROTO=$(whiptail --title "Port Management for ${PEER_NAME}" --menu "Choose a protocol:" 15 60 3 "tcp" "" "udp" "" "both" "Forward both TCP and UDP" 3>&2 2>&1 1>&3)
-        PORT=$(whiptail --title "Port Management for ${PEER_NAME}" --inputbox "Enter the port number:" 10 60 "" 3>&1 1>&2 2>&3)
+        ACTION=$(whiptail --title "Port Management for ${PEER_NAME}" --menu "Choose an action:" 15 60 2 "add" "Add a new port forward" "remove" "Remove an existing port forward" 3>&2 2>&1 1>&3) || true
+        PROTO=$(whiptail --title "Port Management for ${PEER_NAME}" --menu "Choose a protocol:" 15 60 3 "tcp" "" "udp" "" "both" "Forward both TCP and UDP" 3>&2 2>&1 1>&3) || true
+        PORT=$(whiptail --title "Port Management for ${PEER_NAME}" --inputbox "Enter the port number:" 10 60 "" 3>&1 1>&2 2>&3) || true
 
+        if [ -z "$ACTION" ] || [ -z "$PROTO" ] || [ -z "$PORT" ]; then
+          whiptail --title "Error" --msgbox "All fields are mandatory. Aborting." 8 78
+          return
+        fi
+        
         manage_rule() {
             local l_action=$1; local l_proto=$2; local l_port=$3
             local grep_rule="-A PREROUTING -i ${VPS_PUBLIC_INTERFACE} -p ${l_proto} -m ${l_proto} --dport ${l_port} -j DNAT --to-destination ${VM_PRIVATE_IP}"
@@ -221,20 +240,26 @@ view_ports_vps() {
         return
     fi
     
-    PEER_INFO_FILE=$(ls /etc/wireguard/peers/*.info | xargs -n 1 basename | whiptail --title "View Ports" --menu "Select a peer to view ports for:" 20 78 12 3>&1 1>&2 2>&3) || true
+    local options=()
+    for f in /etc/wireguard/peers/*.info; do
+        local peer_name=$(grep 'PEER_NAME' "$f" | cut -d'=' -f2)
+        local base_filename=$(basename "$f")
+        options+=("$base_filename" "Peer: ${peer_name}")
+    done
+
+    PEER_INFO_FILE=$(whiptail --title "View Ports" --menu "Select a peer to view ports for:" 20 78 12 "${options[@]}" 3>&2 2>&1 1>&3) || true
 
     if [ -n "$PEER_INFO_FILE" ]; then
         source "/etc/wireguard/peers/${PEER_INFO_FILE}"
         source /etc/wireguard/wirewarp.conf
-
-        # Add '|| true' to prevent the script from exiting if grep finds no matches
+        
         local rules=$(iptables-save | grep -- "-A PREROUTING -i ${VPS_PUBLIC_INTERFACE}" | grep -- "-j DNAT --to-destination ${VM_PRIVATE_IP}" || true)
         
         if [ -z "$rules" ]; then
-            whiptail --title "Forwarded Ports" --msgbox "No active WireWarp port forwarding rules found." 10 78
+            whiptail --title "Forwarded Ports" --msgbox "No active WireWarp port forwarding rules found for peer '${PEER_NAME}'." 10 78
         else
             local formatted_rules=$(echo "$rules" | awk '{print "Protocol: " $6 ", Port: " $10}')
-            whiptail --title "Active Forwarded Ports" --msgbox "The following ports are being forwarded to ${VM_PRIVATE_IP}:\n\n${formatted_rules}" 20 78
+            whiptail --title "Active Ports for ${PEER_NAME}" --msgbox "The following ports are being forwarded to ${VM_PRIVATE_IP}:\n\n${formatted_rules}" 20 78
         fi
     fi
 }
