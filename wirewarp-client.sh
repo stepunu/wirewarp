@@ -29,7 +29,7 @@ VM_NETWORK=$(echo "${VM_GATEWAY_IP}" | awk -F. '{print $1"."$2"."$3".0/24"}')
 
 echo "--- Installing Prerequisites ---"
 apt-get update >/dev/null
-DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard iptables-persistent >/dev/null
+DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard iptables-persistent resolvconf >/dev/null
 
 echo "--- Configuring WireGuard Interface (wg0) ---"
 mkdir -p /etc/wireguard
