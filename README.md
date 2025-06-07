@@ -50,8 +50,9 @@ After the tunnel is active, configure your Windows VM according to the instructi
 
 ### Operations
 *   **[VPS] Manage Forwarded Ports (Option 4):** Add or remove port forwarding rules for your VM.
-*   **[All] Check Tunnel Status (Option 5):** Check the live status of the WireGuard interface.
-*   **[All] Uninstall WireWarp (Option 6):** Completely remove all changes made by the script.
+*   **[VPS] View Forwarded Ports (Option 5):** Display a list of all currently active port forwarding rules created by WireWarp.
+*   **[All] Check Tunnel Status (Option 6):** Check the live status of the WireGuard interface.
+*   **[All] Uninstall WireWarp (Option 7):** Completely remove all changes made by the script.
 
 ### Port Forwarding
 

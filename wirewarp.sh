@@ -228,6 +228,25 @@ manage_ports_vps() {
     whiptail --title "Success" --msgbox "Port rules updated successfully." 8 78
 }
 
+# Function to view forwarded ports on the VPS
+view_ports_vps() {
+    check_root
+    if [ ! -f /etc/wireguard/wirewarp.conf ]; then
+        whiptail --title "Error" --msgbox "Could not find the WireWarp config file. Please run Step 3 on the VPS first." 8 78
+        exit 1
+    fi
+    source /etc/wireguard/wirewarp.conf
+
+    local rules=$(iptables-save | grep -- "-A PREROUTING -i ${VPS_PUBLIC_INTERFACE}" | grep -- "-j DNAT --to-destination ${VM_PRIVATE_IP}")
+    
+    if [ -z "$rules" ]; then
+        whiptail --title "Forwarded Ports" --msgbox "No active WireWarp port forwarding rules found." 10 78
+    else
+        local formatted_rules=$(echo "$rules" | awk '{print "Protocol: " $6 ", Port: " $8}')
+        whiptail --title "Active Forwarded Ports" --msgbox "The following ports are being forwarded to ${VM_PRIVATE_IP}:\n\n${formatted_rules}" 20 78
+    fi
+}
+
 # Function to check WireGuard status
 check_status() {
     check_root
@@ -266,23 +285,25 @@ check_root
 install_packages whiptail
 
 while true; do
-  CHOICE=$(whiptail --title "WireWarp - WireGuard Tunnel Script" --menu "What do you want to do?" 20 78 7 \
+  CHOICE=$(whiptail --title "WireWarp - WireGuard Tunnel Script" --menu "What do you want to do?" 22 78 8 \
     "1" "[VPS] Step 1: Initialize VPS" \
     "2" "[Proxmox] Step 2: Initialize Proxmox Host" \
     "3" "[VPS] Step 3: Complete VPS Setup" \
     "4" "[VPS] Manage Forwarded Ports" \
-    "5" "[All] Check Tunnel Status" \
-    "6" "[All] Uninstall WireWarp" \
-    "7" "Exit" 3>&2 2>&1 1>&3)
+    "5" "[VPS] View Forwarded Ports" \
+    "6" "[All] Check Tunnel Status" \
+    "7" "[All] Uninstall WireWarp" \
+    "8" "Exit" 3>&2 2>&1 1>&3)
   
   case $CHOICE in
     1) vps_init ;;
     2) proxmox_init ;;
     3) vps_complete ;;
     4) manage_ports_vps ;;
-    5) check_status ;;
-    6) uninstall ;;
-    7) break ;;
+    5) view_ports_vps ;;
+    6) check_status ;;
+    7) uninstall ;;
+    8) break ;;
     *) break ;; # Exit on Esc/Cancel
   esac
 done 
