@@ -380,7 +380,8 @@ uninstall() {
         systemctl disable wg-quick@wg0 >/dev/null 2>&1 || true
 
         if [ -f /etc/wireguard/vps_private.key ]; then
-            # Remove iptables rules first
+            # VPS Server cleanup
+            whiptail --title "Uninstalling..." --infobox "Cleaning up VPS server configuration..." 8 78
             if [ -f /etc/wireguard/wirewarp.conf ]; then
                 source /etc/wireguard/wirewarp.conf
                 iptables -t nat -F PREROUTING 2>/dev/null || true
@@ -388,12 +389,31 @@ uninstall() {
             apt-get purge -y wireguard netfilter-persistent >/dev/null
             rm -rf /etc/wireguard
             whiptail --title "Info" --msgbox "VPS cleanup complete." 8 78
-        elif [ -f /etc/wireguard/proxmox_private.key ]; then
-            ifdown vmbr1 >/dev/null 2>&1 || true
-            sed -i '/# WireWarp Tunnel Bridge - Start/,/# WireWarp Tunnel Bridge - End/d' /etc/network/interfaces
-            apt-get purge -y wireguard iptables-persistent >/dev/null
+        elif [ -f /etc/wireguard/wg0.conf ]; then
+            # Client cleanup (Proxmox or other client)
+            whiptail --title "Uninstalling..." --infobox "Cleaning up client configuration..." 8 78
+            
+            # Remove bridge configurations from /etc/network/interfaces
+            sed -i '/# WireWarp Bridge for vmbr1/,/^$/d' /etc/network/interfaces 2>/dev/null || true
+            sed -i '/# WireWarp Tunnel Bridge - Start/,/# WireWarp Tunnel Bridge - End/d' /etc/network/interfaces 2>/dev/null || true
+            
+            # Try to bring down common bridge names
+            for bridge in vmbr1 vmbr2 vmbr3; do
+                ifdown "$bridge" >/dev/null 2>&1 || true
+            done
+            
+            # Remove iptables NAT rules related to WireWarp
+            iptables-save | grep -v "POSTROUTING.*10\.99\." | iptables-restore 2>/dev/null || true
+            
+            apt-get purge -y wireguard iptables-persistent >/dev/null 2>&1 || true
             rm -rf /etc/wireguard
-            whiptail --title "Info" --msgbox "Proxmox cleanup complete. A reboot is recommended." 8 78
+            whiptail --title "Info" --msgbox "Client cleanup complete. A reboot is recommended to fully clean network configuration." 8 78
+        else
+            # Generic cleanup if no specific installation type detected
+            whiptail --title "Uninstalling..." --infobox "Performing generic WireGuard cleanup..." 8 78
+            apt-get purge -y wireguard iptables-persistent netfilter-persistent >/dev/null 2>&1 || true
+            rm -rf /etc/wireguard
+            whiptail --title "Info" --msgbox "Generic cleanup complete. Please manually check for any remaining configuration files." 8 78
         fi
     fi
 }
