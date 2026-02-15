@@ -12,9 +12,10 @@ This architecture uses a standard NAT-based approach that is simple, secure, and
 
 ## How to Use
 
-The project now consists of two scripts:
+The project now consists of three scripts:
 *   `wirewarp.sh`: The interactive management script for your central VPS.
 *   `wirewarp-client.sh`: The non-interactive setup script for your client machines.
+*   `wirewarp-client.uninstall.sh`: The uninstallation script for client machines.
 
 ### Server Setup (VPS)
 Run the interactive script on your central VPS. It will guide you through the process.
@@ -47,7 +48,17 @@ After the client setup is complete, configure your Windows VM with the IP addres
 *   **[VPS] Manage Forwarded Ports (Option 4):** Add or remove port forwarding rules for your VM.
 *   **[VPS] View Forwarded Ports (Option 5):** Display a list of all currently active port forwarding rules created by WireWarp.
 *   **[All] Check Tunnel Status (Option 6):** Check the live status of the WireGuard interface.
-*   **[All] Uninstall WireWarp (Option 7):** Completely remove all changes made by the script.
+*   **[VPS] Uninstall WireWarp (Option 7):** Completely remove all changes made by the server script.
+
+### Client Uninstallation
+To completely remove WireWarp from a client machine (e.g., Proxmox Host), run the uninstallation script:
+```bash
+sudo bash wirewarp-client.uninstall.sh
+```
+Or if you want to run it directly from the repository:
+```bash
+sudo bash -c "$(curl -fsSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp-client.uninstall.sh)"
+```
 
 ### Port Forwarding
 
