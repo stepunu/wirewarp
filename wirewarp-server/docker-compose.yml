@@ -1,0 +1,30 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://wirewarp:secret@db:5432/wirewarp
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - AGENT_TOKEN_EXPIRY_HOURS=24
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./static:/app/static
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=wirewarp
+      - POSTGRES_USER=wirewarp
+      - POSTGRES_PASSWORD=secret
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wirewarp"]
+      interval: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
