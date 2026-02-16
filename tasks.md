@@ -114,7 +114,7 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
 ### 3.4 Build and test
 - [x] Create `Makefile` with build targets (linux/amd64)
 - [x] Create systemd unit file template (`wirewarp-agent.service`)
-- [ ] Verify: agent connects to control server, registers, sends heartbeats, appears as "Connected"
+- [x] Verify: agent connects to control server, registers, sends heartbeats, appears as "Connected"
 
 ---
 
