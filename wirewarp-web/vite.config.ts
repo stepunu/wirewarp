@@ -5,7 +5,7 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
-    outDir: '../wirewarp-server/static',
+    outDir: process.env.BUILD_OUT || '../wirewarp-server/static',
     emptyOutDir: true,
   },
   server: {

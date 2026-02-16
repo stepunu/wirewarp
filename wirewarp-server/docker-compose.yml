@@ -1,6 +1,8 @@
 services:
   api:
-    build: .
+    build:
+      context: ..
+      dockerfile: wirewarp-server/Dockerfile
     ports:
       - "8100:8000"
     environment:
@@ -10,8 +12,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    volumes:
-      - ./static:/app/static
 
   db:
     image: postgres:16-alpine
