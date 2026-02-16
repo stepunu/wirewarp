@@ -90,13 +90,13 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
 ## Phase 3: Go Agent — Skeleton
 
 ### 3.1 Project scaffolding
-- [ ] Create `wirewarp-agent/` directory structure per ARCHITECTURE.md
-- [ ] Initialize Go module (`go mod init github.com/wirewarp/agent`)
-- [ ] Create `cmd/agent/main.go` — entrypoint with `--mode` flag (server/client), `--config` flag
-- [ ] Create `internal/config/` — YAML config struct (control_server_url, agent_token, mode)
+- [x] Create `wirewarp-agent/` directory structure per ARCHITECTURE.md
+- [x] Initialize Go module (`go mod init github.com/wirewarp/agent`)
+- [x] Create `cmd/agent/main.go` — entrypoint with `--mode` flag (server/client), `--config` flag
+- [x] Create `internal/config/` — YAML config struct (control_server_url, agent_token, mode)
 
 ### 3.2 WebSocket client
-- [ ] Create `internal/websocket/client.go` — persistent WebSocket connection
+- [x] Create `internal/websocket/client.go` — persistent WebSocket connection
   - Connect to control server URL
   - Send registration message on first run (with token)
   - Store JWT after successful registration in config file
@@ -106,14 +106,14 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
   - 90-second read deadline for detecting dead connections
 
 ### 3.3 Command executor framework
-- [ ] Create `internal/executor/executor.go` — command dispatcher interface
-- [ ] Register command handlers by message type
-- [ ] For now: log received commands and return success (no-op handlers)
-- [ ] Send `command_result` responses back via WebSocket
+- [x] Create `internal/executor/executor.go` — command dispatcher interface
+- [x] Register command handlers by message type
+- [x] For now: log received commands and return success (no-op handlers)
+- [x] Send `command_result` responses back via WebSocket
 
 ### 3.4 Build and test
-- [ ] Create `Makefile` with build targets (linux/amd64)
-- [ ] Create systemd unit file template (`wirewarp-agent.service`)
+- [x] Create `Makefile` with build targets (linux/amd64)
+- [x] Create systemd unit file template (`wirewarp-agent.service`)
 - [ ] Verify: agent connects to control server, registers, sends heartbeats, appears as "Connected"
 
 ---
