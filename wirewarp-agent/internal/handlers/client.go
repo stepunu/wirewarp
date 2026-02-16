@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/wirewarp/agent/internal/config"
 	"github.com/wirewarp/agent/internal/executor"
@@ -153,7 +154,7 @@ func (h *ClientHandlers) handleWGDown(raw json.RawMessage) (string, error) {
 		return "already down", nil
 	}
 	if h.cfg.Client != nil {
-		gwCfg := buildGatewayConfig(h.cfg.Client)
+		gwCfg := h.buildGatewayConfig(h.cfg.Client)
 		wireguard.TeardownGatewayRouting(gwCfg) //nolint:errcheck
 	}
 	if err := h.wg.Down(); err != nil {
@@ -164,11 +165,11 @@ func (h *ClientHandlers) handleWGDown(raw json.RawMessage) (string, error) {
 }
 
 func (h *ClientHandlers) applyGateway(s *config.ClientState) error {
-	gwCfg := buildGatewayConfig(s)
+	gwCfg := h.buildGatewayConfig(s)
 	return wireguard.ApplyGatewayRouting(gwCfg)
 }
 
-func buildGatewayConfig(s *config.ClientState) wireguard.GatewayConfig {
+func (h *ClientHandlers) buildGatewayConfig(s *config.ClientState) wireguard.GatewayConfig {
 	return wireguard.GatewayConfig{
 		TunnelIface:     s.WGInterface,
 		LANIface:        s.LANIface,
@@ -178,6 +179,7 @@ func buildGatewayConfig(s *config.ClientState) wireguard.GatewayConfig {
 		GatewayLANIP:    s.LANIP,
 		LANNetwork:      s.LANNetwork,
 		IsGateway:       s.IsGateway,
+		ControlServerIP: hostFromURL(h.cfg.ControlServerURL),
 	}
 }
 
@@ -189,4 +191,19 @@ func hostFromEndpoint(endpoint string) string {
 		}
 	}
 	return endpoint
+}
+
+// hostFromURL extracts the hostname/IP from a URL like "ws://1.2.3.4:8100/ws".
+func hostFromURL(rawURL string) string {
+	// Strip scheme
+	s := rawURL
+	if idx := strings.Index(s, "://"); idx >= 0 {
+		s = s[idx+3:]
+	}
+	// Strip path
+	if idx := strings.IndexByte(s, '/'); idx >= 0 {
+		s = s[:idx]
+	}
+	// Strip port
+	return hostFromEndpoint(s)
 }

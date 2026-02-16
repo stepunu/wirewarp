@@ -14,8 +14,9 @@ const (
 	replyTableName = "tunnel"
 
 	// ip rule priorities — lower value = higher precedence
-	prioVPSException  = "100"
-	prioLANException  = "200"
+	prioControlException = "99"  // control server bypass
+	prioVPSException     = "100"
+	prioLANException     = "200"
 	prioForwardLAN    = "5000" // gateway mode only
 	prioForwardSelf   = "5100"
 	prioReplyMark     = "30000"
@@ -31,6 +32,9 @@ type GatewayConfig struct {
 	GatewayLANIP   string // this machine's LAN IP, e.g. "192.168.20.110"
 	LANNetwork     string // e.g. "192.168.20.0/24"
 	IsGateway      bool   // if false, skip LAN-forwarding rules and Docker rules
+	// ControlServerIP is the IP of the WireWarp control server. Traffic to this IP
+	// must bypass the tunnel so the agent can maintain its WebSocket connection.
+	ControlServerIP string
 }
 
 // ApplyGatewayRouting performs the full 7-step policy routing setup.
@@ -136,7 +140,7 @@ func flushRoutes(cfg GatewayConfig) error {
 }
 
 func flushIPRules(cfg GatewayConfig) error {
-	for _, prio := range []string{prioVPSException, prioLANException, prioForwardLAN, prioForwardSelf, prioReplyMark, "99", "1000", "2000"} {
+	for _, prio := range []string{prioControlException, prioVPSException, prioLANException, prioForwardLAN, prioForwardSelf, prioReplyMark, "1000", "2000"} {
 		exec.Command("ip", "rule", "del", "priority", prio).Run()
 	}
 	return nil
@@ -164,6 +168,12 @@ func applyIPRules(cfg GatewayConfig) error {
 	// Priority 100: VPS endpoint traffic stays on main table (prevents tunnel loop)
 	if err := ip("rule", "add", "to", cfg.VPSEndpointIP, "table", "main", "priority", prioVPSException); err != nil {
 		return err
+	}
+	// Priority 99: Control server traffic stays on main table (keeps WebSocket alive)
+	if cfg.ControlServerIP != "" && cfg.ControlServerIP != cfg.VPSEndpointIP {
+		if err := ip("rule", "add", "to", cfg.ControlServerIP, "table", "main", "priority", prioControlException); err != nil {
+			return err
+		}
 	}
 	// Priority 200: LAN traffic stays local
 	if err := ip("rule", "add", "to", cfg.LANNetwork, "table", "main", "priority", prioLANException); err != nil {
