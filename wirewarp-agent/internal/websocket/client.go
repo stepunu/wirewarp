@@ -41,7 +41,6 @@ func New(cfg *config.Config, cfgPath string) *Client {
 		}
 		return c.sendFn(result)
 	})
-	registerNoopHandlers(c.exec)
 	return c
 }
 
@@ -161,20 +160,6 @@ func (c *Client) connect(ctx context.Context) error {
 	}
 }
 
-// registerNoopHandlers registers placeholder handlers for all known command types.
-// Phase 4 will replace these with real implementations.
-func registerNoopHandlers(exec *executor.Executor) {
-	noop := func(_ json.RawMessage) (string, error) {
-		return "ok (no-op)", nil
-	}
-	for _, t := range []string{
-		"wg_init", "wg_add_peer", "wg_remove_peer",
-		"iptables_add_forward", "iptables_remove_forward",
-		"gateway_up", "gateway_down", "agent_update",
-	} {
-		exec.Register(t, noop)
-	}
-}
 
 func jitter(d time.Duration) time.Duration {
 	delta := float64(d) * 0.25

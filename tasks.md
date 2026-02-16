@@ -121,14 +121,14 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
 ## Phase 4: Go Agent — WireGuard & iptables
 
 ### 4.1 WireGuard wrappers (server mode)
-- [ ] Create `internal/wireguard/server.go`
+- [x] Create `internal/wireguard/server.go`
   - Generate keypair (`wg genkey` / `wg pubkey`), store private key in `/etc/wireguard/`
   - Initialize wg0 interface with server config
   - Add/remove peers via `wg set` or config file rewrite + `wg syncconf`
   - Save config to disk after every change
 
 ### 4.2 iptables wrappers (server mode)
-- [ ] Create `internal/iptables/server.go`
+- [x] Create `internal/iptables/server.go`
   - Add/remove DNAT PREROUTING rules
   - Add/remove FORWARD rules
   - Add MASQUERADE for NAT
@@ -136,14 +136,14 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
   - Use `iptables -C` check before adding to prevent duplicates
 
 ### 4.3 WireGuard wrappers (client mode)
-- [ ] Create `internal/wireguard/client.go`
+- [x] Create `internal/wireguard/client.go`
   - Generate keypair, store private key
   - Write `wg0.conf` with `Table = off`
   - Bring interface up/down via `wg-quick`
   - Update peer endpoint if server changes
 
 ### 4.4 Gateway routing (client mode)
-- [ ] Create `internal/wireguard/gateway.go` — the full policy routing setup
+- [x] Create `internal/wireguard/gateway.go` — the full policy routing setup
   - Ensure `/etc/iproute2/rt_tables` has tunnel table entry
   - Apply kernel sysctl settings (ip_forward, rp_filter per-interface)
   - Set up routing tables (WG_TABLE_ID=51820, REPLY_TABLE_NAME=tunnel)
@@ -155,12 +155,12 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
   - Flush-before-apply pattern for idempotency
   - Save iptables via `netfilter-persistent save`
   - Teardown function that cleans everything up
-- [ ] Skip priority-5000 and Docker rules when `is_gateway=false`
+- [x] Skip priority-5000 and Docker rules when `is_gateway=false`
 
 ### 4.5 Offline resilience
-- [ ] On startup: apply last known config from disk before connecting to control server
-- [ ] After every config change: persist to disk immediately
-- [ ] WireGuard interface stays up regardless of WebSocket connection state
+- [x] On startup: apply last known config from disk before connecting to control server
+- [x] After every config change: persist to disk immediately
+- [x] WireGuard interface stays up regardless of WebSocket connection state
 
 ---
 

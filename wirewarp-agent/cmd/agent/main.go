@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/wirewarp/agent/internal/config"
+	"github.com/wirewarp/agent/internal/handlers"
 	wsclient "github.com/wirewarp/agent/internal/websocket"
 )
 
@@ -43,14 +44,28 @@ func main() {
 
 	log.Printf("Starting WireWarp agent (mode=%s)", cfg.Mode)
 
-	// Phase 4: apply last known WireGuard config from disk before connecting
-
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	client := wsclient.New(cfg, *cfgPath)
 
-	// Phase 4: register real command handlers on client.Exec() here
+	// Apply last-known config from disk and register real command handlers (task 4.5).
+	switch cfg.Mode {
+	case "server":
+		srv, err := handlers.NewServer(cfg, *cfgPath)
+		if err != nil {
+			log.Fatalf("Failed to initialise server handlers: %v", err)
+		}
+		srv.Register(client.Exec())
+	case "client":
+		cli, err := handlers.NewClient(cfg, *cfgPath)
+		if err != nil {
+			log.Fatalf("Failed to initialise client handlers: %v", err)
+		}
+		cli.Register(client.Exec())
+	default:
+		log.Fatalf("Unknown mode: %s (must be 'server' or 'client')", cfg.Mode)
+	}
 
 	client.Run(ctx)
 	log.Println("Agent stopped")
