@@ -25,7 +25,7 @@ export default function Agents() {
   const controlUrl = window.location.origin
   const binaryUrl = 'https://github.com/stepunu/wirewarp/raw/main/wirewarp-agent/dist/wirewarp-agent'
   const installCmd = token
-    ? `curl -fsSL -o /usr/local/bin/wirewarp-agent ${binaryUrl} && chmod +x /usr/local/bin/wirewarp-agent && wirewarp-agent --mode ${agentType} --url ${controlUrl} --token ${token}`
+    ? `sudo bash -c 'curl -fsSL -o /usr/local/bin/wirewarp-agent ${binaryUrl} && chmod +x /usr/local/bin/wirewarp-agent' && sudo wirewarp-agent --mode ${agentType} --url ${controlUrl} --token ${token}`
     : ''
 
   return (
