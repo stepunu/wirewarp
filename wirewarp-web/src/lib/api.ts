@@ -74,6 +74,7 @@ export const tunnelServers = {
       method: 'PATCH',
       body: JSON.stringify(data),
     }),
+  del: (id: string) => request<void>(`/tunnel-servers/${id}`, { method: 'DELETE' }),
 }
 
 // Tunnel Clients
@@ -85,6 +86,7 @@ export const tunnelClients = {
       method: 'PATCH',
       body: JSON.stringify(data),
     }),
+  del: (id: string) => request<void>(`/tunnel-clients/${id}`, { method: 'DELETE' }),
 }
 
 // Port Forwards

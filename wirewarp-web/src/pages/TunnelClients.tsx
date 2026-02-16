@@ -18,6 +18,11 @@ export default function TunnelClients() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['tunnel-clients'] }); setEditing(null) },
   })
 
+  const del = useMutation({
+    mutationFn: tunnelClients.del,
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['tunnel-clients'] }); setEditing(null) },
+  })
+
   function startEdit(c: TunnelClient) {
     setEditing(c.id)
     setForm({
@@ -106,9 +111,13 @@ export default function TunnelClients() {
                   </div>
                 )}
 
-                <div className="flex gap-2 justify-end mt-2">
-                  <button onClick={() => setEditing(null)} className="text-sm text-gray-400 hover:text-white px-3 py-1">Cancel</button>
-                  <button onClick={() => update.mutate(c)} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm">Save</button>
+                <div className="flex gap-2 justify-between mt-2">
+                  <button onClick={() => { if (confirm('Delete this tunnel client?')) del.mutate(c.id) }}
+                    className="text-sm text-red-400 hover:text-red-300 px-3 py-1">Delete</button>
+                  <div className="flex gap-2">
+                    <button onClick={() => setEditing(null)} className="text-sm text-gray-400 hover:text-white px-3 py-1">Cancel</button>
+                    <button onClick={() => update.mutate(c)} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm">Save</button>
+                  </div>
                 </div>
               </div>
             ) : (

@@ -13,7 +13,7 @@ class TunnelClient(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"))
-    tunnel_server_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tunnel_servers.id"))
+    tunnel_server_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tunnel_servers.id", ondelete="SET NULL"))
     tunnel_ip: Mapped[str | None] = mapped_column(String)
     vm_network: Mapped[str | None] = mapped_column(String)
     lan_ip: Mapped[str | None] = mapped_column(String)

@@ -113,3 +113,17 @@ async def _configure_tunnel(client: TunnelClient, server: TunnelServer, db: Asyn
         logger.info("Sent wg_configure to client agent %s (cmd=%s)", client.agent_id, cmd_id)
     else:
         logger.warning("Client agent %s not connected — wg_configure queued", client.agent_id)
+
+
+@router.delete("/{client_id}", status_code=204)
+async def delete_tunnel_client(
+    client_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    result = await db.execute(select(TunnelClient).where(TunnelClient.id == client_id))
+    client = result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(status_code=404, detail="Tunnel client not found")
+    await db.delete(client)
+    await db.commit()

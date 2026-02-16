@@ -67,3 +67,17 @@ async def update_tunnel_server(
         logger.warning("Agent %s not connected — wg_init queued (cmd=%s)", server.agent_id, cmd_id)
 
     return server
+
+
+@router.delete("/{server_id}", status_code=204)
+async def delete_tunnel_server(
+    server_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    result = await db.execute(select(TunnelServer).where(TunnelServer.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(status_code=404, detail="Tunnel server not found")
+    await db.delete(server)
+    await db.commit()

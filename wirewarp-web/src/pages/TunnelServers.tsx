@@ -16,6 +16,11 @@ export default function TunnelServers() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['tunnel-servers'] }); setEditing(null) },
   })
 
+  const del = useMutation({
+    mutationFn: tunnelServers.del,
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['tunnel-servers'] }); setEditing(null) },
+  })
+
   function startEdit(s: TunnelServer) {
     setEditing(s.id)
     setForm({ wg_port: s.wg_port, public_ip: s.public_ip || '', public_iface: s.public_iface, tunnel_network: s.tunnel_network })
@@ -67,9 +72,13 @@ export default function TunnelServers() {
                   <input value={form.tunnel_network} onChange={(e) => setForm({ ...form, tunnel_network: e.target.value })}
                     className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-white" />
                 </label>
-                <div className="col-span-3 flex gap-2 justify-end mt-2">
-                  <button onClick={() => setEditing(null)} className="text-sm text-gray-400 hover:text-white px-3 py-1">Cancel</button>
-                  <button onClick={() => update.mutate(s)} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm">Save</button>
+                <div className="col-span-4 flex gap-2 justify-between mt-2">
+                  <button onClick={() => { if (confirm('Delete this tunnel server?')) del.mutate(s.id) }}
+                    className="text-sm text-red-400 hover:text-red-300 px-3 py-1">Delete</button>
+                  <div className="flex gap-2">
+                    <button onClick={() => setEditing(null)} className="text-sm text-gray-400 hover:text-white px-3 py-1">Cancel</button>
+                    <button onClick={() => update.mutate(s)} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm">Save</button>
+                  </div>
                 </div>
               </div>
             ) : (
