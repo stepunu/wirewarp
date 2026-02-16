@@ -42,6 +42,15 @@ func EnsureMasquerade(iface string) error {
 	return checkOrAppend(args)
 }
 
+// EnableIPForward enables IPv4 packet forwarding via sysctl.
+func EnableIPForward() error {
+	out, err := exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sysctl ip_forward: %w — %s", err, out)
+	}
+	return nil
+}
+
 // SaveRules persists iptables rules via netfilter-persistent.
 func SaveRules() error {
 	out, err := exec.Command("netfilter-persistent", "save").CombinedOutput()

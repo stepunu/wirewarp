@@ -45,6 +45,15 @@ func NewServer(cfg *config.Config, cfgPath string) (*ServerHandlers, error) {
 		log.Printf("[server] WARN: failed to restore WireGuard interface on startup: %v", err)
 	} else {
 		log.Printf("[server] WireGuard interface %s restored from saved config", s.WGInterface)
+		// Re-apply forwarding and NAT on startup
+		if err := iptables.EnableIPForward(); err != nil {
+			log.Printf("[server] WARN: %v", err)
+		}
+		if s.PublicIface != "" {
+			if err := iptables.EnsureMasquerade(s.PublicIface); err != nil {
+				log.Printf("[server] WARN: masquerade on %s: %v", s.PublicIface, err)
+			}
+		}
 	}
 
 	h.wg = wgSrv
@@ -90,6 +99,17 @@ func (h *ServerHandlers) handleWGInit(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	h.wg = wgSrv
+
+	// Enable forwarding and NAT so tunnel traffic can reach the internet
+	if err := iptables.EnableIPForward(); err != nil {
+		log.Printf("[server] WARN: %v", err)
+	}
+	if err := iptables.EnsureMasquerade(p.PublicIface); err != nil {
+		log.Printf("[server] WARN: masquerade on %s: %v", p.PublicIface, err)
+	}
+	if saveErr := iptables.SaveRules(); saveErr != nil {
+		log.Printf("[server] WARN: iptables save failed: %v", saveErr)
+	}
 
 	// Persist state
 	h.cfg.Server = &config.ServerState{
