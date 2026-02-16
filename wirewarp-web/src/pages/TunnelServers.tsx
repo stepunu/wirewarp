@@ -9,7 +9,7 @@ export default function TunnelServers() {
   const { data: agentList = [] } = useQuery({ queryKey: ['agents'], queryFn: agents.list })
 
   const [editing, setEditing] = useState<string | null>(null)
-  const [form, setForm] = useState({ wg_port: 0, public_iface: '', tunnel_network: '' })
+  const [form, setForm] = useState({ wg_port: 0, public_ip: '', public_iface: '', tunnel_network: '' })
 
   const update = useMutation({
     mutationFn: (s: TunnelServer) => tunnelServers.update(s.id, form),
@@ -18,7 +18,7 @@ export default function TunnelServers() {
 
   function startEdit(s: TunnelServer) {
     setEditing(s.id)
-    setForm({ wg_port: s.wg_port, public_iface: s.public_iface, tunnel_network: s.tunnel_network })
+    setForm({ wg_port: s.wg_port, public_ip: s.public_ip || '', public_iface: s.public_iface, tunnel_network: s.tunnel_network })
   }
 
   function agentName(agentId: string) {
@@ -45,7 +45,13 @@ export default function TunnelServers() {
             </div>
 
             {editing === s.id ? (
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <label className="block">
+                  <span className="text-xs text-gray-400">Public IP</span>
+                  <input value={form.public_ip} onChange={(e) => setForm({ ...form, public_ip: e.target.value })}
+                    placeholder="e.g. 205.147.200.16"
+                    className="mt-1 block w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-white" />
+                </label>
                 <label className="block">
                   <span className="text-xs text-gray-400">WG Port</span>
                   <input type="number" value={form.wg_port} onChange={(e) => setForm({ ...form, wg_port: +e.target.value })}

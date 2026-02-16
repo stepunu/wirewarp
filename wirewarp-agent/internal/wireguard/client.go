@@ -86,7 +86,9 @@ func (c *Client) writeConfig() error {
 
 	b.WriteString("[Peer]\n")
 	b.WriteString(fmt.Sprintf("PublicKey = %s\n", c.cfg.ServerPublicKey))
-	b.WriteString(fmt.Sprintf("Endpoint = %s\n", c.cfg.ServerEndpoint))
+	if c.cfg.ServerEndpoint != "" {
+		b.WriteString(fmt.Sprintf("Endpoint = %s\n", c.cfg.ServerEndpoint))
+	}
 	allowed := c.cfg.AllowedIPs
 	if len(allowed) == 0 {
 		allowed = []string{"0.0.0.0/0"}

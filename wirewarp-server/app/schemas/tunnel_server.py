@@ -20,5 +20,6 @@ class TunnelServerRead(BaseModel):
 
 class TunnelServerUpdate(BaseModel):
     wg_port: int | None = None
+    public_ip: str | None = None
     public_iface: str | None = None
     tunnel_network: str | None = None
