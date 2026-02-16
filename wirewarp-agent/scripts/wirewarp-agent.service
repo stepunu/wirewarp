@@ -2,14 +2,14 @@
 Description=WireWarp Agent
 After=network-online.target
 Wants=network-online.target
+StartLimitBurst=3
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/wirewarp-agent --config /etc/wirewarp/agent.yaml
 Restart=on-failure
 RestartSec=5
-StartLimitBurst=3
-StartLimitIntervalSec=60
 
 # Capabilities needed for WireGuard and iptables
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
