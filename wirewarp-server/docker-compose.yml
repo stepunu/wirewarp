@@ -2,7 +2,7 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "8100:8000"
     environment:
       - DATABASE_URL=postgresql+asyncpg://wirewarp:secret@db:5432/wirewarp
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}

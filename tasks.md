@@ -52,34 +52,34 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
 ### 1.6 Docker setup
 - [x] Create `wirewarp-server/Dockerfile` (Python slim, uvicorn)
 - [x] Create `wirewarp-server/docker-compose.yml` (api + postgres as per ARCHITECTURE.md)
-- [ ] Verify the stack starts, migrations run, and API responds on :8000
+- [x] Verify the stack starts, migrations run, and API responds on :8000
 
 ---
 
 ## Phase 2: Control Server — WebSocket Hub
 
 ### 2.1 Connection manager
-- [ ] Create `app/websocket/hub.py` — ConnectionManager class
+- [x] Create `app/websocket/hub.py` — ConnectionManager class
   - Track connected agents by agent_id
   - Handle connect/disconnect lifecycle
   - Send command to specific agent by ID
   - Broadcast to all agents of a type
 
 ### 2.2 Agent WebSocket endpoint
-- [ ] Create WebSocket route `/ws/agent` in `app/main.py`
-- [ ] Authentication: agent sends JWT on connect, validate before accepting
-- [ ] Registration flow: if agent sends `type: "register"` with token, validate token, create agent record, issue JWT
-- [ ] On connect: update agent status to `connected`, update `last_seen`
-- [ ] On disconnect: update agent status to `disconnected`
+- [x] Create WebSocket route `/ws/agent` in `app/main.py`
+- [x] Authentication: agent sends JWT on connect, validate before accepting
+- [x] Registration flow: if agent sends `type: "register"` with token, validate token, create agent record, issue JWT
+- [x] On connect: update agent status to `connected`, update `last_seen`
+- [x] On disconnect: update agent status to `disconnected`
 
 ### 2.3 Message handlers
-- [ ] Create `app/websocket/handlers.py` — dispatch incoming messages by type
-- [ ] Handle `heartbeat` — update `last_seen`
-- [ ] Handle `command_result` — log to `command_log` table, update relevant state
-- [ ] Handle `metrics` — store in `metrics` table
+- [x] Create `app/websocket/handlers.py` — dispatch incoming messages by type
+- [x] Handle `heartbeat` — update `last_seen`
+- [x] Handle `command_result` — log to `command_log` table, update relevant state
+- [x] Handle `metrics` — store in `metrics` table
 
 ### 2.4 Command dispatch service
-- [ ] Create `app/services/agent_commands.py`
+- [x] Create `app/services/agent_commands.py`
   - Build command messages (wg_init, wg_add_peer, wg_remove_peer, iptables_add_forward, iptables_remove_forward)
   - Send via ConnectionManager
   - Log command to `command_log` with pending status
