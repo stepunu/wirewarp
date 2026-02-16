@@ -1,80 +1,192 @@
 # WireWarp
 
-WireWarp is an interactive script to set up a robust, NAT-based WireGuard server that can manage multiple client tunnels. This allows virtual machines on different remote networks to have all of their traffic securely routed through the public IP of a central VPS.
+Self-hosted WireGuard tunnel management platform. Deploy tunnel servers on VPS instances, connect gateway clients from your LAN, manage port forwarding — all from a single dashboard.
 
 ## Architecture
 
-This architecture uses a standard NAT-based approach that is simple, secure, and universally compatible.
-
-1.  **WireWarp Server (VPS):** Runs the main WireGuard service and a management script. It dynamically adds and removes clients (peers).
-2.  **WireWarp Client (e.g., Proxmox Host):** Runs a simple, non-interactive script to configure itself as a peer to the server. It acts as a router for its local VMs.
-3.  **Windows VM:** Is configured with a private IP address and uses its local Proxmox host as its gateway.
-
-## How to Use
-
-The project now consists of three scripts:
-*   `wirewarp.sh`: The interactive management script for your central VPS.
-*   `wirewarp-client.sh`: The non-interactive setup script for your client machines.
-*   `wirewarp-client.uninstall.sh`: The uninstallation script for client machines.
-
-### Server Setup (VPS)
-Run the interactive script on your central VPS. It will guide you through the process.
-```bash
-sudo bash -c "$(curl -fsSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp.sh)"
+```
+┌──────────────────────────────────────┐
+│  Control Server (your home server)   │
+│  FastAPI + PostgreSQL + React        │
+│  docker compose up                   │
+└──────────────┬───────────────────────┘
+               │ wss:// (agents phone home)
+       ┌───────┴────────┐
+       ▼                ▼
+┌──────────────┐  ┌──────────────────┐
+│  VPS         │  │  Gateway LXC/VM  │
+│  Tunnel      │◄─┤  Tunnel Client   │
+│  Server      │  │  Agent           │
+│  Agent       │  │                  │
+│  (WireGuard  │  │  (WireGuard      │
+│   + iptables │  │   + policy       │
+│   DNAT)      │  │   routing)       │
+└──────────────┘  └──────────────────┘
 ```
 
-1.  **Initialize Server (Option 1):** Run this once to set up the main WireGuard service on your VPS. It will display the server's public key, which you will need when adding clients.
-2.  **Add New Peer (Option 2):** Run this for every new client (e.g., every Proxmox host) you want to connect.
-    *   It will ask for a name for the peer.
-    *   It will then generate and display a **single command** for you to run on your client machine. This command contains all the necessary keys and IP addresses.
+Three components:
+- **Control Server** (`wirewarp-server/`) — Python/FastAPI + PostgreSQL + React dashboard, runs in Docker
+- **Go Agent** (`wirewarp-agent/`) — single binary with `--mode server|client`, runs as systemd service
+- **Web Dashboard** (`wirewarp-web/`) — React 18 + TypeScript + Tailwind CSS, built into the server container
 
-### Client Setup (Proxmox Host)
-1.  **Run the Command:** After adding a peer on the server, copy the complete command that the server script provides you. It will look something like this:
-    ```bash
-    bash -c "$(curl ...)" -- '<private_key>' '<tunnel_ip>' ...
-    ```
-2.  **Execute it** on your Proxmox host (or other client machine). You will need to replace `YOUR_VPS_IP_OR_HOSTNAME` with the actual public IP of your VPS.
-3.  The client script will automatically configure the WireGuard interface and the local network bridge.
+## Quick Start
 
-### Windows VM Setup
-After the client setup is complete, configure your Windows VM with the IP addresses that the server script provided you when you added the peer. The settings will be:
-*   **IP address:** `10.99.X.2`
-*   **Subnet mask:** `255.255.255.0`
-*   **Default gateway:** `10.99.X.1`
-*   **Preferred DNS server:** `1.1.1.1`
-*   Ensure any other network adapters have **no gateway** set.
+### 1. Start the control server
 
-### Operations
-*   **[VPS] Manage Forwarded Ports (Option 4):** Add or remove port forwarding rules for your VM.
-*   **[VPS] View Forwarded Ports (Option 5):** Display a list of all currently active port forwarding rules created by WireWarp.
-*   **[All] Check Tunnel Status (Option 6):** Check the live status of the WireGuard interface.
-*   **[VPS] Uninstall WireWarp (Option 7):** Completely remove all changes made by the server script.
-
-### Client Uninstallation
-To completely remove WireWarp from a client machine (e.g., Proxmox Host), run the uninstallation script:
 ```bash
-sudo bash wirewarp-client.uninstall.sh
-```
-Or if you want to run it directly from the repository:
-```bash
-sudo bash -c "$(curl -fsSL https://gitea.step1.ro/step1nu/wirewarp/raw/branch/main/wirewarp-client.uninstall.sh)"
+cd wirewarp-server
+docker compose up -d --build
 ```
 
-### Port Forwarding
+The dashboard is available at `http://localhost:8100`.
 
-To open ports for your game server, SSH into your **remote VPS** and use the helper script. The script can manage `tcp`, `udp`, or `both` protocols simultaneously.
+### 2. Create an admin user
 
-**To add a port for both TCP and UDP (ideal for game servers):**
 ```bash
-/usr/local/bin/manage-ports.sh add both 27016
+docker compose exec api python -c "
+import asyncio
+from app.database import SessionLocal
+from app.models.user import User
+from passlib.context import CryptContext
+
+pwd = CryptContext(schemes=['bcrypt'])
+
+async def create():
+    async with SessionLocal() as db:
+        db.add(User(username='admin', email='admin@wirewarp.local', password_hash=pwd.hash('changeme'), role='admin'))
+        await db.commit()
+        print('Admin user created')
+
+asyncio.run(create())
+"
 ```
 
-**To add a single port:**
+Login with `admin` / `changeme`.
+
+### 3. Deploy a tunnel server agent
+
+In the dashboard: **Agents** → **Add Agent** → select **Tunnel Server** → **Generate Token**.
+
+Copy the install command and run it on your VPS as root:
+
 ```bash
-/usr/local/bin/manage-ports.sh add tcp 80
+curl -fsSL -o /usr/local/bin/wirewarp-agent \
+  https://github.com/stepunu/wirewarp/raw/main/wirewarp-agent/dist/wirewarp-agent \
+  && chmod +x /usr/local/bin/wirewarp-agent \
+  && wirewarp-agent --mode server --url https://your-control-server:8100 --token XXXX-XXXX-XXXX
 ```
 
-**To remove a port:**
+The agent registers, appears in the dashboard as "Connected", and waits for commands.
+
+### 4. Deploy a tunnel client agent
+
+Same flow: **Add Agent** → **Tunnel Client** → **Generate Token** → run on gateway LXC/VM.
+
+Then go to **Tunnel Clients** in the dashboard to:
+- Select which tunnel server to connect to
+- Assign a tunnel IP (e.g. `10.0.0.2`)
+- Enable **Is Gateway** if this machine routes traffic for other LAN devices
+- Set the LAN network and LAN IP when gateway mode is enabled
+
+### 5. Add port forwarding rules
+
+Go to **Port Forwards** → **Add Forward**:
+- Select the tunnel server and client
+- Set protocol, public port, destination IP/port
+- Use templates (DayZ, Minecraft, Web, RDP) for common setups
+
+## Running the agent as a systemd service
+
+A service template is included at `wirewarp-agent/scripts/wirewarp-agent.service`. After the first run (which creates the config at `/etc/wirewarp/agent.yaml`):
+
 ```bash
-/usr/local/bin/manage-ports.sh remove both 27016
-``` 
+cp wirewarp-agent.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now wirewarp-agent
+```
+
+## Development
+
+### Control server
+
+```bash
+cd wirewarp-server
+docker compose up -d --build
+```
+
+### Web dashboard (dev mode with hot reload)
+
+```bash
+cd wirewarp-web
+npm install
+npm run dev
+```
+
+Vite proxies `/api` and `/ws` to `localhost:8100` automatically.
+
+### Go agent
+
+```bash
+cd wirewarp-agent
+make build    # builds to dist/wirewarp-agent (linux/amd64)
+```
+
+## Tech Stack
+
+| Component | Stack |
+|-----------|-------|
+| Control Server | Python 3.11, FastAPI, SQLAlchemy 2.0 (async), PostgreSQL 16, Alembic |
+| Web Dashboard | React 18, TypeScript, Tailwind CSS, React Query, Zustand, Vite |
+| Go Agent | Go 1.22+, single binary, WebSocket client, WireGuard/iptables wrappers |
+| Deployment | Docker Compose (server), systemd (agents) |
+
+## Key Design Decisions
+
+- **Agents phone home** — agents connect outbound to the control server via WebSocket. The control server never initiates connections to agents.
+- **Private keys never leave the agent** — WireGuard keypairs are generated locally. Only public keys are sent to the control server.
+- **Offline resilience** — agents apply last-known config from disk on startup before connecting. Tunnels survive control server outages.
+- **No arbitrary shell execution** — agents only execute whitelisted command types. No eval, no bash -c.
+- **Single binary** — the Go agent uses `--mode server|client` to select behavior. Same binary, different codepath.
+
+## Project Structure
+
+```
+wirewarp/
+├── wirewarp-server/          # Control server (FastAPI + PostgreSQL)
+│   ├── app/
+│   │   ├── main.py           # App entrypoint, WebSocket handler, SPA serving
+│   │   ├── models/           # SQLAlchemy ORM models
+│   │   ├── schemas/          # Pydantic request/response schemas
+│   │   ├── routers/          # REST API endpoints
+│   │   ├── websocket/        # WebSocket hub + message handlers
+│   │   └── services/         # Command dispatch service
+│   ├── alembic/              # Database migrations
+│   ├── Dockerfile            # Multi-stage build (frontend + backend)
+│   └── docker-compose.yml
+├── wirewarp-web/             # React dashboard
+│   └── src/
+│       ├── pages/            # Login, Dashboard, Agents, Tunnels, Port Forwards
+│       ├── components/       # Layout, StatusBadge
+│       └── lib/              # API client, WebSocket store, types
+├── wirewarp-agent/           # Go agent
+│   ├── cmd/agent/main.go     # Entrypoint (--mode flag)
+│   └── internal/
+│       ├── config/           # YAML config persistence
+│       ├── websocket/        # Persistent WebSocket connection
+│       ├── executor/         # Command dispatcher
+│       ├── handlers/         # Server + client command handlers
+│       ├── wireguard/        # WireGuard + gateway routing wrappers
+│       └── iptables/         # iptables DNAT/FORWARD wrappers
+├── legacy/                   # Original bash scripts (reference)
+└── ARCHITECTURE.md           # Full system design document
+```
+
+## Prerequisites
+
+- **Control server**: Docker + Docker Compose
+- **VPS (tunnel server)**: WireGuard, iptables, netfilter-persistent
+- **Gateway (tunnel client)**: WireGuard, iptables, iproute2, netfilter-persistent
+
+## License
+
+Private project.
