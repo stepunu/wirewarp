@@ -177,8 +177,25 @@ func wgQuickDown(iface string) error {
 }
 
 func wgSyncConf(iface, confPath string) error {
-	// wg syncconf requires the interface to already exist.
-	out, err := exec.Command("wg", "syncconf", iface, confPath).CombinedOutput()
+	// wg syncconf only accepts raw WireGuard directives (PrivateKey, Peer, etc.)
+	// and rejects wg-quick directives (Address, Table, DNS, etc.).
+	// Use wg-quick strip to produce a compatible config.
+	stripped, err := exec.Command("wg-quick", "strip", iface).Output()
+	if err != nil {
+		// Fallback: try syncconf directly (works if config has no wg-quick directives)
+		out, err2 := exec.Command("wg", "syncconf", iface, confPath).CombinedOutput()
+		if err2 != nil {
+			return fmt.Errorf("wg syncconf %s: %w — %s", iface, err2, out)
+		}
+		return nil
+	}
+	tmpFile := confPath + ".strip"
+	if err := os.WriteFile(tmpFile, stripped, 0600); err != nil {
+		return fmt.Errorf("write stripped config: %w", err)
+	}
+	defer os.Remove(tmpFile)
+
+	out, err := exec.Command("wg", "syncconf", iface, tmpFile).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("wg syncconf %s: %w — %s", iface, err, out)
 	}
