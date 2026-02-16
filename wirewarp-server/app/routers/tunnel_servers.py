@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -7,6 +9,9 @@ from app.models.tunnel_server import TunnelServer
 from app.models.user import User
 from app.schemas.tunnel_server import TunnelServerRead, TunnelServerUpdate
 from app.auth import get_current_user
+from app.services.agent_commands import send_command
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -41,4 +46,24 @@ async def update_tunnel_server(
         setattr(server, field, value)
     await db.commit()
     await db.refresh(server)
+
+    # Derive the server's tunnel IP (first usable in the network, e.g. 10.0.0.1)
+    tunnel_ip = server.tunnel_network.rsplit(".", 1)[0] + ".1"
+
+    sent, cmd_id = await send_command(
+        agent_id=str(server.agent_id),
+        command_type="wg_init",
+        params={
+            "wg_interface": server.wg_interface,
+            "wg_port": server.wg_port,
+            "tunnel_network": server.tunnel_network,
+            "tunnel_ip": tunnel_ip,
+            "public_iface": server.public_iface,
+            "public_ip": server.public_ip or "",
+        },
+        db=db,
+    )
+    if not sent:
+        logger.warning("Agent %s not connected — wg_init queued (cmd=%s)", server.agent_id, cmd_id)
+
     return server

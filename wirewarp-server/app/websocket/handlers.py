@@ -1,3 +1,5 @@
+import logging
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,6 +8,11 @@ from sqlalchemy import select
 from app.models.agent import Agent
 from app.models.command_log import CommandLog
 from app.models.metric import Metric
+from app.models.tunnel_server import TunnelServer
+from app.models.tunnel_client import TunnelClient
+from app.services.agent_commands import send_command
+
+logger = logging.getLogger(__name__)
 
 
 async def handle_heartbeat(agent_id: str, msg: dict, db: AsyncSession) -> None:
@@ -17,17 +24,19 @@ async def handle_heartbeat(agent_id: str, msg: dict, db: AsyncSession) -> None:
 
 
 async def handle_command_result(agent_id: str, msg: dict, db: AsyncSession) -> None:
-    """Update the command_log entry and mark success/failure."""
+    """Update the command_log entry, extract public keys, and trigger follow-up commands."""
     command_id = msg.get("command_id")
     success = msg.get("success", False)
     output = msg.get("output", "")
 
+    command_type = None
     if command_id:
         result = await db.execute(select(CommandLog).where(CommandLog.id == command_id))
         log = result.scalar_one_or_none()
         if log:
             log.success = success
             log.output = output
+            command_type = log.command_type
             await db.commit()
 
     # Always update last_seen
@@ -36,6 +45,74 @@ async def handle_command_result(agent_id: str, msg: dict, db: AsyncSession) -> N
     if agent:
         agent.last_seen = datetime.now(timezone.utc)
         await db.commit()
+
+    if not success:
+        return
+
+    # Extract and store public keys from wg_init / wg_configure results
+    public_key = _extract_public_key(output)
+
+    if command_type == "wg_init" and public_key:
+        result = await db.execute(
+            select(TunnelServer).where(TunnelServer.agent_id == agent_id)
+        )
+        server = result.scalar_one_or_none()
+        if server:
+            server.wg_public_key = public_key
+            await db.commit()
+            logger.info("Stored server public key for agent %s", agent_id)
+
+    elif command_type == "wg_configure" and public_key:
+        result = await db.execute(
+            select(TunnelClient).where(TunnelClient.agent_id == agent_id)
+        )
+        client = result.scalar_one_or_none()
+        if client:
+            client.wg_public_key = public_key
+            client.status = "connected"
+            await db.commit()
+            logger.info("Stored client public key for agent %s", agent_id)
+
+            # Now that we have the client's public key, add it as a peer on the server
+            if client.tunnel_server_id:
+                await _add_peer_to_server(client, db)
+
+
+async def _add_peer_to_server(client: TunnelClient, db: AsyncSession) -> None:
+    """Send wg_add_peer to the tunnel server agent with the client's public key."""
+    result = await db.execute(
+        select(TunnelServer).where(TunnelServer.id == client.tunnel_server_id)
+    )
+    server = result.scalar_one_or_none()
+    if not server:
+        return
+
+    allowed_ips = [client.tunnel_ip + "/32"]
+    if client.is_gateway and client.vm_network:
+        allowed_ips.append(client.vm_network)
+
+    sent, cmd_id = await send_command(
+        agent_id=str(server.agent_id),
+        command_type="wg_add_peer",
+        params={
+            "peer_name": f"client-{client.tunnel_ip}",
+            "public_key": client.wg_public_key,
+            "tunnel_ip": client.tunnel_ip,
+            "allowed_ips": allowed_ips,
+        },
+        db=db,
+    )
+    if sent:
+        logger.info("Sent wg_add_peer to server agent %s for client %s (cmd=%s)",
+                     server.agent_id, client.tunnel_ip, cmd_id)
+    else:
+        logger.warning("Server agent %s not connected — wg_add_peer not delivered", server.agent_id)
+
+
+def _extract_public_key(output: str) -> str | None:
+    """Extract a WireGuard public key from command output like 'public key: abc123...'"""
+    match = re.search(r"public key:\s*(\S+)", output, re.IGNORECASE)
+    return match.group(1) if match else None
 
 
 async def handle_metrics(agent_id: str, msg: dict, db: AsyncSession) -> None:

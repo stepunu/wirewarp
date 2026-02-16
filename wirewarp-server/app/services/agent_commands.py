@@ -9,8 +9,11 @@ from app.websocket.hub import manager
 
 VALID_COMMAND_TYPES = {
     "wg_init",
+    "wg_configure",
     "wg_add_peer",
     "wg_remove_peer",
+    "wg_update_endpoint",
+    "wg_down",
     "iptables_add_forward",
     "iptables_remove_forward",
     "gateway_up",
