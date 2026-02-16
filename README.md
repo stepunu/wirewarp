@@ -93,13 +93,15 @@ curl -fsSL https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agen
 
 > If not running as root, prefix with `sudo`.
 
+> **Co-located setup:** The control server and tunnel server can run on the same VPS. The control server uses Docker (port 8100) and the agent runs as a systemd service (WireGuard on port 51820) — they don't conflict. Use `--url http://localhost:8100` when installing on the same machine.
+
 Once the agent shows as **Connected** in the dashboard, go to **Tunnel Servers** and click **Edit** to configure:
 - **Public IP** — the VPS public IP (used as WireGuard endpoint)
 - **WG Port** — WireGuard listen port (default: 51820)
-- **Public Interface** — the VPS public network interface (usually `eth0`)
+- **Public Interface** — the VPS public network interface (usually `eth0`, check with `ip route get 1.1.1.1`)
 - **Tunnel Network** — the WireGuard subnet (default: `10.0.0.0/24`)
 
-Click **Save** to push the `wg_init` command to the agent.
+Click **Save** to push the `wg_init` command to the agent. This enables IP forwarding and sets up NAT (MASQUERADE) on the public interface automatically.
 
 ### 5. Deploy a Tunnel Client agent
 
@@ -133,6 +135,16 @@ Run the verification script on the gateway to check all routing rules are applie
 curl -fsSL https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agent/scripts/verify-gateway.sh | bash
 ```
 
+## LAN Device Setup (Gateway Mode)
+
+When a tunnel client is configured as a gateway, other devices on the LAN can route their traffic through the VPS by setting their default gateway to the tunnel client's LAN IP.
+
+On each LAN device:
+- **Default Gateway** — set to the tunnel client's LAN IP (e.g. `192.168.20.110`)
+- **DNS** — set to a public DNS server (e.g. `1.1.1.1` or `8.8.8.8`), since the tunnel doesn't provide DNS
+
+For example, on a Proxmox LXC, edit `/etc/network/interfaces` and set `gateway 192.168.20.110`.
+
 ## Updating Agents
 
 ```bash
@@ -144,6 +156,23 @@ systemctl start wirewarp-agent
 ```
 
 The agent tears down WireGuard and routing on stop, and restores everything on start from saved config.
+
+## Troubleshooting
+
+**Agent can't reach GitHub/internet after stopping:**
+The agent tears down routing on shutdown (since the latest version). If running an older binary, manually flush rules: `wg-quick down wg0` and delete ip rules at priorities 99, 100, 200, 5000, 5100, 30000.
+
+**Tunnel handshake but no internet on LAN devices:**
+Check that the tunnel server VPS has IP forwarding and MASQUERADE enabled. Re-save the tunnel server config in the dashboard to re-trigger `wg_init`, which sets these up automatically.
+
+**`wg show` shows 0 B received:**
+The tunnel server doesn't have the client as a peer. Check the tunnel server agent logs for `wg_add_peer` errors. Re-save the tunnel client config to re-trigger the full setup flow.
+
+**Install script hangs on Debian:**
+Ensure you're running the latest install script which sets `DEBIAN_FRONTEND=noninteractive`. Older versions would hang on the `iptables-persistent` interactive prompt.
+
+**Control server unreachable after gateway routing is applied:**
+The agent adds a routing exception for the control server IP (priority 99). If using an older binary without this fix, update the agent.
 
 ## Development
 
