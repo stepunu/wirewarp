@@ -6,11 +6,11 @@ Self-hosted WireGuard tunnel management platform. Deploy tunnel servers on VPS i
 
 ```
 ┌──────────────────────────────────────┐
-│  Control Server (your home server)   │
+│  Control Server (VPS or home server) │
 │  FastAPI + PostgreSQL + React        │
 │  docker compose up                   │
 └──────────────┬───────────────────────┘
-               │ wss:// (agents phone home)
+               │ WebSocket (agents phone home)
        ┌───────┴────────┐
        ▼                ▼
 ┌──────────────┐  ┌──────────────────┐
@@ -31,14 +31,22 @@ Three components:
 
 ## Quick Start
 
-### 1. Start the control server
+### 1. Deploy the Control Server
+
+On a VPS or server with Docker installed:
 
 ```bash
-cd wirewarp-server
+git clone https://github.com/stepunu/wirewarp.git
+cd wirewarp/wirewarp-server
+
+# Set a secure secret key
+export SECRET_KEY=$(openssl rand -hex 32)
+
+# Start the control server
 docker compose up -d --build
 ```
 
-The dashboard is available at `http://localhost:8100`.
+The dashboard is available at `http://<your-server-ip>:8100`.
 
 ### 2. Create an admin user
 
@@ -63,47 +71,78 @@ asyncio.run(create())
 
 Login with `admin` / `changeme`.
 
-### 3. Deploy a tunnel server agent
-
-In the dashboard: **Agents** → **Add Agent** → select **Tunnel Server** → **Generate Token**.
-
-Copy the install command and run it on your VPS as root:
+### 3. Stamp the database migration version
 
 ```bash
-curl -fsSL -o /usr/local/bin/wirewarp-agent \
-  https://github.com/stepunu/wirewarp/raw/main/wirewarp-agent/dist/wirewarp-agent \
-  && chmod +x /usr/local/bin/wirewarp-agent \
-  && wirewarp-agent --mode server --url https://your-control-server:8100 --token XXXX-XXXX-XXXX
+docker compose exec api alembic stamp 0002
 ```
 
-The agent registers, appears in the dashboard as "Connected", and waits for commands.
+This marks the auto-created schema so future migrations work correctly.
 
-### 4. Deploy a tunnel client agent
+### 4. Deploy a Tunnel Server agent
 
-Same flow: **Add Agent** → **Tunnel Client** → **Generate Token** → run on gateway LXC/VM.
+In the dashboard: **Agents** > **Add Agent** > select **Tunnel Server** > **Generate Token**.
 
-Then go to **Tunnel Clients** in the dashboard to:
-- Select which tunnel server to connect to
-- Assign a tunnel IP (e.g. `10.0.0.2`)
-- Enable **Is Gateway** if this machine routes traffic for other LAN devices
-- Set the LAN network and LAN IP when gateway mode is enabled
+Copy the install command and run it on your VPS as root. The install script handles all dependencies (WireGuard, iptables, iproute2):
 
-### 5. Add port forwarding rules
+```bash
+curl -fsSL https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agent/scripts/install.sh | bash -s -- \
+  --mode server --url http://<control-server-ip>:8100 --token XXXX-XXXX-XXXX
+```
 
-Go to **Port Forwards** → **Add Forward**:
+> If not running as root, prefix with `sudo`.
+
+Once the agent shows as **Connected** in the dashboard, go to **Tunnel Servers** and click **Edit** to configure:
+- **Public IP** — the VPS public IP (used as WireGuard endpoint)
+- **WG Port** — WireGuard listen port (default: 51820)
+- **Public Interface** — the VPS public network interface (usually `eth0`)
+- **Tunnel Network** — the WireGuard subnet (default: `10.0.0.0/24`)
+
+Click **Save** to push the `wg_init` command to the agent.
+
+### 5. Deploy a Tunnel Client agent
+
+Same flow: **Add Agent** > **Tunnel Client** > **Generate Token** > run the install command on the gateway LXC/VM.
+
+Then go to **Tunnel Clients** in the dashboard and click **Edit** to configure:
+- **Connect to Server** — select the tunnel server from step 4
+- **Tunnel IP** — assign a tunnel IP (e.g. `10.0.0.3`)
+- **Is Gateway** — enable if this machine routes traffic for other LAN devices
+- **LAN Network** — the local network (e.g. `192.168.20.0/24`)
+- **LAN IP** — the gateway's LAN IP (e.g. `192.168.20.110`)
+
+Click **Save** to push `wg_configure` to the client agent. The tunnel will establish automatically:
+1. Client agent configures WireGuard and applies gateway routing
+2. Client reports its public key back to the control server
+3. Control server sends `wg_add_peer` to the tunnel server
+4. Handshake completes, traffic flows
+
+### 6. Add port forwarding rules (optional)
+
+Go to **Port Forwards** > **Add Forward**:
 - Select the tunnel server and client
 - Set protocol, public port, destination IP/port
 - Use templates (DayZ, Minecraft, Web, RDP) for common setups
 
-## Running the agent as a systemd service
+## Verifying the Gateway
 
-A service template is included at `wirewarp-agent/scripts/wirewarp-agent.service`. After the first run (which creates the config at `/etc/wirewarp/agent.yaml`):
+Run the verification script on the gateway to check all routing rules are applied:
 
 ```bash
-cp wirewarp-agent.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now wirewarp-agent
+curl -fsSL https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agent/scripts/verify-gateway.sh | bash
 ```
+
+## Updating Agents
+
+```bash
+systemctl stop wirewarp-agent
+curl -fsSL -o /usr/local/bin/wirewarp-agent \
+  https://github.com/stepunu/wirewarp/raw/main/wirewarp-agent/dist/wirewarp-agent
+chmod +x /usr/local/bin/wirewarp-agent
+systemctl start wirewarp-agent
+```
+
+The agent tears down WireGuard and routing on stop, and restores everything on start from saved config.
 
 ## Development
 
@@ -145,6 +184,7 @@ make build    # builds to dist/wirewarp-agent (linux/amd64)
 - **Agents phone home** — agents connect outbound to the control server via WebSocket. The control server never initiates connections to agents.
 - **Private keys never leave the agent** — WireGuard keypairs are generated locally. Only public keys are sent to the control server.
 - **Offline resilience** — agents apply last-known config from disk on startup before connecting. Tunnels survive control server outages.
+- **Clean shutdown** — agents tear down WireGuard interfaces and routing rules on stop, preventing leftover rules from breaking connectivity.
 - **No arbitrary shell execution** — agents only execute whitelisted command types. No eval, no bash -c.
 - **Single binary** — the Go agent uses `--mode server|client` to select behavior. Same binary, different codepath.
 
@@ -170,6 +210,7 @@ wirewarp/
 │       └── lib/              # API client, WebSocket store, types
 ├── wirewarp-agent/           # Go agent
 │   ├── cmd/agent/main.go     # Entrypoint (--mode flag)
+│   ├── scripts/              # install.sh, verify-gateway.sh, systemd service
 │   └── internal/
 │       ├── config/           # YAML config persistence
 │       ├── websocket/        # Persistent WebSocket connection
@@ -184,8 +225,7 @@ wirewarp/
 ## Prerequisites
 
 - **Control server**: Docker + Docker Compose
-- **VPS (tunnel server)**: WireGuard, iptables, netfilter-persistent
-- **Gateway (tunnel client)**: WireGuard, iptables, iproute2, netfilter-persistent
+- **Agents**: The install script handles all dependencies automatically. Supports Debian/Ubuntu, RHEL/Fedora, and Alpine.
 
 ## License
 
