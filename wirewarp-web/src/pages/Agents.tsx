@@ -25,7 +25,7 @@ export default function Agents() {
   const controlUrl = window.location.origin
   const installScript = 'https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agent/scripts/install.sh'
   const installCmd = token
-    ? `curl -fsSL ${installScript} | sudo bash -s -- --mode ${agentType} --url ${controlUrl} --token ${token}`
+    ? `curl -fsSL ${installScript} | bash -s -- --mode ${agentType} --url ${controlUrl} --token ${token}`
     : ''
 
   return (
@@ -114,7 +114,7 @@ export default function Agents() {
               </>
             ) : (
               <>
-                <p className="text-sm text-gray-400 mb-2">Run this on the target machine (as root):</p>
+                <p className="text-sm text-gray-400 mb-2">Run this on the target machine as root (prefix with <code className="text-yellow-400">sudo</code> if not root):</p>
                 <pre className="bg-gray-800 border border-gray-700 rounded p-3 text-xs text-green-400 whitespace-pre-wrap break-all select-all">
                   {installCmd}
                 </pre>

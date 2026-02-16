@@ -4,6 +4,8 @@ set -euo pipefail
 # WireWarp Agent installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/.../install.sh | bash -s -- --mode client --url http://x.x.x.x:8100 --token TOKEN
 
+export DEBIAN_FRONTEND=noninteractive
+
 MODE=""
 URL=""
 TOKEN=""
@@ -23,7 +25,7 @@ if [[ -z "$MODE" || -z "$URL" || -z "$TOKEN" ]]; then
 fi
 
 if [[ "$(id -u)" -ne 0 ]]; then
-  echo "This script must be run as root"
+  echo "This script must be run as root (use sudo or run as root directly)"
   exit 1
 fi
 
@@ -34,6 +36,8 @@ echo "==> Installing dependencies..."
 if command -v apt-get &>/dev/null; then
   apt-get update -qq
   apt-get install -y -qq curl wireguard-tools iptables iproute2 >/dev/null
+  # netfilter-persistent for iptables save (optional, noninteractive)
+  apt-get install -y -qq netfilter-persistent iptables-persistent >/dev/null 2>&1 || true
 elif command -v dnf &>/dev/null; then
   dnf install -y -q curl wireguard-tools iptables iproute >/dev/null
 elif command -v yum &>/dev/null; then
@@ -43,11 +47,6 @@ elif command -v apk &>/dev/null; then
 else
   echo "Unsupported package manager — install curl, wireguard-tools, iptables, iproute2 manually"
   exit 1
-fi
-
-# netfilter-persistent for iptables save (Debian/Ubuntu only, optional)
-if command -v apt-get &>/dev/null; then
-  apt-get install -y -qq netfilter-persistent iptables-persistent >/dev/null 2>&1 || true
 fi
 
 echo "==> Downloading wirewarp-agent binary..."
