@@ -56,6 +56,25 @@ func NewClient(cfg *config.Config, cfgPath string) (*ClientHandlers, error) {
 	return h, nil
 }
 
+// Shutdown tears down gateway routing and the WireGuard interface on agent stop.
+func (h *ClientHandlers) Shutdown() {
+	if h.cfg.Client != nil {
+		gwCfg := h.buildGatewayConfig(h.cfg.Client)
+		if err := wireguard.TeardownGatewayRouting(gwCfg); err != nil {
+			log.Printf("[client] WARN: teardown gateway routing: %v", err)
+		} else {
+			log.Println("[client] gateway routing torn down")
+		}
+	}
+	if h.wg != nil {
+		if err := h.wg.Down(); err != nil {
+			log.Printf("[client] WARN: wg-quick down: %v", err)
+		} else {
+			log.Println("[client] WireGuard interface down")
+		}
+	}
+}
+
 // Register binds all client-mode command handlers onto the given executor.
 func (h *ClientHandlers) Register(exec *executor.Executor) {
 	exec.Register("wg_configure", h.handleWGConfigure)

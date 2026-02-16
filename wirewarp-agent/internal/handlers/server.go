@@ -60,6 +60,17 @@ func NewServer(cfg *config.Config, cfgPath string) (*ServerHandlers, error) {
 	return h, nil
 }
 
+// Shutdown tears down the WireGuard interface on agent stop.
+func (h *ServerHandlers) Shutdown() {
+	if h.wg != nil {
+		if err := h.wg.Down(); err != nil {
+			log.Printf("[server] WARN: wg-quick down: %v", err)
+		} else {
+			log.Println("[server] WireGuard interface down")
+		}
+	}
+}
+
 // Register binds all server-mode command handlers onto the given executor.
 func (h *ServerHandlers) Register(exec *executor.Executor) {
 	exec.Register("wg_init", h.handleWGInit)

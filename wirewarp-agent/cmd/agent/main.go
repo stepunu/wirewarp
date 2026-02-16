@@ -49,6 +49,9 @@ func main() {
 
 	client := wsclient.New(cfg, *cfgPath)
 
+	// shutdownFn is called after the WebSocket loop exits to clean up.
+	var shutdownFn func()
+
 	// Apply last-known config from disk and register real command handlers (task 4.5).
 	switch cfg.Mode {
 	case "server":
@@ -57,16 +60,22 @@ func main() {
 			log.Fatalf("Failed to initialise server handlers: %v", err)
 		}
 		srv.Register(client.Exec())
+		shutdownFn = srv.Shutdown
 	case "client":
 		cli, err := handlers.NewClient(cfg, *cfgPath)
 		if err != nil {
 			log.Fatalf("Failed to initialise client handlers: %v", err)
 		}
 		cli.Register(client.Exec())
+		shutdownFn = cli.Shutdown
 	default:
 		log.Fatalf("Unknown mode: %s (must be 'server' or 'client')", cfg.Mode)
 	}
 
 	client.Run(ctx)
+
+	if shutdownFn != nil {
+		shutdownFn()
+	}
 	log.Println("Agent stopped")
 }
