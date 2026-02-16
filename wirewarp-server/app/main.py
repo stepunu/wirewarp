@@ -1,10 +1,14 @@
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.database import engine, Base, SessionLocal
 from app.routers import auth, agents, tunnel_servers, tunnel_clients, port_forwards, service_templates
@@ -169,3 +173,20 @@ async def agent_websocket(websocket: WebSocket):
                 if agent:
                     agent.status = "disconnected"
                     await db.commit()
+
+
+# Serve React dashboard static files
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+if STATIC_DIR.is_dir():
+    # Serve assets (JS/CSS/images)
+    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="static-assets")
+
+    @app.get("/{path:path}")
+    async def spa_fallback(path: str):
+        # Try serving the exact file first (e.g. favicon.ico, vite.svg)
+        file = STATIC_DIR / path
+        if path and file.is_file():
+            return FileResponse(file)
+        # Fall back to index.html for SPA routing
+        return FileResponse(STATIC_DIR / "index.html")

@@ -167,47 +167,47 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
 ## Phase 5: React Dashboard
 
 ### 5.1 Project scaffolding
-- [ ] Create `wirewarp-web/` with Vite + React 18 + TypeScript + Tailwind CSS
-- [ ] Set up React Router (pages: Login, Dashboard, Agents, TunnelServers, TunnelClients, PortForwards)
-- [ ] Set up API client (`src/lib/api.ts`) with auth token handling
-- [ ] Set up WebSocket client (`src/lib/websocket.ts`) for live dashboard updates
-- [ ] Set up React Query for data fetching
+- [x] Create `wirewarp-web/` with Vite + React 18 + TypeScript + Tailwind CSS
+- [x] Set up React Router (pages: Login, Dashboard, Agents, TunnelServers, TunnelClients, PortForwards)
+- [x] Set up API client (`src/lib/api.ts`) with auth token handling
+- [x] Set up WebSocket client (`src/lib/websocket.ts`) for live dashboard updates
+- [x] Set up React Query for data fetching
 
 ### 5.2 Authentication UI
-- [ ] Login page with username/password form
-- [ ] JWT storage in localStorage, auto-redirect on expiry
-- [ ] Protected route wrapper
+- [x] Login page with username/password form
+- [x] JWT storage in localStorage, auto-redirect on expiry
+- [x] Protected route wrapper
 
 ### 5.3 Dashboard overview
-- [ ] Summary cards: total agents, connected/disconnected counts, active port forwards
-- [ ] Agent status list with live connection indicators (via WebSocket)
+- [x] Summary cards: total agents, connected/disconnected counts, active port forwards
+- [x] Agent status list with live connection indicators (via WebSocket)
 
 ### 5.4 Agent management
-- [ ] Agent list page with status badges (connected/disconnected/pending)
-- [ ] "Add Agent" button → generates registration token → shows copy-paste install command
-- [ ] Agent detail page with config, last seen, version, metrics
+- [x] Agent list page with status badges (connected/disconnected/pending)
+- [x] "Add Agent" button → generates registration token → shows copy-paste install command
+- [x] Agent detail page with config, last seen, version, metrics
 
 ### 5.5 Tunnel server management
-- [ ] Tunnel server config view/edit (public interface, WireGuard port, tunnel network)
-- [ ] Peer list showing connected clients
+- [x] Tunnel server config view/edit (public interface, WireGuard port, tunnel network)
+- [x] Peer list showing connected clients
 
 ### 5.6 Tunnel client management
-- [ ] Client config view/edit
-- [ ] "Connect to" dropdown to select tunnel server
-- [ ] "Is Gateway" checkbox with tooltip explaining what it does
-- [ ] LAN network and LAN IP fields (shown when is_gateway is checked)
+- [x] Client config view/edit
+- [x] "Connect to" dropdown to select tunnel server
+- [x] "Is Gateway" checkbox with tooltip explaining what it does
+- [x] LAN network and LAN IP fields (shown when is_gateway is checked)
 
 ### 5.7 Port forwarding
-- [ ] Port forward list per tunnel server
-- [ ] Add port forward form (protocol, public port, destination IP, destination port, description)
-- [ ] "Apply Template" button — select from service templates (DayZ, Minecraft, etc.)
-- [ ] Enable/disable toggle per rule
-- [ ] Delete rule
+- [x] Port forward list per tunnel server
+- [x] Add port forward form (protocol, public port, destination IP, destination port, description)
+- [x] "Apply Template" button — select from service templates (DayZ, Minecraft, etc.)
+- [x] Enable/disable toggle per rule
+- [x] Delete rule
 
 ### 5.8 Build and integrate
-- [ ] Production build outputs to `wirewarp-server/static/`
-- [ ] FastAPI serves static files at `/` (or Nginx in docker-compose)
-- [ ] Create `wirewarp-web/Dockerfile` if serving separately
+- [x] Production build outputs to `wirewarp-server/static/`
+- [x] FastAPI serves static files at `/` (SPA fallback)
+- [-] Create `wirewarp-web/Dockerfile` if serving separately — not needed, FastAPI serves static files directly
 
 ---
 
