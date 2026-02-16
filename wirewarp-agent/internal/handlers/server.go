@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os/exec"
+	"strings"
 
 	"github.com/wirewarp/agent/internal/config"
 	"github.com/wirewarp/agent/internal/executor"
@@ -162,6 +164,18 @@ func (h *ServerHandlers) handleAddPeer(raw json.RawMessage) (string, error) {
 	}); err != nil {
 		return "", err
 	}
+	// wg syncconf doesn't add kernel routes like wg-quick does.
+	// Add routes for non-tunnel AllowedIPs (e.g. LAN subnets) so the
+	// VPS can reach LAN devices through the gateway peer.
+	iface := "wg0"
+	if h.cfg.Server != nil && h.cfg.Server.WGInterface != "" {
+		iface = h.cfg.Server.WGInterface
+	}
+	for _, subnet := range p.AllowedIPs {
+		if subnet != p.TunnelIP+"/32" {
+			addRouteIfMissing(subnet, iface)
+		}
+	}
 	return fmt.Sprintf("peer %s (%s) added", p.Name, p.TunnelIP), nil
 }
 
@@ -234,4 +248,18 @@ func (h *ServerHandlers) handleRemoveForward(raw json.RawMessage) (string, error
 		log.Printf("[server] WARN: iptables save failed: %v", saveErr)
 	}
 	return fmt.Sprintf("forward %s:%d → %s:%d removed", p.Protocol, p.PublicPort, p.DestIP, p.DestPort), nil
+}
+
+// addRouteIfMissing adds a kernel route for a subnet via a WireGuard interface.
+// Silently ignores "file exists" errors (route already present from wg-quick up).
+func addRouteIfMissing(subnet, iface string) {
+	out, err := exec.Command("ip", "route", "add", subnet, "dev", iface).CombinedOutput()
+	if err != nil {
+		// "RTNETLINK answers: File exists" means the route is already there — fine.
+		if !strings.Contains(string(out), "File exists") {
+			log.Printf("[server] WARN: ip route add %s dev %s: %s", subnet, iface, out)
+		}
+	} else {
+		log.Printf("[server] added route %s dev %s", subnet, iface)
+	}
 }

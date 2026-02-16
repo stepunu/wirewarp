@@ -102,6 +102,9 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
 - [x] Fix alembic using localhost instead of DATABASE_URL in Docker
 - [x] Fix systemd `StartLimitIntervalSec` in wrong section
 - [x] Clean shutdown — tear down WireGuard + routing on agent stop
+- [x] Fix VPS can't reach LAN — add `ip route add <lan_subnet> dev wg0` on server after `wg_add_peer`
+- [x] Fix gateway missing MASQUERADE for VPS→LAN traffic (`-s <vps_tunnel_ip> -o eth0`)
+- [x] Remove wg0 MASQUERADE — preserve real source IPs for port-forwarded traffic
 
 ### 6.4 Dashboard improvements
 - [x] Delete buttons for tunnel servers and tunnel clients (in edit form)
@@ -117,11 +120,84 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
 
 ---
 
-## Future (not in scope now)
+## Phase 7: Agent Lifecycle & DNS
 
-- [ ] Multi-IP support (IP pool per VPS, DNAT binding to specific public IP)
-- [ ] Metrics dashboard with charts (CPU, bandwidth, peer status over time)
-- [ ] Agent uninstall command via WebSocket
-- [ ] Multi-user with granular permissions
-- [ ] CrowdSec integration on tunnel servers
-- [ ] DNS configuration option for tunnel clients
+### 7.1 Agent uninstall command
+- [ ] Add `wg_uninstall` command type to agent executor
+- [ ] Agent tears down WireGuard, routing, removes binary/service/config
+- [ ] Dashboard "Uninstall Agent" button (sends command, then deletes agent record)
+
+### 7.2 DNS configuration for tunnel clients
+- [ ] Add DNS field to tunnel client model + migration
+- [ ] Pass DNS to agent in `wg_configure` params
+- [ ] Agent writes `DNS =` line into `wg0.conf`
+- [ ] Dashboard DNS field in tunnel client edit form
+
+### 7.3 Agent update mechanism
+- [ ] Agent `self_update` command: download new binary from URL, verify SHA256, replace, restart via systemd
+- [ ] Server endpoint to serve latest binary + hash
+- [ ] Dashboard "Update Agent" button per agent
+
+---
+
+## Phase 8: OAuth & Multi-User
+
+### 8.1 OAuth / SSO login
+- [ ] Add OAuth2 provider config (Google, GitHub, generic OIDC) to server settings
+- [ ] OAuth login flow — exchange code for token, map to local user, issue JWT
+- [ ] Login page: show OAuth buttons alongside username/password form
+- [ ] Settings page for admin to configure OAuth providers
+
+### 8.2 Multi-user with granular permissions
+- [ ] Roles model: admin, operator, viewer
+- [ ] Per-resource ownership (which user owns which agents/tunnels/forwards)
+- [ ] Permission checks on all API endpoints
+- [ ] Dashboard UI: show/hide actions based on role
+- [ ] User management page (admin only): list, invite, change role, delete
+
+---
+
+## Phase 9: Multi-IP & Port Forwarding Enhancements
+
+### 9.1 Multi-IP support
+- [ ] IP pool model: assign multiple public IPs to a tunnel server
+- [ ] Migration + API endpoints for IP pool CRUD
+- [ ] Port forward rules can bind to a specific public IP (not just the primary)
+- [ ] Agent `iptables_add_forward` already accepts public IP — wire it through
+- [ ] Dashboard: IP pool management, IP selector in port forward form
+
+---
+
+## Phase 10: Monitoring & Security
+
+### 10.1 Metrics collection
+- [ ] Agent periodically sends metrics via WebSocket (CPU, memory, bandwidth, peer stats from `wg show`)
+- [ ] `metrics` table in DB with timestamps + agent FK
+- [ ] API endpoints to query metric ranges per agent
+
+### 10.2 Metrics dashboard
+- [ ] Dashboard metrics page with charts (Recharts or similar)
+- [ ] Per-agent: bandwidth over time, peer count, CPU/memory
+- [ ] Overview: total bandwidth, connected agents, active tunnels
+
+### 10.3 CrowdSec integration
+- [ ] Agent command `crowdsec_install`: install CrowdSec + firewall bouncer on tunnel server
+- [ ] Agent command `crowdsec_configure`: set ban lists, scenarios
+- [ ] Dashboard toggle per tunnel server: enable/disable CrowdSec
+
+---
+
+## Phase 11: Testing & Polish
+
+### 11.1 Command history
+- [ ] Dashboard command history view per agent (query `command_log` table)
+- [ ] Filter by status, command type, date range
+
+### 11.2 API tests
+- [ ] pytest + httpx test suite for all REST endpoints
+- [ ] Auth tests (login, JWT, protected routes)
+- [ ] WebSocket connection tests
+
+### 11.3 Go agent unit tests
+- [ ] Unit tests for config, executor, handlers
+- [ ] Mock wireguard/iptables for testability

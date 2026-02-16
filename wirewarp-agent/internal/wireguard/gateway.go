@@ -78,7 +78,11 @@ func TeardownGatewayRouting(cfg GatewayConfig) error {
 	flushIPRules(cfg)     //nolint:errcheck
 	flushMangleRules(cfg.TunnelIface)
 
-	// Remove NAT MASQUERADE
+	// Remove NAT MASQUERADE rules
+	if cfg.VPSTunnelIP != "" && cfg.LANIface != "" {
+		ipt("-t", "nat", "-D", "POSTROUTING", "-s", cfg.VPSTunnelIP, "-o", cfg.LANIface, "-j", "MASQUERADE")
+	}
+	// Also clean up legacy wg0 masquerade rule if present from older agent versions
 	ipt("-t", "nat", "-D", "POSTROUTING", "-o", cfg.TunnelIface, "-j", "MASQUERADE")
 
 	// Remove MSS clamping
@@ -217,12 +221,22 @@ func applyNATAndForwarding(cfg GatewayConfig) error {
 	if err := iptE("-P", "FORWARD", "ACCEPT"); err != nil {
 		return err
 	}
-	// MASQUERADE outbound tunnel traffic
-	if err := iptCheckOrInsert(
-		[]string{"-t", "nat", "-C", "POSTROUTING", "-o", cfg.TunnelIface, "-j", "MASQUERADE"},
-		[]string{"-t", "nat", "-A", "POSTROUTING", "-o", cfg.TunnelIface, "-j", "MASQUERADE"},
-	); err != nil {
-		return err
+	// MASQUERADE tunnel-to-LAN traffic (VPS → LAN devices via gateway).
+	// Without this, LAN hosts receive packets with src=10.0.0.1 (VPS tunnel IP)
+	// and can't reply because they have no route to the tunnel subnet.
+	//
+	// Note: we deliberately do NOT masquerade on -o wg0. The VPS tunnel server
+	// has a route for the LAN subnet (added by wg_add_peer), so LAN source IPs
+	// can travel through the tunnel unmodified. This preserves real client IPs
+	// for port-forwarded traffic — LAN services (game servers, Jellyfin, etc.)
+	// see the actual source IP of connecting clients, not the tunnel IP.
+	if cfg.VPSTunnelIP != "" && cfg.LANIface != "" {
+		if err := iptCheckOrInsert(
+			[]string{"-t", "nat", "-C", "POSTROUTING", "-s", cfg.VPSTunnelIP, "-o", cfg.LANIface, "-j", "MASQUERADE"},
+			[]string{"-t", "nat", "-A", "POSTROUTING", "-s", cfg.VPSTunnelIP, "-o", cfg.LANIface, "-j", "MASQUERADE"},
+		); err != nil {
+			return err
+		}
 	}
 	// Docker compatibility — only if DOCKER-USER chain exists (gateway mode only)
 	if cfg.IsGateway && dockerUserChainExists() {
