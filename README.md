@@ -36,6 +36,7 @@ Three components:
 On a VPS or server with Docker installed:
 
 ```bash
+cd /opt
 git clone https://github.com/stepunu/wirewarp.git
 cd wirewarp/wirewarp-server
 
