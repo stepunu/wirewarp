@@ -22,8 +22,10 @@ export default function Agents() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['agents'] }),
   })
 
+  const controlUrl = window.location.origin
+  const binaryUrl = 'https://github.com/stepunu/wirewarp/raw/main/wirewarp-agent/dist/wirewarp-agent'
   const installCmd = token
-    ? `curl -fsSL https://YOUR_SERVER/install/${agentType} | bash -s -- --url https://YOUR_SERVER --token ${token}`
+    ? `curl -fsSL -o /usr/local/bin/wirewarp-agent ${binaryUrl} && chmod +x /usr/local/bin/wirewarp-agent && wirewarp-agent --mode ${agentType} --url ${controlUrl} --token ${token}`
     : ''
 
   return (
@@ -112,11 +114,16 @@ export default function Agents() {
               </>
             ) : (
               <>
-                <p className="text-sm text-gray-400 mb-2">Run this on the target machine:</p>
+                <p className="text-sm text-gray-400 mb-2">Run this on the target machine (as root):</p>
                 <pre className="bg-gray-800 border border-gray-700 rounded p-3 text-xs text-green-400 whitespace-pre-wrap break-all select-all">
                   {installCmd}
                 </pre>
                 <p className="text-xs text-gray-500 mt-2">Token: <code className="text-yellow-400">{token}</code></p>
+                {agentType === 'client' && (
+                  <p className="text-xs text-blue-400 bg-blue-500/10 border border-blue-500/20 rounded px-3 py-2 mt-3">
+                    After the agent connects, go to <strong>Tunnel Clients</strong> to select which tunnel server it should connect to and configure gateway settings.
+                  </p>
+                )}
                 <div className="flex justify-end mt-4">
                   <button
                     onClick={() => { navigator.clipboard.writeText(installCmd); }}
