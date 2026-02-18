@@ -20,7 +20,7 @@ jobs:
       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
     - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag ghcr.io/${{ github.repository }}:latest
+      run: docker build . --file wirewarp-server/Dockerfile --tag ghcr.io/${{ github.repository }}:latest
 
     - name: Push to GHCR
       if: github.ref == 'refs/heads/main'  # only push on main, not PRs
