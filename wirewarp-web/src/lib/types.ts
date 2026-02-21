@@ -75,6 +75,7 @@ export interface ServiceTemplate {
 
 export interface SystemSettings {
   public_url: string | null
+  internal_url: string | null
   instance_name: string
   agent_token_expiry_hours: number
 }

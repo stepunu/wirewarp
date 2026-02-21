@@ -7,6 +7,7 @@ export default function Settings() {
   const { data, isLoading } = useQuery({ queryKey: ['settings'], queryFn: settings.get })
 
   const [publicUrl, setPublicUrl] = useState('')
+  const [internalUrl, setInternalUrl] = useState('')
   const [instanceName, setInstanceName] = useState('')
   const [tokenExpiry, setTokenExpiry] = useState(24)
   const [saved, setSaved] = useState(false)
@@ -14,6 +15,7 @@ export default function Settings() {
   useEffect(() => {
     if (data) {
       setPublicUrl(data.public_url ?? '')
+      setInternalUrl(data.internal_url ?? '')
       setInstanceName(data.instance_name)
       setTokenExpiry(data.agent_token_expiry_hours)
     }
@@ -23,6 +25,7 @@ export default function Settings() {
     mutationFn: () =>
       settings.update({
         public_url: publicUrl.trim() || null,
+        internal_url: internalUrl.trim() || null,
         instance_name: instanceName.trim() || undefined,
         agent_token_expiry_hours: tokenExpiry,
       }),
@@ -50,7 +53,21 @@ export default function Settings() {
             className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm placeholder-gray-600"
           />
           <p className="text-xs text-gray-500 mt-1">
-            URL agents use to connect. Must be reachable from external hosts. Leave empty to use the browser URL.
+            URL used in install commands for VPS/external agents. Must be reachable from the internet. Leave empty to use the browser URL.
+          </p>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-300 mb-1">Internal URL</label>
+          <input
+            type="text"
+            value={internalUrl}
+            onChange={(e) => setInternalUrl(e.target.value)}
+            placeholder="http://192.168.20.220:8100"
+            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm placeholder-gray-600"
+          />
+          <p className="text-xs text-gray-500 mt-1">
+            URL used in install commands for LAN gateway agents. Set this to the control server's direct LAN IP so agents don't rely on split DNS. Leave empty to use the Public URL.
           </p>
         </div>
 

@@ -23,7 +23,9 @@ export default function Agents() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['agents'] }),
   })
 
-  const controlUrl = appSettings?.public_url || window.location.origin
+  const publicUrl = appSettings?.public_url || window.location.origin
+  const internalUrl = appSettings?.internal_url || publicUrl
+  const controlUrl = agentType === 'client' ? internalUrl : publicUrl
   const installScript = 'https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agent/scripts/install.sh'
   const installCmd = token
     ? `curl -fsSL ${installScript} | bash -s -- --mode ${agentType} --url ${controlUrl} --token ${token}`
