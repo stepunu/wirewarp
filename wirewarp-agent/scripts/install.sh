@@ -58,12 +58,16 @@ curl -fsSL -o /etc/systemd/system/wirewarp-agent.service "$SERVICE_URL"
 systemctl daemon-reload
 
 echo "==> Registering agent (mode=$MODE)..."
+# Remove any existing config so --url and --token are picked up as a fresh install.
+# The WireGuard private key lives in /etc/wireguard/wg0.key and is preserved.
+rm -f /etc/wirewarp/agent.yaml
+
 /usr/local/bin/wirewarp-agent --mode "$MODE" --url "$URL" --token "$TOKEN" &
 AGENT_PID=$!
 
-# Wait for the agent to register (creates the config with a JWT)
+# Wait for the agent to register (config will have a non-empty agent_jwt after success)
 for i in $(seq 1 15); do
-  if grep -q "agent_jwt" /etc/wirewarp/agent.yaml 2>/dev/null; then
+  if grep -qE 'agent_jwt: [^"]' /etc/wirewarp/agent.yaml 2>/dev/null; then
     break
   fi
   sleep 1
@@ -71,7 +75,7 @@ done
 kill "$AGENT_PID" 2>/dev/null || true
 wait "$AGENT_PID" 2>/dev/null || true
 
-if ! grep -q "agent_jwt" /etc/wirewarp/agent.yaml 2>/dev/null; then
+if ! grep -qE 'agent_jwt: [^"]' /etc/wirewarp/agent.yaml 2>/dev/null; then
   echo "WARNING: Agent may not have registered yet. Check connectivity to $URL"
 fi
 
