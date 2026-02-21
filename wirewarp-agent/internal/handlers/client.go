@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 
 	"github.com/wirewarp/agent/internal/config"
@@ -198,8 +199,23 @@ func (h *ClientHandlers) buildGatewayConfig(s *config.ClientState) wireguard.Gat
 		GatewayLANIP:    s.LANIP,
 		LANNetwork:      s.LANNetwork,
 		IsGateway:       s.IsGateway,
-		ControlServerIP: hostFromURL(h.cfg.ControlServerURL),
+		ControlServerIP: resolveToIP(hostFromURL(h.cfg.ControlServerURL)),
 	}
+}
+
+// resolveToIP resolves a hostname to its first IPv4/IPv6 address.
+// If host is already an IP, it is returned as-is.
+// Falls back to the raw host string on error so callers can still attempt the operation.
+func resolveToIP(host string) string {
+	if net.ParseIP(host) != nil {
+		return host
+	}
+	addrs, err := net.LookupHost(host)
+	if err != nil || len(addrs) == 0 {
+		log.Printf("[client] WARN: could not resolve %q to IP: %v — using hostname (ip rule will fail)", host, err)
+		return host
+	}
+	return addrs[0]
 }
 
 // hostFromEndpoint returns the host portion of a "host:port" endpoint string.
