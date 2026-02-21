@@ -24,7 +24,11 @@ jobs:
 
     - name: Build agent binary (linux/amd64, static)
       working-directory: wirewarp-agent
-      run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/wirewarp-agent ./cmd/agent/
+      run: |
+        SHA=$(git -C .. rev-parse --short HEAD)
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+          -ldflags "-X main.version=${SHA}" \
+          -o dist/wirewarp-agent ./cmd/agent/
 
     - name: Commit updated binary
       if: github.ref == 'refs/heads/main'

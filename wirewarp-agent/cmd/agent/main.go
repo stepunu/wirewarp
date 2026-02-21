@@ -20,6 +20,9 @@ import (
 	wsclient "github.com/wirewarp/agent/internal/websocket"
 )
 
+// version is set at build time via -ldflags "-X main.version=<git-sha>".
+var version = "dev"
+
 func main() {
 	mode := flag.String("mode", "", "Agent mode: server or client (required on first run)")
 	cfgPath := flag.String("config", config.DefaultPath, "Path to agent config file")
@@ -48,12 +51,12 @@ func main() {
 		log.Printf("Config saved to %s", *cfgPath)
 	}
 
-	log.Printf("Starting WireWarp agent (mode=%s)", cfg.Mode)
+	log.Printf("Starting WireWarp agent (mode=%s, version=%s)", cfg.Mode, version)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	client := wsclient.New(cfg, *cfgPath)
+	client := wsclient.New(cfg, *cfgPath, version)
 
 	// shutdownFn is called after the WebSocket loop exits to clean up.
 	var shutdownFn func()

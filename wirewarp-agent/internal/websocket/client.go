@@ -26,17 +26,17 @@ const (
 )
 
 type Client struct {
-	cfg     *config.Config
-	cfgPath string
-	exec    *executor.Executor
-	// sendFn is updated each time a new connection is established
-	sendFn func(v any) error
+	cfg      *config.Config
+	cfgPath  string
+	exec     *executor.Executor
+	sendFn   func(v any) error
 	hostname string
+	version  string
 }
 
-func New(cfg *config.Config, cfgPath string) *Client {
+func New(cfg *config.Config, cfgPath string, version string) *Client {
 	hostname, _ := os.Hostname()
-	c := &Client{cfg: cfg, cfgPath: cfgPath, hostname: hostname}
+	c := &Client{cfg: cfg, cfgPath: cfgPath, hostname: hostname, version: version}
 	// Create executor with a send function that routes through the current connection
 	c.exec = executor.New(func(result executor.Result) error {
 		if c.sendFn == nil {
@@ -137,6 +137,7 @@ func (c *Client) connect(ctx context.Context) error {
 		h := map[string]string{
 			"type":      "heartbeat",
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"version":   c.version,
 		}
 		if publicIP != "" {
 			h["public_ip"] = publicIP

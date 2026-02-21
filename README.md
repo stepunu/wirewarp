@@ -72,13 +72,11 @@ asyncio.run(create())
 
 Login with `admin` / `changeme`.
 
-### 3. Stamp the database migration version
+### 3. Configure the public URL
 
-```bash
-docker compose exec api alembic stamp 0002
-```
+Go to **Settings** in the dashboard and set the **Public URL** to the address agents should use to connect (e.g. `http://ddns.example.com:8100`). This must be reachable from external hosts — it's used in the generated install command and by agent reconnects.
 
-This marks the auto-created schema so future migrations work correctly.
+Leave it empty to use the browser's origin (fine if the dashboard is accessed from the same network agents connect from).
 
 ### 4. Deploy a Tunnel Server agent
 
@@ -96,7 +94,7 @@ curl -fsSL https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agen
 > **Co-located setup:** The control server and tunnel server can run on the same VPS. The control server uses Docker (port 8100) and the agent runs as a systemd service (WireGuard on port 51820) — they don't conflict. Use `--url http://localhost:8100` when installing on the same machine.
 
 Once the agent shows as **Connected** in the dashboard, go to **Tunnel Servers** and click **Edit** to configure:
-- **Public IP** — the VPS public IP (used as WireGuard endpoint)
+- **Public IP** — auto-populated from the agent's first heartbeat. Override if needed.
 - **WG Port** — WireGuard listen port (default: 51820)
 - **Public Interface** — the VPS public network interface (usually `eth0`, check with `ip route get 1.1.1.1`)
 - **Tunnel Network** — the WireGuard subnet (default: `10.0.0.0/24`)
@@ -147,6 +145,10 @@ For example, on a Proxmox LXC, edit `/etc/network/interfaces` and set `gateway 1
 
 ## Updating Agents
 
+**From the dashboard (recommended):** Go to **Agents → [agent name] → Update Agent**. The agent downloads the latest binary from GitHub and restarts itself via systemd. No SSH required. The button is only enabled when the agent is connected.
+
+**Manually (fallback):**
+
 ```bash
 systemctl stop wirewarp-agent
 curl -fsSL -o /usr/local/bin/wirewarp-agent \
@@ -156,6 +158,8 @@ systemctl start wirewarp-agent
 ```
 
 The agent tears down WireGuard and routing on stop, and restores everything on start from saved config.
+
+Every push to `main` automatically rebuilds the binary via GitHub Actions. Each agent reports its current version (git SHA) in the dashboard under the Version column.
 
 ## Troubleshooting
 

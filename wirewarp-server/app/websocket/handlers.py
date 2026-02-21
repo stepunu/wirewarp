@@ -23,6 +23,9 @@ async def handle_heartbeat(agent_id: str, msg: dict, db: AsyncSession) -> None:
 
     agent.last_seen = datetime.now(timezone.utc)
 
+    if version := msg.get("version"):
+        agent.version = version
+
     public_ip = msg.get("public_ip")
     if public_ip and public_ip != agent.public_ip:
         agent.public_ip = public_ip
