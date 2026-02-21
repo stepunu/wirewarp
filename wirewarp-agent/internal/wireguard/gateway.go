@@ -145,7 +145,11 @@ func flushRoutes(cfg GatewayConfig) error {
 
 func flushIPRules(cfg GatewayConfig) error {
 	for _, prio := range []string{prioControlException, prioVPSException, prioLANException, prioForwardLAN, prioForwardSelf, prioReplyMark, "1000", "2000"} {
-		exec.Command("ip", "rule", "del", "priority", prio).Run()
+		// Loop until no rules remain at this priority — some priorities have
+		// multiple rules (e.g. prioForwardSelf has one per IP) and a single
+		// delete only removes one at a time.
+		for exec.Command("ip", "rule", "del", "priority", prio).Run() == nil {
+		}
 	}
 	return nil
 }
