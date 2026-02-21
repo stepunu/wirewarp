@@ -191,7 +191,7 @@ func (c *Client) connect(ctx context.Context) error {
 func fetchPublicIP() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "GET", "https://icanhazip.com", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://ipv4.icanhazip.com", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return ""
