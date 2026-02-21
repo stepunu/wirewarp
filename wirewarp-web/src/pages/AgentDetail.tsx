@@ -29,6 +29,10 @@ export default function AgentDetail() {
     },
   })
 
+  const updateAgent = useMutation({
+    mutationFn: () => agents.update(id!),
+  })
+
   if (isLoading) return <p className="text-gray-400">Loading...</p>
   if (!agent) return <p className="text-red-400">Agent not found</p>
 
@@ -53,6 +57,14 @@ export default function AgentDetail() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-white">{agent.name || agent.hostname || 'Agent'}</h1>
         <div className="flex gap-2">
+          <button
+            onClick={() => updateAgent.mutate()}
+            disabled={updateAgent.isPending || agent.status !== 'connected'}
+            title={agent.status !== 'connected' ? 'Agent must be connected to update' : ''}
+            className="text-gray-300 hover:text-white text-sm border border-gray-700 px-3 py-1.5 rounded disabled:opacity-40"
+          >
+            {updateAgent.isPending ? 'Updating…' : updateAgent.isSuccess ? 'Update sent' : 'Update Agent'}
+          </button>
           <button
             onClick={() => issueJwt.mutate()}
             disabled={issueJwt.isPending}

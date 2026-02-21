@@ -2,12 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/wirewarp/agent/internal/config"
 	"github.com/wirewarp/agent/internal/handlers"
@@ -72,10 +78,54 @@ func main() {
 		log.Fatalf("Unknown mode: %s (must be 'server' or 'client')", cfg.Mode)
 	}
 
+	// agent_update works in both modes — download new binary and restart via systemd.
+	client.Exec().Register("agent_update", handleAgentUpdate)
+
 	client.Run(ctx)
 
 	if shutdownFn != nil {
 		shutdownFn()
 	}
 	log.Println("Agent stopped")
+}
+
+func handleAgentUpdate(_ json.RawMessage) (string, error) {
+	const (
+		binaryURL  = "https://github.com/stepunu/wirewarp/raw/main/wirewarp-agent/dist/wirewarp-agent"
+		binaryPath = "/usr/local/bin/wirewarp-agent"
+	)
+
+	resp, err := http.Get(binaryURL) //nolint:noctx
+	if err != nil {
+		return "", fmt.Errorf("download binary: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download binary: HTTP %d", resp.StatusCode)
+	}
+
+	tmpPath := binaryPath + ".new"
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	if err != nil {
+		return "", fmt.Errorf("create temp file: %w", err)
+	}
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("write binary: %w", err)
+	}
+	f.Close()
+
+	if err := os.Rename(tmpPath, binaryPath); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("replace binary: %w", err)
+	}
+
+	// Restart after the result message has been flushed to the WebSocket.
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		exec.Command("systemctl", "restart", "wirewarp-agent").Run() //nolint:errcheck
+	}()
+
+	return "binary updated — restarting", nil
 }

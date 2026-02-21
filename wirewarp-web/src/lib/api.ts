@@ -65,6 +65,8 @@ export const agents = {
     }),
   issueJwt: (id: string) =>
     request<{ agent_id: string; jwt: string }>(`/agents/${id}/issue-jwt`, { method: 'POST' }),
+  update: (id: string) =>
+    request<{ command_id: string }>(`/agents/${id}/update`, { method: 'POST' }),
 }
 
 // Tunnel Servers

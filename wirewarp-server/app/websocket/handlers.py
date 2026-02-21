@@ -18,9 +18,26 @@ logger = logging.getLogger(__name__)
 async def handle_heartbeat(agent_id: str, msg: dict, db: AsyncSession) -> None:
     result = await db.execute(select(Agent).where(Agent.id == agent_id))
     agent = result.scalar_one_or_none()
-    if agent:
-        agent.last_seen = datetime.now(timezone.utc)
-        await db.commit()
+    if not agent:
+        return
+
+    agent.last_seen = datetime.now(timezone.utc)
+
+    public_ip = msg.get("public_ip")
+    if public_ip and public_ip != agent.public_ip:
+        agent.public_ip = public_ip
+        # For server agents, also propagate to tunnel_server.public_ip so the
+        # WireGuard endpoint is always current without manual configuration.
+        if agent.type == "server":
+            srv_result = await db.execute(
+                select(TunnelServer).where(TunnelServer.agent_id == agent_id)
+            )
+            server = srv_result.scalar_one_or_none()
+            if server and server.public_ip != public_ip:
+                server.public_ip = public_ip
+                logger.info("Auto-updated tunnel server public IP to %s for agent %s", public_ip, agent_id)
+
+    await db.commit()
 
 
 async def handle_command_result(agent_id: str, msg: dict, db: AsyncSession) -> None:

@@ -7,14 +7,43 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
+  build-agent:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Build agent binary (linux/amd64, static)
+      run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o wirewarp-agent/dist/wirewarp-agent ./wirewarp-agent/cmd/agent/
+
+    - name: Commit updated binary
+      if: github.ref == 'refs/heads/main'
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add wirewarp-agent/dist/wirewarp-agent
+        git diff --staged --quiet || git commit -m "ci: rebuild wirewarp-agent binary [skip ci]"
+        git push
+
+  build-server:
+    runs-on: ubuntu-latest
+    needs: build-agent
     permissions:
       contents: read
       packages: write
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        ref: main  # use post-commit state so Docker image includes updated binary
 
     - name: Log in to GHCR
       run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
@@ -23,5 +52,5 @@ jobs:
       run: docker build . --file wirewarp-server/Dockerfile --tag ghcr.io/${{ github.repository }}:latest
 
     - name: Push to GHCR
-      if: github.ref == 'refs/heads/main'  # only push on main, not PRs
+      if: github.ref == 'refs/heads/main'
       run: docker push ghcr.io/${{ github.repository }}:latest

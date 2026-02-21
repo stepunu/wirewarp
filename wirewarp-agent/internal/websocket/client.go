@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand/v2"
+	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -127,6 +130,25 @@ func (c *Client) connect(ctx context.Context) error {
 		log.Printf("[ws] registered as agent %s", c.cfg.AgentID)
 	}
 
+	// Fetch public IP once per connection and report it immediately.
+	publicIP := fetchPublicIP()
+
+	heartbeat := func() map[string]string {
+		h := map[string]string{
+			"type":      "heartbeat",
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		}
+		if publicIP != "" {
+			h["public_ip"] = publicIP
+		}
+		return h
+	}
+
+	// Send an initial heartbeat right away so public_ip is stored without waiting 30s.
+	if err := send(heartbeat()); err != nil {
+		return err
+	}
+
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -155,16 +177,28 @@ func (c *Client) connect(ctx context.Context) error {
 		case err := <-recvErr:
 			return err
 		case <-ticker.C:
-			if err := send(map[string]string{
-				"type":      "heartbeat",
-				"timestamp": time.Now().UTC().Format(time.RFC3339),
-			}); err != nil {
+			if err := send(heartbeat()); err != nil {
 				return err
 			}
 		}
 	}
 }
 
+
+// fetchPublicIP returns the machine's public IPv4 address.
+// Returns empty string on failure — non-fatal, agent still connects.
+func fetchPublicIP() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://icanhazip.com", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return strings.TrimSpace(string(body))
+}
 
 func jitter(d time.Duration) time.Duration {
 	delta := float64(d) * 0.25

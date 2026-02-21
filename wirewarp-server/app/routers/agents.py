@@ -64,6 +64,24 @@ async def issue_agent_jwt(
     return AgentJWTRead(agent_id=agent.id, jwt=jwt)
 
 
+@router.post("/{agent_id}/update", status_code=202)
+async def update_agent(agent_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    from app.services.agent_commands import send_command
+    sent, cmd_id = await send_command(
+        agent_id=str(agent.id),
+        command_type="agent_update",
+        params={},
+        db=db,
+    )
+    if not sent:
+        raise HTTPException(status_code=503, detail="Agent not connected")
+    return {"command_id": cmd_id}
+
+
 @router.post("/tokens", response_model=TokenRead, status_code=201)
 async def generate_token(body: TokenCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     sys_settings = await db.get(SystemSettings, 1)
