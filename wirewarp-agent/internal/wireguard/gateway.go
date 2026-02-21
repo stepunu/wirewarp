@@ -79,8 +79,13 @@ func TeardownGatewayRouting(cfg GatewayConfig) error {
 	flushMangleRules(cfg.TunnelIface)
 
 	// Remove NAT MASQUERADE rules
-	if cfg.VPSTunnelIP != "" && cfg.LANIface != "" {
-		ipt("-t", "nat", "-D", "POSTROUTING", "-s", cfg.VPSTunnelIP, "-o", cfg.LANIface, "-j", "MASQUERADE")
+	if cfg.LANIface != "" {
+		// Current mark-based rule
+		ipt("-t", "nat", "-D", "POSTROUTING", "-m", "mark", "--mark", "0x1", "-o", cfg.LANIface, "-j", "MASQUERADE")
+		// Legacy source-IP rule from older agent versions
+		if cfg.VPSTunnelIP != "" {
+			ipt("-t", "nat", "-D", "POSTROUTING", "-s", cfg.VPSTunnelIP, "-o", cfg.LANIface, "-j", "MASQUERADE")
+		}
 	}
 	// Also clean up legacy wg0 masquerade rule if present from older agent versions
 	ipt("-t", "nat", "-D", "POSTROUTING", "-o", cfg.TunnelIface, "-j", "MASQUERADE")
@@ -225,19 +230,23 @@ func applyNATAndForwarding(cfg GatewayConfig) error {
 	if err := iptE("-P", "FORWARD", "ACCEPT"); err != nil {
 		return err
 	}
-	// MASQUERADE tunnel-to-LAN traffic (VPS → LAN devices via gateway).
-	// Without this, LAN hosts receive packets with src=10.0.0.1 (VPS tunnel IP)
-	// and can't reply because they have no route to the tunnel subnet.
+	// MASQUERADE all tunnel-originated traffic forwarded to the LAN.
+	// Mangle PREROUTING sets mark 0x1 on every packet arriving from wg0, so
+	// matching on the mark covers both direct VPS traffic and port-forwarded
+	// traffic from external clients (which arrive with real external source IPs
+	// and would not match a -s VPSTunnelIP rule).
+	// Without this, LAN hosts receive packets with an external source IP they
+	// have no route for and reply via their own default gateway, causing
+	// asymmetric routing and broken connections.
 	//
 	// Note: we deliberately do NOT masquerade on -o wg0. The VPS tunnel server
 	// has a route for the LAN subnet (added by wg_add_peer), so LAN source IPs
-	// can travel through the tunnel unmodified. This preserves real client IPs
-	// for port-forwarded traffic — LAN services (game servers, Jellyfin, etc.)
-	// see the actual source IP of connecting clients, not the tunnel IP.
-	if cfg.VPSTunnelIP != "" && cfg.LANIface != "" {
+	// can travel back through the tunnel unmodified, preserving real client IPs
+	// on the VPS side for logging/firewall purposes.
+	if cfg.LANIface != "" {
 		if err := iptCheckOrInsert(
-			[]string{"-t", "nat", "-C", "POSTROUTING", "-s", cfg.VPSTunnelIP, "-o", cfg.LANIface, "-j", "MASQUERADE"},
-			[]string{"-t", "nat", "-A", "POSTROUTING", "-s", cfg.VPSTunnelIP, "-o", cfg.LANIface, "-j", "MASQUERADE"},
+			[]string{"-t", "nat", "-C", "POSTROUTING", "-m", "mark", "--mark", "0x1", "-o", cfg.LANIface, "-j", "MASQUERADE"},
+			[]string{"-t", "nat", "-A", "POSTROUTING", "-m", "mark", "--mark", "0x1", "-o", cfg.LANIface, "-j", "MASQUERADE"},
 		); err != nil {
 			return err
 		}
