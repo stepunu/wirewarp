@@ -110,6 +110,16 @@ export const portForwards = {
   del: (id: string) => request<void>(`/port-forwards/${id}`, { method: 'DELETE' }),
 }
 
+// Settings
+export const settings = {
+  get: () => request<import('./types').SystemSettings>('/settings'),
+  update: (data: Partial<import('./types').SystemSettings>) =>
+    request<import('./types').SystemSettings>('/settings', {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+}
+
 // Service Templates
 export const serviceTemplates = {
   list: () => request<import('./types').ServiceTemplate[]>('/service-templates'),

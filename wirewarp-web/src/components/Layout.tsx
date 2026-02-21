@@ -7,6 +7,7 @@ const links = [
   { to: '/tunnel-servers', label: 'Tunnel Servers' },
   { to: '/tunnel-clients', label: 'Tunnel Clients' },
   { to: '/port-forwards', label: 'Port Forwards' },
+  { to: '/settings', label: 'Settings' },
 ]
 
 export default function Layout() {

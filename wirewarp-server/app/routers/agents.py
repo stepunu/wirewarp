@@ -13,7 +13,7 @@ from app.models.registration_token import RegistrationToken
 from app.schemas.agent import AgentRead, AgentJWTRead
 from app.schemas.registration_token import TokenCreate, TokenRead
 from app.auth import get_current_user
-from app.config import settings
+from app.models.system_settings import SystemSettings
 
 router = APIRouter()
 
@@ -66,10 +66,12 @@ async def issue_agent_jwt(
 
 @router.post("/tokens", response_model=TokenRead, status_code=201)
 async def generate_token(body: TokenCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    sys_settings = await db.get(SystemSettings, 1)
+    expiry_hours = sys_settings.agent_token_expiry_hours if sys_settings else 24
     token = RegistrationToken(
         token=_generate_token(),
         agent_type=body.agent_type,
-        expires_at=datetime.now(timezone.utc) + timedelta(hours=settings.AGENT_TOKEN_EXPIRY_HOURS),
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=expiry_hours),
     )
     db.add(token)
     await db.commit()

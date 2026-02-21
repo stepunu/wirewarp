@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from app.database import engine, Base, SessionLocal
-from app.routers import auth, agents, tunnel_servers, tunnel_clients, port_forwards, service_templates
+from app.routers import auth, agents, tunnel_servers, tunnel_clients, port_forwards, service_templates, settings
 from app.websocket.hub import manager
 from app.websocket.handlers import dispatch
 from app.services.agent_commands import send_command
@@ -44,6 +44,7 @@ app.include_router(tunnel_servers.router, prefix="/api/tunnel-servers", tags=["t
 app.include_router(tunnel_clients.router, prefix="/api/tunnel-clients", tags=["tunnel-clients"])
 app.include_router(port_forwards.router, prefix="/api/port-forwards", tags=["port-forwards"])
 app.include_router(service_templates.router, prefix="/api/service-templates", tags=["service-templates"])
+app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 
 
 @app.get("/api/health")
@@ -180,6 +181,36 @@ async def agent_websocket(websocket: WebSocket):
                 logger.info(
                     "Replayed %d active port forward(s) to server agent %s",
                     len(active_forwards), agent_id,
+                )
+
+                # Replay wg_add_peer for all configured clients to restore peer config and LAN routes
+                from app.models.tunnel_client import TunnelClient
+                clients_result = await db.execute(
+                    select(TunnelClient).where(
+                        TunnelClient.tunnel_server_id == server.id,
+                        TunnelClient.wg_public_key.is_not(None),
+                        TunnelClient.tunnel_ip.is_not(None),
+                    )
+                )
+                clients = clients_result.scalars().all()
+                for client in clients:
+                    allowed_ips = [client.tunnel_ip + "/32"]
+                    if client.is_gateway and client.vm_network:
+                        allowed_ips.append(client.vm_network)
+                    await send_command(
+                        agent_id=agent_id,
+                        command_type="wg_add_peer",
+                        params={
+                            "peer_name": f"client-{client.tunnel_ip}",
+                            "public_key": client.wg_public_key,
+                            "tunnel_ip": client.tunnel_ip,
+                            "allowed_ips": allowed_ips,
+                        },
+                        db=db,
+                    )
+                logger.info(
+                    "Replayed %d peer(s) to server agent %s",
+                    len(clients), agent_id,
                 )
 
         # Main message loop

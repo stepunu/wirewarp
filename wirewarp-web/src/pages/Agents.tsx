@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { agents } from '../lib/api'
+import { agents, settings } from '../lib/api'
 import { Link } from 'react-router-dom'
 import StatusBadge from '../components/StatusBadge'
 
 export default function Agents() {
   const qc = useQueryClient()
   const { data: agentList = [] } = useQuery({ queryKey: ['agents'], queryFn: agents.list, refetchInterval: 5000 })
+  const { data: appSettings } = useQuery({ queryKey: ['settings'], queryFn: settings.get })
 
   const [showModal, setShowModal] = useState(false)
   const [agentType, setAgentType] = useState<'server' | 'client'>('server')
@@ -22,7 +23,7 @@ export default function Agents() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['agents'] }),
   })
 
-  const controlUrl = window.location.origin
+  const controlUrl = appSettings?.public_url || window.location.origin
   const installScript = 'https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agent/scripts/install.sh'
   const installCmd = token
     ? `curl -fsSL ${installScript} | bash -s -- --mode ${agentType} --url ${controlUrl} --token ${token}`

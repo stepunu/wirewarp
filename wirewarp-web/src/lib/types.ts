@@ -72,3 +72,9 @@ export interface ServiceTemplate {
   is_builtin: boolean
   created_at: string
 }
+
+export interface SystemSettings {
+  public_url: string | null
+  instance_name: string
+  agent_token_expiry_hours: number
+}

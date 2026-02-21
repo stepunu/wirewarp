@@ -9,6 +9,7 @@ import AgentDetail from './pages/AgentDetail'
 import TunnelServers from './pages/TunnelServers'
 import TunnelClients from './pages/TunnelClients'
 import PortForwards from './pages/PortForwards'
+import Settings from './pages/Settings'
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -39,6 +40,7 @@ export default function App() {
             <Route path="tunnel-servers" element={<TunnelServers />} />
             <Route path="tunnel-clients" element={<TunnelClients />} />
             <Route path="port-forwards" element={<PortForwards />} />
+            <Route path="settings" element={<Settings />} />
           </Route>
         </Routes>
       </BrowserRouter>
