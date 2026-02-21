@@ -20,9 +20,11 @@ jobs:
     - uses: actions/setup-go@v5
       with:
         go-version: '1.22'
+        cache-dependency-path: wirewarp-agent/go.sum
 
     - name: Build agent binary (linux/amd64, static)
-      run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o wirewarp-agent/dist/wirewarp-agent ./wirewarp-agent/cmd/agent/
+      working-directory: wirewarp-agent
+      run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/wirewarp-agent ./cmd/agent/
 
     - name: Commit updated binary
       if: github.ref == 'refs/heads/main'
