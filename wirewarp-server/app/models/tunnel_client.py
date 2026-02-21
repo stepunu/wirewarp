@@ -24,4 +24,4 @@ class TunnelClient(Base):
 
     agent: Mapped["Agent"] = relationship("Agent", back_populates="tunnel_client")  # noqa: F821
     tunnel_server: Mapped["TunnelServer"] = relationship("TunnelServer", back_populates="tunnel_clients")  # noqa: F821
-    port_forwards: Mapped[list["PortForward"]] = relationship("PortForward", back_populates="tunnel_client")  # noqa: F821
+    port_forwards: Mapped[list["PortForward"]] = relationship("PortForward", back_populates="tunnel_client", passive_deletes=True)  # noqa: F821

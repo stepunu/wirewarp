@@ -60,6 +60,11 @@ func (c *Client) Run(ctx context.Context) {
 		if err != nil {
 			log.Printf("[ws] disconnected: %v — retrying in %s", err, backoff)
 		}
+		// No credentials at all — no point hammering the server.
+		if c.cfg.AgentJWT == "" && c.cfg.AgentToken == "" {
+			log.Printf("[ws] no valid credentials — reissue a JWT from the dashboard, then update agent_jwt in /etc/wirewarp/agent.yaml and restart the service")
+			backoff = 5 * time.Minute
+		}
 		select {
 		case <-ctx.Done():
 			return

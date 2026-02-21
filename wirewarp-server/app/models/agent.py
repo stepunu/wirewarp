@@ -21,7 +21,7 @@ class Agent(Base):
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    tunnel_server: Mapped["TunnelServer"] = relationship("TunnelServer", back_populates="agent", uselist=False)  # noqa: F821
-    tunnel_client: Mapped["TunnelClient"] = relationship("TunnelClient", back_populates="agent", uselist=False)  # noqa: F821
-    command_logs: Mapped[list["CommandLog"]] = relationship("CommandLog", back_populates="agent")  # noqa: F821
-    metrics: Mapped[list["Metric"]] = relationship("Metric", back_populates="agent")  # noqa: F821
+    tunnel_server: Mapped["TunnelServer"] = relationship("TunnelServer", back_populates="agent", uselist=False, passive_deletes=True)  # noqa: F821
+    tunnel_client: Mapped["TunnelClient"] = relationship("TunnelClient", back_populates="agent", uselist=False, passive_deletes=True)  # noqa: F821
+    command_logs: Mapped[list["CommandLog"]] = relationship("CommandLog", back_populates="agent", passive_deletes=True)  # noqa: F821
+    metrics: Mapped[list["Metric"]] = relationship("Metric", back_populates="agent", passive_deletes=True)  # noqa: F821

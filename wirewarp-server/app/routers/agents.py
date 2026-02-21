@@ -10,7 +10,7 @@ from app.database import get_db
 from app.models.agent import Agent
 from app.models.user import User
 from app.models.registration_token import RegistrationToken
-from app.schemas.agent import AgentRead
+from app.schemas.agent import AgentRead, AgentJWTRead
 from app.schemas.registration_token import TokenCreate, TokenRead
 from app.auth import get_current_user
 from app.config import settings
@@ -47,6 +47,21 @@ async def delete_agent(agent_id: str, db: AsyncSession = Depends(get_db), _: Use
         raise HTTPException(status_code=404, detail="Agent not found")
     await db.delete(agent)
     await db.commit()
+
+
+@router.post("/{agent_id}/issue-jwt", response_model=AgentJWTRead)
+async def issue_agent_jwt(
+    agent_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    from app.auth import create_access_token
+    jwt = create_access_token(str(agent.id), expires_delta=timedelta(days=3650))
+    return AgentJWTRead(agent_id=agent.id, jwt=jwt)
 
 
 @router.post("/tokens", response_model=TokenRead, status_code=201)

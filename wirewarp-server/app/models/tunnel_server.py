@@ -22,5 +22,5 @@ class TunnelServer(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     agent: Mapped["Agent"] = relationship("Agent", back_populates="tunnel_server")  # noqa: F821
-    tunnel_clients: Mapped[list["TunnelClient"]] = relationship("TunnelClient", back_populates="tunnel_server")  # noqa: F821
-    port_forwards: Mapped[list["PortForward"]] = relationship("PortForward", back_populates="tunnel_server")  # noqa: F821
+    tunnel_clients: Mapped[list["TunnelClient"]] = relationship("TunnelClient", back_populates="tunnel_server", passive_deletes=True)  # noqa: F821
+    port_forwards: Mapped[list["PortForward"]] = relationship("PortForward", back_populates="tunnel_server", passive_deletes=True)  # noqa: F821

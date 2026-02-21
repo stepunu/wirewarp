@@ -21,3 +21,8 @@ class AgentRead(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class AgentJWTRead(BaseModel):
+    agent_id: uuid.UUID
+    jwt: str

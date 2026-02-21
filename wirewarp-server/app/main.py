@@ -14,6 +14,7 @@ from app.database import engine, Base, SessionLocal
 from app.routers import auth, agents, tunnel_servers, tunnel_clients, port_forwards, service_templates
 from app.websocket.hub import manager
 from app.websocket.handlers import dispatch
+from app.services.agent_commands import send_command
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +112,7 @@ async def agent_websocket(websocket: WebSocket):
                 agent_id = str(agent.id)
 
                 from app.auth import create_access_token
-                jwt = create_access_token(agent_id)
+                jwt = create_access_token(agent_id, expires_delta=timedelta(days=3650))
                 await websocket.send_text(json.dumps({"type": "registered", "agent_id": agent_id, "jwt": jwt}))
 
             elif msg_type == "auth":
@@ -146,6 +147,40 @@ async def agent_websocket(websocket: WebSocket):
 
         await manager.connect(agent_id, websocket)
         logger.info("Agent %s connected", agent_id)
+
+        # Replay active port forwards to server agents on (re)connect so rules
+        # are applied even if the agent restarted or missed earlier commands.
+        async with SessionLocal() as db:
+            from app.models.tunnel_server import TunnelServer
+            from app.models.port_forward import PortForward
+            result = await db.execute(
+                select(TunnelServer).where(TunnelServer.agent_id == agent_id)
+            )
+            server = result.scalar_one_or_none()
+            if server:
+                pf_result = await db.execute(
+                    select(PortForward).where(
+                        PortForward.tunnel_server_id == server.id,
+                        PortForward.active == True,  # noqa: E712
+                    )
+                )
+                active_forwards = pf_result.scalars().all()
+                for pf in active_forwards:
+                    await send_command(
+                        agent_id=agent_id,
+                        command_type="iptables_add_forward",
+                        params={
+                            "protocol": pf.protocol,
+                            "public_port": pf.public_port,
+                            "destination_ip": pf.destination_ip,
+                            "destination_port": pf.destination_port,
+                        },
+                        db=db,
+                    )
+                logger.info(
+                    "Replayed %d active port forward(s) to server agent %s",
+                    len(active_forwards), agent_id,
+                )
 
         # Main message loop
         while True:

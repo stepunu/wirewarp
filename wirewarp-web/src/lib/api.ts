@@ -63,6 +63,8 @@ export const agents = {
       method: 'POST',
       body: JSON.stringify({ agent_type }),
     }),
+  issueJwt: (id: string) =>
+    request<{ agent_id: string; jwt: string }>(`/agents/${id}/issue-jwt`, { method: 'POST' }),
 }
 
 // Tunnel Servers

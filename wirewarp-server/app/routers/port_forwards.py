@@ -1,14 +1,43 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import get_db
 from app.models.port_forward import PortForward
+from app.models.tunnel_server import TunnelServer
 from app.models.user import User
 from app.schemas.port_forward import PortForwardCreate, PortForwardRead, PortForwardUpdate
 from app.auth import get_current_user
+from app.services.agent_commands import send_command
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+async def _push_forward(pf: PortForward, command_type: str, db: AsyncSession) -> None:
+    """Send iptables_add_forward or iptables_remove_forward to the tunnel server agent."""
+    result = await db.execute(select(TunnelServer).where(TunnelServer.id == pf.tunnel_server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        return
+    sent, _ = await send_command(
+        agent_id=str(server.agent_id),
+        command_type=command_type,
+        params={
+            "protocol": pf.protocol,
+            "public_port": pf.public_port,
+            "destination_ip": pf.destination_ip,
+            "destination_port": pf.destination_port,
+        },
+        db=db,
+    )
+    if not sent:
+        logger.warning(
+            "Server agent %s not connected — %s not delivered for port %s",
+            server.agent_id, command_type, pf.public_port,
+        )
 
 
 @router.get("", response_model=list[PortForwardRead])
@@ -34,6 +63,8 @@ async def create_port_forward(
     db.add(pf)
     await db.commit()
     await db.refresh(pf)
+    if pf.active:
+        await _push_forward(pf, "iptables_add_forward", db)
     return pf
 
 
@@ -48,10 +79,15 @@ async def update_port_forward(
     pf = result.scalar_one_or_none()
     if not pf:
         raise HTTPException(status_code=404, detail="Port forward not found")
+    old_active = pf.active
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(pf, field, value)
     await db.commit()
     await db.refresh(pf)
+    if not old_active and pf.active:
+        await _push_forward(pf, "iptables_add_forward", db)
+    elif old_active and not pf.active:
+        await _push_forward(pf, "iptables_remove_forward", db)
     return pf
 
 
@@ -65,5 +101,7 @@ async def delete_port_forward(
     pf = result.scalar_one_or_none()
     if not pf:
         raise HTTPException(status_code=404, detail="Port forward not found")
+    if pf.active:
+        await _push_forward(pf, "iptables_remove_forward", db)
     await db.delete(pf)
     await db.commit()
