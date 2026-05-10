@@ -97,7 +97,7 @@ async def test_cloudflare_discover_filters_by_ip():
     with patch("app.services.dns_sync.httpx.AsyncClient", return_value=mock):
         rows = await p.discover_a_records_for_ip("Z1", "1.2.3.4")
     names = sorted(r.name for r in rows)
-    assert names == ["lan.example.com", "example.com"]
+    assert names == ["example.com", "lan.example.com"]
 
 
 async def test_provider_from_settings_returns_none_when_disabled():
