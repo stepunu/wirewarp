@@ -7,7 +7,7 @@ from sqlalchemy import select, func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_current_user, require_role
+from app.auth import get_current_user, require_role, require_ops_role
 from app.database import get_db
 from app.realtime.events import emit_tunnel_server_changed
 from app.models.port_forward import PortForward
@@ -78,7 +78,7 @@ async def _demote_other_primaries(
 async def list_ips(
     tunnel_server_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_ops_role),
 ):
     q = select(TunnelServerIP).order_by(TunnelServerIP.is_primary.desc(), TunnelServerIP.created_at)
     if tunnel_server_id:

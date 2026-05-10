@@ -51,9 +51,9 @@ async def test_operator_cannot_patch_settings(operator_client):
 
 
 @pytest.mark.asyncio
-async def test_viewer_can_get_settings(viewer_client):
+async def test_viewer_cannot_get_settings(viewer_client):
     resp = await viewer_client.get("/api/settings")
-    assert resp.status_code == 200
+    assert resp.status_code == 403
 
 
 @pytest.mark.asyncio

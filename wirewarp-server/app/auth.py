@@ -129,6 +129,12 @@ def require_role(*roles: str):
     return _checker
 
 
+# Shorthand for "any operations role" — every role except vpn_user, who
+# only has access to /me and their own VPN profile/endpoints. Use this
+# on read endpoints that vpn_user must not see.
+require_ops_role = require_role("admin", "operator", "viewer")
+
+
 async def log_auth_event(
     db: AsyncSession,
     event_type: str,

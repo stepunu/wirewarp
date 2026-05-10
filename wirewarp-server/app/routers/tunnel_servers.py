@@ -15,7 +15,7 @@ from app.models.tunnel_server import TunnelServer
 from app.models.user import User
 from app.schemas.tunnel_server import TunnelServerRead, TunnelServerUpdate
 from app.schemas.tunnel_server_ip import TunnelServerIPRead
-from app.auth import get_current_user, require_role
+from app.auth import require_ops_role, require_role
 from app.realtime.events import (
     emit_port_forward_changed,
     emit_tunnel_client_changed,
@@ -64,7 +64,7 @@ def _to_read(server: TunnelServer) -> TunnelServerRead:
 
 
 @router.get("", response_model=list[TunnelServerRead])
-async def list_tunnel_servers(db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_tunnel_servers(db: AsyncSession = Depends(get_db), _: User = Depends(require_ops_role)):
     result = await db.execute(
         select(TunnelServer)
         .options(selectinload(TunnelServer.ips))
@@ -74,7 +74,7 @@ async def list_tunnel_servers(db: AsyncSession = Depends(get_db), _: User = Depe
 
 
 @router.get("/{server_id}", response_model=TunnelServerRead)
-async def get_tunnel_server(server_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def get_tunnel_server(server_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(require_ops_role)):
     result = await db.execute(
         select(TunnelServer).options(selectinload(TunnelServer.ips)).where(TunnelServer.id == server_id)
     )
@@ -148,7 +148,7 @@ class RebaseSuggestion(BaseModel):
 async def suggest_rebase_network(
     server_id: str,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_ops_role),
 ):
     network = await allocate_tunnel_network(db, exclude_server_id=server_id)
     return RebaseSuggestion(tunnel_network=network)

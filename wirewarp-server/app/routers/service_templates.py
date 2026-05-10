@@ -6,7 +6,7 @@ from app.database import get_db
 from app.models.service_template import ServiceTemplate
 from app.models.user import User
 from app.schemas.service_template import ServiceTemplateCreate, ServiceTemplateRead
-from app.auth import get_current_user, require_role
+from app.auth import get_current_user, require_role, require_ops_role
 
 router = APIRouter()
 
@@ -27,7 +27,7 @@ async def seed_builtin_templates(db: AsyncSession) -> None:
 
 
 @router.get("", response_model=list[ServiceTemplateRead])
-async def list_templates(db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_templates(db: AsyncSession = Depends(get_db), _: User = Depends(require_ops_role)):
     await seed_builtin_templates(db)
     result = await db.execute(select(ServiceTemplate).order_by(ServiceTemplate.name))
     return result.scalars().all()

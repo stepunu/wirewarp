@@ -40,7 +40,7 @@ from app.schemas.gateway_lan_client import (
     GatewayLanClientRead,
     GatewayLanClientUpdate,
 )
-from app.auth import get_current_user, require_role
+from app.auth import get_current_user, require_role, require_ops_role
 from app.models.system_settings import SystemSettings
 from app.realtime.bus import bus
 from app.realtime.events import (
@@ -159,7 +159,7 @@ async def _resolve_ip(
 @router.get("/lan-clients", response_model=list[GatewayLanClientRead])
 async def list_all_lan_clients(
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_ops_role),
 ):
     """All discovered LAN clients across every gateway. Used by the
     top-level LAN clients page so it can render one table covering the
@@ -178,7 +178,7 @@ async def list_all_lan_clients(
 async def list_lan_clients(
     client_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_ops_role),
 ):
     rows = await db.execute(
         select(GatewayLanClient)
@@ -476,7 +476,7 @@ async def delete_lan_client(
 @router.get("/lan-clients/dns/zones")
 async def list_dns_zones(
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_ops_role),
 ):
     """List zones the configured DNS provider knows about. Used by the
     LAN-client edit dialog to populate the zone picker before record
@@ -494,7 +494,7 @@ async def discover_dns_records(
     zone_id: str,
     ip: str,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_ops_role),
 ):
     """Return every A record in `zone_id` whose value is `ip`. Used by
     the "discover records" button so operators don't have to type FQDNs

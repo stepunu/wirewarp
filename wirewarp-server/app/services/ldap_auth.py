@@ -31,7 +31,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-ROLE_PRIORITY = {"admin": 3, "operator": 2, "viewer": 1}
+ROLE_PRIORITY = {"admin": 3, "operator": 2, "viewer": 1, "vpn_user": 0}
 
 
 @dataclass

@@ -12,7 +12,7 @@ from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
 from app.models.user import User
 from app.schemas.port_forward import PortForwardCreate, PortForwardRead, PortForwardUpdate
-from app.auth import get_current_user, require_role
+from app.auth import get_current_user, require_role, require_ops_role
 from app.realtime.events import emit_port_forward_changed, emit_tunnel_server_changed
 from app.services.agent_commands import send_command
 from app.services.primary_ip import resolve_public_ip
@@ -157,7 +157,7 @@ async def list_port_forwards(
     attachment_id: uuid.UUID | None = None,
     tunnel_server_id: uuid.UUID | None = None,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_ops_role),
 ):
     q = select(PortForward).order_by(PortForward.created_at.desc())
     if attachment_id is not None:

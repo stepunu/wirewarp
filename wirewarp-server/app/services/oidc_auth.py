@@ -37,7 +37,7 @@ _DISCOVERY_TTL = 600
 _discovery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
-ROLE_PRIORITY = {"admin": 3, "operator": 2, "viewer": 1}
+ROLE_PRIORITY = {"admin": 3, "operator": 2, "viewer": 1, "vpn_user": 0}
 
 
 async def discover(issuer: str) -> dict[str, Any]:

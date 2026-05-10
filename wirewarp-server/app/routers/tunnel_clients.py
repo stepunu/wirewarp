@@ -9,7 +9,7 @@ from app.database import get_db
 from app.models.tunnel_client import TunnelClient
 from app.models.user import User
 from app.schemas.tunnel_client import TunnelClientRead, TunnelClientUpdate
-from app.auth import get_current_user, require_role
+from app.auth import require_ops_role, require_role
 from app.realtime.events import emit_port_forward_changed, emit_tunnel_client_changed
 
 logger = logging.getLogger(__name__)
@@ -18,7 +18,7 @@ router = APIRouter()
 
 
 @router.get("", response_model=list[TunnelClientRead])
-async def list_tunnel_clients(db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def list_tunnel_clients(db: AsyncSession = Depends(get_db), _: User = Depends(require_ops_role)):
     result = await db.execute(
         select(TunnelClient)
         .options(selectinload(TunnelClient.attachments))
@@ -28,7 +28,7 @@ async def list_tunnel_clients(db: AsyncSession = Depends(get_db), _: User = Depe
 
 
 @router.get("/{client_id}", response_model=TunnelClientRead)
-async def get_tunnel_client(client_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+async def get_tunnel_client(client_id: str, db: AsyncSession = Depends(get_db), _: User = Depends(require_ops_role)):
     result = await db.execute(
         select(TunnelClient)
         .options(selectinload(TunnelClient.attachments))

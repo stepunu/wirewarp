@@ -9,17 +9,25 @@ import {
 } from '../lib/api'
 import { Badge, Button, StatusDot, relTime } from '../components/ui'
 import { Ic } from '../components/icons'
+import { useRole } from '../hooks/useRole'
 
 export default function Dashboard() {
-  const agents = useQuery({ queryKey: ['agents'], queryFn: agentsApi.list }).data ?? []
-  const pf = useQuery({ queryKey: ['port-forwards'], queryFn: () => pfApi.list() }).data ?? []
-  const ts = useQuery({ queryKey: ['tunnel-servers'], queryFn: tsApi.list }).data ?? []
-  const tc = useQuery({ queryKey: ['tunnel-clients'], queryFn: tcApi.list }).data ?? []
+  const { isVpnUser, user } = useRole()
+
+  // vpn_user is forbidden from these endpoints — disable the queries so
+  // we don't spam 403s in the console. The render branches below.
+  const enabled = !isVpnUser
+  const agents = useQuery({ queryKey: ['agents'], queryFn: agentsApi.list, enabled }).data ?? []
+  const pf = useQuery({ queryKey: ['port-forwards'], queryFn: () => pfApi.list(), enabled }).data ?? []
+  const ts = useQuery({ queryKey: ['tunnel-servers'], queryFn: tsApi.list, enabled }).data ?? []
+  const tc = useQuery({ queryKey: ['tunnel-clients'], queryFn: tcApi.list, enabled }).data ?? []
   const audit = useQuery({
     queryKey: ['audit', 50],
     queryFn: () => auditApi.list({ limit: 50 }),
-    
+    enabled,
   }).data ?? []
+
+  if (isVpnUser) return <VpnUserDashboard username={user?.username} vpnEnabled={!!user?.vpn_enabled} />
 
   const connected = agents.filter((a) => a.status === 'connected').length
   const disconnected = agents.filter((a) => a.status === 'disconnected').length
@@ -171,6 +179,48 @@ function Stat({
       <span className="stat-label">{label}</span>
       <span className="stat-value tabnum">{value}</span>
       {delta && <span className={`stat-delta ${deltaTone || ''}`}>{delta}</span>}
+    </div>
+  )
+}
+
+function VpnUserDashboard({ username, vpnEnabled }: { username?: string; vpnEnabled: boolean }) {
+  return (
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <div className="crumbs">
+            <span className="scheme">wire://</span>
+            <span>welcome</span>
+          </div>
+          <h1 className="page-title">Welcome{username ? `, ${username}` : ''}</h1>
+          <p className="page-sub">Your WireGuard profile lives one click away.</p>
+        </div>
+      </div>
+
+      <div className="card" style={{ maxWidth: 560 }}>
+        <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span className="badge accent">VPN</span>
+            <span style={{ fontWeight: 500 }}>
+              {vpnEnabled ? 'VPN portal enabled for your account' : 'VPN portal not enabled yet'}
+            </span>
+          </div>
+          <p style={{ color: 'var(--fg-2)', margin: 0 }}>
+            {vpnEnabled
+              ? 'Issue a profile per device, download the .conf, or scan the QR code from your phone.'
+              : 'Ask an admin to enable VPN access for your account, then refresh this page.'}
+          </p>
+          {vpnEnabled && (
+            <div>
+              <Link to="/vpn" style={{ textDecoration: 'none' }}>
+                <Button variant="primary" leading={<Ic.client s={14} />}>
+                  Open My VPN
+                </Button>
+              </Link>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   )
 }

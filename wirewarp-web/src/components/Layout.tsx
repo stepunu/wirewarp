@@ -10,25 +10,29 @@ import { useGlobalHotkeys } from '../hooks/useHotkeys'
 import { useRole } from '../hooks/useRole'
 import { agents as agentsApi, auth as authApi, portForwards as pfApi, clearToken } from '../lib/api'
 
+import type { Role } from '../lib/types'
+
 type NavEntry = {
   path: string
   label: string
   icon: typeof Ic.dashboard
   exact?: boolean
-  adminOnly?: boolean
-  vpnOnly?: boolean
+  // Roles allowed to see this entry. If omitted = visible to all auth'd users.
+  roles?: Role[]
+  // Additionally requires user.vpn_enabled flag.
+  vpnEnabledOnly?: boolean
 }
 const NAV: NavEntry[] = [
   { path: '/', label: 'Dashboard', icon: Ic.dashboard, exact: true },
-  { path: '/agents', label: 'Agents', icon: Ic.agent },
-  { path: '/tunnel-servers', label: 'Tunnel servers', icon: Ic.server },
-  { path: '/tunnel-clients', label: 'Tunnel clients', icon: Ic.client },
-  { path: '/lan-clients', label: 'LAN clients', icon: Ic.host },
-  { path: '/port-forwards', label: 'Port forwards', icon: Ic.forward },
-  { path: '/vpn-endpoints', label: 'VPN endpoints', icon: Ic.client, adminOnly: true },
-  { path: '/vpn', label: 'My VPN', icon: Ic.client, vpnOnly: true },
-  { path: '/users', label: 'Users', icon: Ic.settings, adminOnly: true },
-  { path: '/settings', label: 'Settings', icon: Ic.settings },
+  { path: '/agents', label: 'Agents', icon: Ic.agent, roles: ['admin', 'operator', 'viewer'] },
+  { path: '/tunnel-servers', label: 'Tunnel servers', icon: Ic.server, roles: ['admin', 'operator', 'viewer'] },
+  { path: '/tunnel-clients', label: 'Tunnel clients', icon: Ic.client, roles: ['admin', 'operator', 'viewer'] },
+  { path: '/lan-clients', label: 'LAN clients', icon: Ic.host, roles: ['admin', 'operator', 'viewer'] },
+  { path: '/port-forwards', label: 'Port forwards', icon: Ic.forward, roles: ['admin', 'operator', 'viewer'] },
+  { path: '/vpn-endpoints', label: 'VPN endpoints', icon: Ic.client, roles: ['admin', 'operator'] },
+  { path: '/vpn', label: 'My VPN', icon: Ic.client, vpnEnabledOnly: true },
+  { path: '/users', label: 'Users', icon: Ic.settings, roles: ['admin'] },
+  { path: '/settings', label: 'Settings', icon: Ic.settings, roles: ['admin'] },
 ]
 
 function getInitialTheme(): 'dark' | 'light' {
@@ -89,10 +93,10 @@ export default function Layout() {
     queryKey: ['port-forwards'],
     queryFn: () => pfApi.list(),
   })
-  const { user, role, isAdmin, canMutate } = useRole()
+  const { user, role } = useRole()
   const visibleNav = NAV.filter((n) => {
-    if (n.adminOnly && !isAdmin) return false
-    if (n.vpnOnly && !user?.vpn_enabled) return false
+    if (n.roles && (!role || !n.roles.includes(role))) return false
+    if (n.vpnEnabledOnly && !user?.vpn_enabled) return false
     return true
   })
 
@@ -204,7 +208,7 @@ export default function Layout() {
         <Outlet />
       </main>
 
-      {canMutate && <BottomNav onMore={() => setDrawerOpen(true)} />}
+      {role && role !== 'vpn_user' && <BottomNav onMore={() => setDrawerOpen(true)} />}
 
       {cmdkOpen && <CommandPalette onClose={() => setCmdkOpen(false)} navigate={navigate} agents={agents} />}
       {helpOpen && <HelpOverlay onClose={() => setHelpOpen(false)} />}

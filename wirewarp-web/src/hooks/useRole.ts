@@ -16,6 +16,7 @@ export function useRole(): {
   isAdmin: boolean
   isOperator: boolean
   isViewer: boolean
+  isVpnUser: boolean
   canMutate: boolean
 } {
   const { data } = useCurrentUser()
@@ -26,6 +27,7 @@ export function useRole(): {
     isAdmin: role === 'admin',
     isOperator: role === 'operator',
     isViewer: role === 'viewer',
+    isVpnUser: role === 'vpn_user',
     canMutate: role === 'admin' || role === 'operator',
   }
 }

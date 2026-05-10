@@ -1,4 +1,4 @@
-export type Role = 'admin' | 'operator' | 'viewer'
+export type Role = 'admin' | 'operator' | 'viewer' | 'vpn_user'
 export type AuthProvider = 'local' | 'oidc' | 'ldap'
 
 export interface User {

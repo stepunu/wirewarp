@@ -5,7 +5,7 @@ import { Badge, Button, Field, Input, Select, relTime } from '../components/ui'
 import type { Role, User } from '../lib/types'
 import { useRole } from '../hooks/useRole'
 
-const ROLES: Role[] = ['admin', 'operator', 'viewer']
+const ROLES: Role[] = ['admin', 'operator', 'viewer', 'vpn_user']
 
 export default function Users() {
   const { user: me } = useRole()

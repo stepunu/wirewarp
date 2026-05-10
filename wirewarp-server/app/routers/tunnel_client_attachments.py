@@ -25,7 +25,7 @@ from app.schemas.tunnel_client_attachment import (
     TunnelClientAttachmentRead,
     TunnelClientAttachmentUpdate,
 )
-from app.auth import get_current_user, require_role
+from app.auth import get_current_user, require_role, require_ops_role
 from app.realtime.events import (
     emit_lan_client_changed,
     emit_port_forward_changed,
@@ -69,7 +69,7 @@ async def list_attachments(
     tunnel_client_id: uuid.UUID | None = Query(None),
     tunnel_server_id: uuid.UUID | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_ops_role),
 ):
     q = select(TunnelClientAttachment).order_by(TunnelClientAttachment.created_at.desc())
     if tunnel_client_id is not None:
@@ -83,7 +83,7 @@ async def list_attachments(
 async def get_attachment(
     attachment_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_ops_role),
 ):
     att = await db.scalar(
         select(TunnelClientAttachment).where(TunnelClientAttachment.id == attachment_id)

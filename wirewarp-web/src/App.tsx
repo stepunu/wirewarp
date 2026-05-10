@@ -5,6 +5,7 @@ import { isAuthenticated, setToken } from './lib/api'
 import { mountRealtime } from './lib/realtime'
 import { ToastProvider, useToast } from './components/Toasts'
 import { useRole } from './hooks/useRole'
+import type { Role } from './lib/types'
 import Login from './pages/Login'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
@@ -74,13 +75,19 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-// Viewers (read-only role) have nothing to do on the admin dashboard,
-// so route them to /vpn where they can grab their WireGuard profile.
-function ViewerHome({ children }: { children: React.ReactNode }) {
-  const { role, isAdmin, isOperator, user } = useRole()
+// Restrict a route to specific roles. While role is loading we render
+// nothing to avoid flashing the page or a redirect. If the user's role
+// isn't allowed, send them to a safe page they can see — vpn_user with
+// VPN enabled to /vpn, everyone else to / (Dashboard, visible to all).
+function RoleGuard({ allow, children }: { allow: Role[]; children: React.ReactNode }) {
+  const { role, user } = useRole()
   const location = useLocation()
-  if (role !== undefined && !isAdmin && !isOperator && location.pathname === '/' && user?.vpn_enabled) {
-    return <Navigate to="/vpn" replace />
+  if (role === undefined) return null
+  if (!allow.includes(role)) {
+    if (role === 'vpn_user' && user?.vpn_enabled) {
+      return <Navigate to="/vpn" replace />
+    }
+    if (location.pathname !== '/') return <Navigate to="/" replace />
   }
   return <>{children}</>
 }
@@ -100,24 +107,80 @@ export default function App() {
                 </ProtectedRoute>
               }
             >
+              <Route index element={<Dashboard />} />
               <Route
-                index
+                path="agents"
                 element={
-                  <ViewerHome>
-                    <Dashboard />
-                  </ViewerHome>
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <Agents />
+                  </RoleGuard>
                 }
               />
-              <Route path="agents" element={<Agents />} />
-              <Route path="agents/:id" element={<AgentDetail />} />
-              <Route path="tunnel-servers" element={<TunnelServers />} />
-              <Route path="tunnel-clients" element={<TunnelClients />} />
-              <Route path="lan-clients" element={<LanClients />} />
-              <Route path="port-forwards" element={<PortForwards />} />
-              <Route path="vpn-endpoints" element={<VpnEndpoints />} />
+              <Route
+                path="agents/:id"
+                element={
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <AgentDetail />
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="tunnel-servers"
+                element={
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <TunnelServers />
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="tunnel-clients"
+                element={
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <TunnelClients />
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="lan-clients"
+                element={
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <LanClients />
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="port-forwards"
+                element={
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <PortForwards />
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="vpn-endpoints"
+                element={
+                  <RoleGuard allow={['admin', 'operator']}>
+                    <VpnEndpoints />
+                  </RoleGuard>
+                }
+              />
               <Route path="vpn" element={<MyVpn />} />
-              <Route path="users" element={<Users />} />
-              <Route path="settings" element={<Settings />} />
+              <Route
+                path="users"
+                element={
+                  <RoleGuard allow={['admin']}>
+                    <Users />
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="settings"
+                element={
+                  <RoleGuard allow={['admin']}>
+                    <Settings />
+                  </RoleGuard>
+                }
+              />
             </Route>
           </Routes>
         </BrowserRouter>

@@ -39,7 +39,7 @@ async def _get_or_create(db: AsyncSession) -> SystemSettings:
 @router.get("", response_model=SystemSettingsRead)
 async def get_settings(
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_role("admin", "operator", "viewer")),
+    _: User = Depends(require_role("admin")),
 ):
     return await _get_or_create(db)
 

@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 
-Role = Literal["admin", "operator", "viewer"]
+Role = Literal["admin", "operator", "viewer", "vpn_user"]
 
 
 class UserCreate(BaseModel):

@@ -14,7 +14,7 @@ _external_id_present = text("external_id IS NOT NULL")
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
-        CheckConstraint("role IN ('admin','operator','viewer')", name="ck_users_role"),
+        CheckConstraint("role IN ('admin','operator','viewer','vpn_user')", name="ck_users_role"),
         Index(
             "uq_users_provider_external",
             "auth_provider",

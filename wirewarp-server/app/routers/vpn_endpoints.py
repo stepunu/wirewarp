@@ -49,7 +49,10 @@ router = APIRouter()
 @router.get("", response_model=list[VpnEndpointRead])
 async def list_endpoints(
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_role("admin", "operator", "viewer")),
+    # Read-only list is accessible to vpn_user too — MyVpn uses this to
+    # populate the "issue a profile for" dropdown. Mutating endpoints
+    # below stay admin/operator only.
+    _: User = Depends(require_role("admin", "operator", "viewer", "vpn_user")),
 ):
     rows = (await db.execute(select(VpnEndpoint).order_by(VpnEndpoint.created_at.asc()))).scalars().all()
     return list(rows)
@@ -59,7 +62,7 @@ async def list_endpoints(
 async def get_endpoint(
     endpoint_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_role("admin", "operator", "viewer")),
+    _: User = Depends(require_role("admin", "operator", "viewer", "vpn_user")),
 ):
     ep = await db.get(VpnEndpoint, endpoint_id)
     if ep is None:
