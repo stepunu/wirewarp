@@ -1,0 +1,6 @@
+.git
+wirewarp-web/node_modules
+wirewarp-web/dist
+wirewarp-agent/dist
+wirewarp-server/static
+legacy

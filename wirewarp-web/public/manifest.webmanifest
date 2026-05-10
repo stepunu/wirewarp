@@ -1,0 +1,14 @@
+{
+  "name": "WireWarp",
+  "short_name": "WireWarp",
+  "description": "Self-hosted WireGuard tunnel management",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#1a2226",
+  "background_color": "#1a2226",
+  "icons": [
+    { "src": "/logo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/logo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
