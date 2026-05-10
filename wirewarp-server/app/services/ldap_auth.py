@@ -42,6 +42,44 @@ class LdapResult:
     vpn_enabled: bool = False
 
 
+def apply_vpn_user_demotion(role: str, vpn_enabled: bool, matched_explicit_role: bool) -> str:
+    """If the only signal a user matched was VPN-group membership —
+    i.e. no entry in the group_role_map / claim_role_map matched —
+    demote them to vpn_user. Explicit role mappings (admin, operator,
+    even an explicit viewer mapping) are kept intact.
+
+    Note: comparing role == default_role would be wrong because
+    default_role often coincides with an explicit role (e.g. viewer),
+    and we'd demote an explicit viewer who happens to also be in the
+    VPN group.
+    """
+    if vpn_enabled and not matched_explicit_role:
+        return "vpn_user"
+    return role
+
+
+def groups_match_role_map(groups: list[str], mapping: dict[str, str]) -> bool:
+    """Return True if any of the user's groups (CN or DN form) matches
+    a key in the role map — i.e. the user has an explicit role
+    assignment (not falling through to default_role)."""
+    if not mapping:
+        return False
+
+    def _cn(dn: str) -> str:
+        first = dn.split(",", 1)[0]
+        if "=" in first:
+            return first.split("=", 1)[1].strip().lower()
+        return first.strip().lower()
+
+    cn_set = {_cn(g) for g in groups}
+    dn_set = {g.lower() for g in groups}
+    for key in mapping:
+        k = key.lower()
+        if k in cn_set or k in dn_set:
+            return True
+    return False
+
+
 def map_groups_to_role(
     groups: list[str], mapping: dict[str, str], default_role: str
 ) -> str:
@@ -148,12 +186,13 @@ def _ldap_authenticate_sync(
     except Exception:  # noqa: BLE001
         pass
 
-    role = map_groups_to_role(
-        groups,
-        config.get("group_role_map") or {},
-        config.get("default_role", "viewer"),
-    )
+    default_role = config.get("default_role", "viewer")
+    mapping = config.get("group_role_map") or {}
+    role = map_groups_to_role(groups, mapping, default_role)
     vpn_enabled = _groups_contain(groups, config.get("vpn_group"))
+    role = apply_vpn_user_demotion(
+        role, vpn_enabled, groups_match_role_map(groups, mapping)
+    )
     return LdapResult(user_dn=user_dn, role=role, groups=groups, vpn_enabled=vpn_enabled)
 
 

@@ -42,6 +42,59 @@ def test_map_groups_no_match_returns_default():
     assert role == "viewer"
 
 
+def test_vpn_only_group_demotes_to_vpn_user():
+    """User whose only signal is VPN-group membership (no explicit role
+    mapping) → role=vpn_user. Used by both LDAP and OIDC.
+    """
+    from app.services.ldap_auth import apply_vpn_user_demotion
+
+    # vpn_enabled=True, matched_explicit=False → demote
+    assert apply_vpn_user_demotion("viewer", True, False) == "vpn_user"
+    assert apply_vpn_user_demotion("operator", True, False) == "vpn_user"
+
+
+def test_explicit_role_match_keeps_role_even_with_vpn_group():
+    """User explicitly mapped to a role (admin/operator/viewer) + VPN
+    group → role stays. The demotion only fires for default-role
+    fallthrough.
+    """
+    from app.services.ldap_auth import apply_vpn_user_demotion
+
+    assert apply_vpn_user_demotion("admin", True, True) == "admin"
+    assert apply_vpn_user_demotion("operator", True, True) == "operator"
+    # Crucial case: explicit viewer + vpn group → still viewer, not demoted
+    assert apply_vpn_user_demotion("viewer", True, True) == "viewer"
+
+
+def test_no_vpn_group_no_demotion():
+    """If vpn_enabled is False, role passes through untouched."""
+    from app.services.ldap_auth import apply_vpn_user_demotion
+
+    assert apply_vpn_user_demotion("viewer", False, False) == "viewer"
+    assert apply_vpn_user_demotion("admin", False, True) == "admin"
+
+
+def test_groups_match_role_map_detects_explicit_match():
+    """The CN-or-DN matcher recognises both forms used in the wild."""
+    from app.services.ldap_auth import groups_match_role_map
+
+    mapping = {"sso_wirewarp_users": "viewer", "sso_wirewarp_admins": "admin"}
+    # CN match
+    assert groups_match_role_map(["sso_wirewarp_users"], mapping) is True
+    # Full DN match
+    assert (
+        groups_match_role_map(
+            ["cn=sso_wirewarp_admins,cn=groups,cn=accounts,dc=example,dc=com"],
+            mapping,
+        )
+        is True
+    )
+    # Only VPN group, no role-map entry
+    assert groups_match_role_map(["sso_wirewarp_vpn"], mapping) is False
+    assert groups_match_role_map([], mapping) is False
+    assert groups_match_role_map(["sso_wirewarp_users"], {}) is False
+
+
 @pytest.mark.asyncio
 async def test_ldap_login_jit_creates_user(client, db):
     await _setup_ldap_config(client)

@@ -82,6 +82,9 @@ async def test_oidc_jit_sets_vpn_enabled_when_group_matches(client, db):
     )
     assert user is not None
     assert user.vpn_enabled is True
+    # claim_role_map didn't match, so the user only has the VPN group —
+    # they must land as vpn_user, not the default viewer role.
+    assert user.role == "vpn_user"
 
 
 @pytest.mark.asyncio

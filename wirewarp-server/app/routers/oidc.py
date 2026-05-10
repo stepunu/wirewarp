@@ -16,6 +16,7 @@ from app.models.oauth_state import OAuthState
 from app.models.system_settings import SystemSettings
 from app.models.user import User
 from app.services.oidc_auth import (
+    _claim_values,
     claims_grant_vpn,
     discover,
     exchange_code_for_userinfo,
@@ -107,13 +108,18 @@ async def oidc_callback(
         raise HTTPException(status_code=400, detail="OIDC claims missing sub")
 
     role_claim = cfg.get("role_claim", "groups")
-    role = map_claims_to_role(
-        claims,
-        role_claim,
-        cfg.get("claim_role_map") or {},
-        cfg.get("default_role", "viewer"),
-    )
+    default_role = cfg.get("default_role", "viewer")
+    mapping = cfg.get("claim_role_map") or {}
+    role = map_claims_to_role(claims, role_claim, mapping, default_role)
     vpn_enabled = claims_grant_vpn(claims, role_claim, cfg.get("vpn_group"))
+    # If membership in vpn_group is the only signal we got, that user
+    # is VPN-only — they get /vpn and nothing else. An explicit role
+    # mapping (admin / operator / even explicit viewer) is kept.
+    from app.services.ldap_auth import apply_vpn_user_demotion
+    matched_explicit = any(
+        v in (mapping or {}) for v in _claim_values(claims, role_claim)
+    )
+    role = apply_vpn_user_demotion(role, vpn_enabled, matched_explicit)
 
     username = (
         claims.get(cfg.get("username_claim", "preferred_username"))
