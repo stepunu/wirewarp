@@ -19,8 +19,7 @@ def _make_agent(agent_type: str = "server") -> Agent:
     return Agent(
         id=uuid.uuid4(),
         name=f"{agent_type}-test",
-        agent_type=agent_type,
-        token_hash="x",
+        type=agent_type,
     )
 
 
