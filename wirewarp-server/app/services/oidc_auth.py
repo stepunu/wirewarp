@@ -185,7 +185,11 @@ async def _verify_id_token(
         raise RuntimeError(f"JWKS fetch failed: {jwks_resp.status_code}")
     jwks = JsonWebKey.import_key_set(jwks_resp.json())
 
-    jwt = JsonWebToken(["RS256", "ES256", "RS512", "PS256", "HS256"])
+    # Only accept asymmetric signatures. Real OIDC providers issue
+    # asymmetric ID tokens to confidential clients; allowing HS256
+    # alongside RSA keys is the classic alg-confusion shape and has
+    # no upside here.
+    jwt = JsonWebToken(["RS256", "ES256", "RS512", "PS256"])
     claims = jwt.decode(
         id_token,
         jwks,

@@ -2,7 +2,11 @@
 set -euo pipefail
 
 # WireWarp Agent installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/.../install.sh | bash -s -- --mode client --url http://x.x.x.x:8100 --token TOKEN
+# Usage: curl -fsSL https://raw.githubusercontent.com/.../install.sh | bash -s -- --mode client --url https://wirewarp.example.com --token TOKEN
+#
+# --url MUST start with https://. The agent refuses to connect over plain http
+# because the WS channel carries the registration token and root-level
+# command stream (see Architecture Rule 1 + the 2026-05-11 security audit).
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -20,9 +24,19 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$MODE" || -z "$URL" || -z "$TOKEN" ]]; then
-  echo "Usage: install.sh --mode <server|client> --url <control-server-url> --token <token>"
+  echo "Usage: install.sh --mode <server|client> --url <https://control-server-url> --token <token>"
   exit 1
 fi
+
+case "$URL" in
+  https://*) ;;
+  *)
+    echo "error: --url must start with https:// (got: $URL)" >&2
+    echo "  the WS channel carries the registration token and root-level command stream;" >&2
+    echo "  plaintext http:// is refused to prevent MITM agent takeover." >&2
+    exit 1
+    ;;
+esac
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "This script must be run as root (use sudo or run as root directly)"

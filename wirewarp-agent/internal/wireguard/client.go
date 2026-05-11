@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/wirewarp/agent/internal/validate"
 )
 
 // ClientConfig holds everything needed to build a per-interface client conf.
@@ -28,6 +30,11 @@ type Client struct {
 // NewClient creates a Client, generating a keypair for this interface if
 // one doesn't exist yet. Each interface owns its own /etc/wireguard/<iface>.key.
 func NewClient(cfg ClientConfig) (*Client, error) {
+	if cfg.Interface != "" {
+		if err := validate.Interface(cfg.Interface); err != nil {
+			return nil, err
+		}
+	}
 	if err := os.MkdirAll(wgDir, 0700); err != nil {
 		return nil, fmt.Errorf("create wireguard dir: %w", err)
 	}
@@ -70,6 +77,9 @@ func (c *Client) Down() error {
 
 // UpdateEndpoint changes the server endpoint without tearing down the tunnel.
 func (c *Client) UpdateEndpoint(newEndpoint string) error {
+	if err := validate.Endpoint(newEndpoint); err != nil {
+		return err
+	}
 	c.cfg.ServerEndpoint = newEndpoint
 	if err := c.writeConfig(); err != nil {
 		return err
@@ -78,6 +88,24 @@ func (c *Client) UpdateEndpoint(newEndpoint string) error {
 }
 
 func (c *Client) writeConfig() error {
+	if err := validate.NoControlChars(c.cfg.TunnelIP); err != nil {
+		return fmt.Errorf("client config TunnelIP: %w", err)
+	}
+	if err := validate.NoControlChars(c.privateKey); err != nil {
+		return fmt.Errorf("client private key: %w", err)
+	}
+	if err := validate.NoControlChars(c.cfg.ServerPublicKey); err != nil {
+		return fmt.Errorf("client ServerPublicKey: %w", err)
+	}
+	if err := validate.NoControlChars(c.cfg.ServerEndpoint); err != nil {
+		return fmt.Errorf("client ServerEndpoint: %w", err)
+	}
+	for _, a := range c.cfg.AllowedIPs {
+		if err := validate.NoControlChars(a); err != nil {
+			return fmt.Errorf("client AllowedIPs: %w", err)
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString("[Interface]\n")
 	b.WriteString(fmt.Sprintf("Address = %s/24\n", c.cfg.TunnelIP))

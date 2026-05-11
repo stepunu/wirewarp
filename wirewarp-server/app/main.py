@@ -437,11 +437,21 @@ if STATIC_DIR.is_dir():
     # Serve assets (JS/CSS/images)
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="static-assets")
 
+    _STATIC_BASE = STATIC_DIR.resolve()
+
     @app.get("/{path:path}")
     async def spa_fallback(path: str):
-        # Try serving the exact file first (e.g. favicon.ico, vite.svg)
-        file = STATIC_DIR / path
-        if path and file.is_file():
-            return FileResponse(file)
-        # Fall back to index.html for SPA routing
+        # Resolve the requested path against STATIC_DIR and reject anything
+        # that escapes the base — `..` segments would otherwise leak source
+        # files (alembic.ini, services/*.py) or arbitrary readable files
+        # to unauthenticated callers. SPA routes (no matching file) fall
+        # back to index.html, same as before.
+        if path:
+            try:
+                candidate = (STATIC_DIR / path).resolve()
+                candidate.relative_to(_STATIC_BASE)
+            except (ValueError, OSError):
+                return FileResponse(STATIC_DIR / "index.html")
+            if candidate.is_file():
+                return FileResponse(candidate)
         return FileResponse(STATIC_DIR / "index.html")

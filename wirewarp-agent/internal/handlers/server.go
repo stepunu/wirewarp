@@ -11,6 +11,7 @@ import (
 	"github.com/wirewarp/agent/internal/config"
 	"github.com/wirewarp/agent/internal/executor"
 	"github.com/wirewarp/agent/internal/iptables"
+	"github.com/wirewarp/agent/internal/validate"
 	"github.com/wirewarp/agent/internal/wireguard"
 )
 
@@ -99,6 +100,24 @@ func (h *ServerHandlers) handleWGInit(raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
 	}
+	if err := validate.Interface(p.Interface); err != nil {
+		return "", err
+	}
+	if err := validate.Port(p.ListenPort); err != nil {
+		return "", err
+	}
+	if err := validate.IPv4CIDR(p.TunnelNetwork); err != nil {
+		return "", err
+	}
+	if err := validate.IPv4(p.TunnelIP); err != nil {
+		return "", err
+	}
+	if err := validate.PublicIface(p.PublicIface); err != nil {
+		return "", err
+	}
+	if err := validate.IPv4(p.PublicIP); err != nil {
+		return "", err
+	}
 
 	wgSrv, err := wireguard.NewServer(wireguard.ServerConfig{
 		Interface:     p.Interface,
@@ -157,6 +176,20 @@ func (h *ServerHandlers) handleAddPeer(raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
 	}
+	if err := validate.PeerName(p.Name); err != nil {
+		return "", err
+	}
+	if err := validate.WGKey(p.PublicKey); err != nil {
+		return "", err
+	}
+	if err := validate.IPv4(p.TunnelIP); err != nil {
+		return "", err
+	}
+	for _, a := range p.AllowedIPs {
+		if err := validate.IPv4OrCIDR(a); err != nil {
+			return "", err
+		}
+	}
 	if err := h.wg.AddPeer(wireguard.Peer{
 		Name:       p.Name,
 		PublicKey:  p.PublicKey,
@@ -192,6 +225,9 @@ func (h *ServerHandlers) handleRemovePeer(raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
 	}
+	if err := validate.WGKey(p.PublicKey); err != nil {
+		return "", err
+	}
 	if err := h.wg.RemovePeer(p.PublicKey); err != nil {
 		return "", err
 	}
@@ -220,9 +256,15 @@ func (h *ServerHandlers) handleAddForward(raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
 	}
+	if err := validateForwardParams(&p); err != nil {
+		return "", err
+	}
 	publicIP := p.PublicIP
 	if publicIP == "" && h.cfg.Server != nil {
 		publicIP = h.cfg.Server.PublicIP
+	}
+	if err := validate.IPv4(publicIP); err != nil {
+		return "", err
 	}
 	if err := iptables.AddForward(publicIP, iptables.ForwardRule{
 		Protocol:      p.Protocol,
@@ -247,9 +289,15 @@ func (h *ServerHandlers) handleRemoveForward(raw json.RawMessage) (string, error
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
 	}
+	if err := validateForwardParams(&p); err != nil {
+		return "", err
+	}
 	publicIP := p.PublicIP
 	if publicIP == "" && h.cfg.Server != nil {
 		publicIP = h.cfg.Server.PublicIP
+	}
+	if err := validate.IPv4(publicIP); err != nil {
+		return "", err
 	}
 	if err := iptables.RemoveForward(publicIP, iptables.ForwardRule{
 		Protocol:      p.Protocol,
@@ -292,6 +340,14 @@ func (h *ServerHandlers) handleSetLANSNAT(raw json.RawMessage) (string, error) {
 	if p.LANIp == "" {
 		return "", fmt.Errorf("lan_ip is required")
 	}
+	if err := validate.IPv4(p.LANIp); err != nil {
+		return "", err
+	}
+	if p.PublicIP != "" {
+		if err := validate.IPv4(p.PublicIP); err != nil {
+			return "", err
+		}
+	}
 	if h.cfg.Server == nil || !h.cfg.Server.Initialized {
 		return "", fmt.Errorf("server not initialised — wg_init has not been run")
 	}
@@ -321,6 +377,41 @@ func (h *ServerHandlers) handleSetLANSNAT(raw json.RawMessage) (string, error) {
 		log.Printf("[server] WARN: iptables save failed: %v", saveErr)
 	}
 	return fmt.Sprintf("snat installed: %s -> %s on %s", p.LANIp, p.PublicIP, iface), nil
+}
+
+// validateForwardParams checks the protocol/port/IP fields of a port-forward
+// request before they reach the iptables layer.
+func validateForwardParams(p *addForwardParams) error {
+	switch p.Protocol {
+	case "tcp", "udp":
+	default:
+		return fmt.Errorf("validate: protocol %q: must be tcp or udp", p.Protocol)
+	}
+	if err := validate.Port(p.PublicPort); err != nil {
+		return err
+	}
+	if p.PublicPortEnd != 0 {
+		if err := validate.Port(p.PublicPortEnd); err != nil {
+			return err
+		}
+	}
+	if err := validate.Port(p.DestPort); err != nil {
+		return err
+	}
+	if p.DestPortEnd != 0 {
+		if err := validate.Port(p.DestPortEnd); err != nil {
+			return err
+		}
+	}
+	if err := validate.IPv4(p.DestIP); err != nil {
+		return err
+	}
+	if p.PublicIP != "" {
+		if err := validate.IPv4(p.PublicIP); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addRouteIfMissing adds a kernel route for a subnet via a WireGuard interface.

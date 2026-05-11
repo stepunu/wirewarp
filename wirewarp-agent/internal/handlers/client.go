@@ -11,6 +11,7 @@ import (
 
 	"github.com/wirewarp/agent/internal/config"
 	"github.com/wirewarp/agent/internal/executor"
+	"github.com/wirewarp/agent/internal/validate"
 	"github.com/wirewarp/agent/internal/wireguard"
 )
 
@@ -120,8 +121,42 @@ func (h *ClientHandlers) handleWGAttach(raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
 	}
-	if p.WGInterface == "" {
-		return "", fmt.Errorf("wg_interface is required")
+	if err := validate.Interface(p.WGInterface); err != nil {
+		return "", err
+	}
+	if err := validate.IPv4(p.TunnelIP); err != nil {
+		return "", err
+	}
+	if err := validate.WGKey(p.ServerPublicKey); err != nil {
+		return "", err
+	}
+	if err := validate.Endpoint(p.ServerEndpoint); err != nil {
+		return "", err
+	}
+	if p.VPSTunnelIP != "" {
+		if err := validate.IPv4(p.VPSTunnelIP); err != nil {
+			return "", err
+		}
+	}
+	if p.LANIface != "" {
+		if err := validate.PublicIface(p.LANIface); err != nil {
+			return "", err
+		}
+	}
+	if p.LANNetwork != "" {
+		if err := validate.IPv4CIDR(p.LANNetwork); err != nil {
+			return "", err
+		}
+	}
+	if p.LANIP != "" {
+		if err := validate.IPv4(p.LANIP); err != nil {
+			return "", err
+		}
+	}
+	if p.ServerTunnelNetwork != "" {
+		if err := validate.IPv4CIDR(p.ServerTunnelNetwork); err != nil {
+			return "", err
+		}
 	}
 
 	att := config.AttachmentState{
@@ -175,6 +210,16 @@ func (h *ClientHandlers) handleWGDetach(raw json.RawMessage) (string, error) {
 	var p wgDetachParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
+	}
+	if p.WGInterface != "" {
+		if err := validate.Interface(p.WGInterface); err != nil {
+			return "", err
+		}
+	}
+	if p.LANIface != "" {
+		if err := validate.PublicIface(p.LANIface); err != nil {
+			return "", err
+		}
 	}
 	iface := p.WGInterface
 	if iface == "" {
@@ -244,6 +289,14 @@ func (h *ClientHandlers) handleSetLANEgress(raw json.RawMessage) (string, error)
 	if p.LANIP == "" {
 		return "", fmt.Errorf("lan_ip is required")
 	}
+	if err := validate.IPv4(p.LANIP); err != nil {
+		return "", err
+	}
+	if p.WGInterface != "" {
+		if err := validate.Interface(p.WGInterface); err != nil {
+			return "", err
+		}
+	}
 
 	// Always remove any existing rule for this LAN IP at our priority. ip
 	// rule del is idempotent (returns non-zero if absent); we don't care.
@@ -284,6 +337,14 @@ func (h *ClientHandlers) handleUpdateEndpoint(raw json.RawMessage) (string, erro
 	var p updateEndpointParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
+	}
+	if err := validate.Endpoint(p.ServerEndpoint); err != nil {
+		return "", err
+	}
+	if p.WGInterface != "" {
+		if err := validate.Interface(p.WGInterface); err != nil {
+			return "", err
+		}
 	}
 	iface := p.WGInterface
 	if iface == "" {

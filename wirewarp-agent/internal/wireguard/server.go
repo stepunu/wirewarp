@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/wirewarp/agent/internal/validate"
 )
 
 const wgDir = "/etc/wireguard"
@@ -57,6 +59,11 @@ type Server struct {
 
 // NewServer creates a Server, generating a keypair if one doesn't exist yet.
 func NewServer(cfg ServerConfig) (*Server, error) {
+	if cfg.Interface != "" {
+		if err := validate.Interface(cfg.Interface); err != nil {
+			return nil, err
+		}
+	}
 	if err := os.MkdirAll(wgDir, 0700); err != nil {
 		return nil, fmt.Errorf("create wireguard dir: %w", err)
 	}
@@ -119,6 +126,32 @@ func (s *Server) Down() error {
 }
 
 func (s *Server) writeConfig() error {
+	if err := validate.NoControlChars(s.cfg.TunnelIP); err != nil {
+		return fmt.Errorf("server config TunnelIP: %w", err)
+	}
+	if err := validate.NoControlChars(s.privateKey); err != nil {
+		return fmt.Errorf("server private key: %w", err)
+	}
+	for _, p := range s.peers {
+		if err := validate.NoControlChars(p.Name); err != nil {
+			return fmt.Errorf("peer Name: %w", err)
+		}
+		if err := validate.NoControlChars(p.PublicKey); err != nil {
+			return fmt.Errorf("peer PublicKey: %w", err)
+		}
+		if err := validate.NoControlChars(p.PresharedKey); err != nil {
+			return fmt.Errorf("peer PresharedKey: %w", err)
+		}
+		if err := validate.NoControlChars(p.TunnelIP); err != nil {
+			return fmt.Errorf("peer TunnelIP: %w", err)
+		}
+		for _, a := range p.AllowedIPs {
+			if err := validate.NoControlChars(a); err != nil {
+				return fmt.Errorf("peer AllowedIPs: %w", err)
+			}
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString("[Interface]\n")
 	b.WriteString(fmt.Sprintf("Address = %s/24\n", s.cfg.TunnelIP))

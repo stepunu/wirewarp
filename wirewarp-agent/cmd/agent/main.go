@@ -17,6 +17,7 @@ import (
 
 	"github.com/wirewarp/agent/internal/config"
 	"github.com/wirewarp/agent/internal/handlers"
+	"github.com/wirewarp/agent/internal/validate"
 	wsclient "github.com/wirewarp/agent/internal/websocket"
 )
 
@@ -40,6 +41,9 @@ func main() {
 		if *mode == "" || *url == "" || *token == "" {
 			log.Fatal("First run requires --mode, --url, and --token flags")
 		}
+		if err := validate.ControlServerURL(*url); err != nil {
+			log.Fatalf("Invalid --url: %v", err)
+		}
 		cfg = &config.Config{
 			Mode:             *mode,
 			ControlServerURL: *url,
@@ -49,6 +53,12 @@ func main() {
 			log.Fatalf("Failed to save initial config: %v", err)
 		}
 		log.Printf("Config saved to %s", *cfgPath)
+	}
+
+	// Reject any saved http:// URL on every startup so a hand-edited
+	// agent.yaml can't reintroduce a plaintext WS channel.
+	if err := validate.ControlServerURL(cfg.ControlServerURL); err != nil {
+		log.Fatalf("Refusing to start with invalid control-server URL %q: %v", cfg.ControlServerURL, err)
 	}
 
 	log.Printf("Starting WireWarp agent (mode=%s, version=%s)", cfg.Mode, version)

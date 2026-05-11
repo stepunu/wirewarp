@@ -20,6 +20,7 @@ import (
 	"github.com/wirewarp/agent/internal/config"
 	"github.com/wirewarp/agent/internal/executor"
 	"github.com/wirewarp/agent/internal/lanscan"
+	"github.com/wirewarp/agent/internal/validate"
 )
 
 const (
@@ -90,6 +91,9 @@ func (c *Client) Run(ctx context.Context) {
 }
 
 func (c *Client) connect(ctx context.Context) error {
+	if err := validate.ControlServerURL(c.cfg.ControlServerURL); err != nil {
+		return err
+	}
 	conn, _, err := websocket.Dial(ctx, c.cfg.ControlServerURL+"/ws/agent", nil)
 	if err != nil {
 		return err

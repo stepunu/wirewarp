@@ -10,6 +10,7 @@ import (
 	"github.com/wirewarp/agent/internal/config"
 	"github.com/wirewarp/agent/internal/executor"
 	"github.com/wirewarp/agent/internal/iptables"
+	"github.com/wirewarp/agent/internal/validate"
 	"github.com/wirewarp/agent/internal/wireguard"
 )
 
@@ -122,6 +123,23 @@ func (h *VpnHandlers) handleEndpointUp(raw json.RawMessage) (string, error) {
 	if p.Interface == "" || p.VpnNetwork == "" || p.VpnServerIP == "" {
 		return "", fmt.Errorf("interface, vpn_network and vpn_server_ip are required")
 	}
+	if err := validate.Interface(p.Interface); err != nil {
+		return "", err
+	}
+	if err := validate.Port(p.ListenPort); err != nil {
+		return "", err
+	}
+	if err := validate.IPv4CIDR(p.VpnNetwork); err != nil {
+		return "", err
+	}
+	if err := validate.IPv4(p.VpnServerIP); err != nil {
+		return "", err
+	}
+	for _, ns := range p.DNSServers {
+		if err := validate.IPv4(ns); err != nil {
+			return "", err
+		}
+	}
 
 	state := config.VpnEndpointState{
 		EndpointID:  p.EndpointID,
@@ -153,6 +171,9 @@ func (h *VpnHandlers) handleEndpointDown(raw json.RawMessage) (string, error) {
 	var p vpnEndpointDownParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
+	}
+	if err := validate.Interface(p.Interface); err != nil {
+		return "", err
 	}
 
 	h.mu.Lock()
@@ -207,6 +228,28 @@ func (h *VpnHandlers) handlePeerAdd(raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
 	}
+	if err := validate.Interface(p.Interface); err != nil {
+		return "", err
+	}
+	if p.VpnNetwork != "" {
+		if err := validate.IPv4CIDR(p.VpnNetwork); err != nil {
+			return "", err
+		}
+	}
+	if err := validate.WGKey(p.PublicKey); err != nil {
+		return "", err
+	}
+	if err := validate.WGKeyOpt(p.PSK); err != nil {
+		return "", err
+	}
+	if err := validate.IPv4(p.TunnelIP); err != nil {
+		return "", err
+	}
+	for i := range p.Rules {
+		if err := validatePeerRule(&p.Rules[i]); err != nil {
+			return "", err
+		}
+	}
 
 	h.mu.Lock()
 	wg, ok := h.wgs[p.Interface]
@@ -251,6 +294,17 @@ func (h *VpnHandlers) handlePeerRemove(raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
 	}
+	if err := validate.Interface(p.Interface); err != nil {
+		return "", err
+	}
+	if err := validate.WGKey(p.PublicKey); err != nil {
+		return "", err
+	}
+	if p.TunnelIP != "" {
+		if err := validate.IPv4(p.TunnelIP); err != nil {
+			return "", err
+		}
+	}
 
 	h.mu.Lock()
 	wg, ok := h.wgs[p.Interface]
@@ -286,6 +340,22 @@ func (h *VpnHandlers) handlePeerUpdateRules(raw json.RawMessage) (string, error)
 	var p vpnPeerUpdateRulesParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
+	}
+	if err := validate.Interface(p.Interface); err != nil {
+		return "", err
+	}
+	if p.VpnNetwork != "" {
+		if err := validate.IPv4CIDR(p.VpnNetwork); err != nil {
+			return "", err
+		}
+	}
+	if err := validate.IPv4(p.TunnelIP); err != nil {
+		return "", err
+	}
+	for i := range p.Rules {
+		if err := validatePeerRule(&p.Rules[i]); err != nil {
+			return "", err
+		}
 	}
 	h.mu.Lock()
 	wan := h.wanCache
@@ -395,6 +465,32 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+func validatePeerRule(r *vpnPeerRulePayload) error {
+	if r.Destination != "" {
+		if err := validate.IPv4OrCIDR(r.Destination); err != nil {
+			return err
+		}
+	}
+	if r.Protocol != "" {
+		switch r.Protocol {
+		case "tcp", "udp", "icmp", "any", "all":
+		default:
+			return fmt.Errorf("validate: vpn rule protocol %q: must be tcp|udp|icmp|any|all", r.Protocol)
+		}
+	}
+	if r.PortRangeStart != 0 {
+		if err := validate.Port(r.PortRangeStart); err != nil {
+			return err
+		}
+	}
+	if r.PortRangeEnd != 0 {
+		if err := validate.Port(r.PortRangeEnd); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func convertRules(in []vpnPeerRulePayload) []iptables.VpnRule {

@@ -202,9 +202,24 @@ async def handle_command_result(agent_id: str, msg: dict, db: AsyncSession) -> N
     command_type: str | None = None
     command_params: dict | None = None
     if command_id:
-        result = await db.execute(select(CommandLog).where(CommandLog.id == command_id))
+        # Bind the lookup to the authenticated agent so a malicious agent
+        # can't ack — and (via wg_attach) inject a peer key into — another
+        # agent's pending command. Without this filter the follow-up
+        # dispatch below would happily run with attacker-supplied output.
+        result = await db.execute(
+            select(CommandLog).where(
+                CommandLog.id == command_id,
+                CommandLog.agent_id == agent_id,
+            )
+        )
         log = result.scalar_one_or_none()
-        if log:
+        if log is None:
+            logger.warning(
+                "Agent %s sent command_result for command_id %s it does not own; ignoring",
+                agent_id,
+                command_id,
+            )
+        else:
             log.success = success
             log.output = output
             command_type = log.command_type
