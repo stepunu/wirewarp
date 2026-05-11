@@ -29,6 +29,7 @@ func main() {
 	cfgPath := flag.String("config", config.DefaultPath, "Path to agent config file")
 	url := flag.String("url", "", "Control server URL (e.g. https://wirewarp.example.com)")
 	token := flag.String("token", "", "Registration token (first run only)")
+	insecure := flag.Bool("insecure", false, "Allow plain http:// control-server URL (homelab/bootstrap only — MITM risk)")
 	flag.Parse()
 
 	// Load existing config or bootstrap from flags
@@ -41,13 +42,14 @@ func main() {
 		if *mode == "" || *url == "" || *token == "" {
 			log.Fatal("First run requires --mode, --url, and --token flags")
 		}
-		if err := validate.ControlServerURL(*url); err != nil {
+		if err := validate.ControlServerURL(*url, *insecure); err != nil {
 			log.Fatalf("Invalid --url: %v", err)
 		}
 		cfg = &config.Config{
 			Mode:             *mode,
 			ControlServerURL: *url,
 			AgentToken:       *token,
+			Insecure:         *insecure,
 		}
 		if err := cfg.Save(*cfgPath); err != nil {
 			log.Fatalf("Failed to save initial config: %v", err)
@@ -55,10 +57,14 @@ func main() {
 		log.Printf("Config saved to %s", *cfgPath)
 	}
 
-	// Reject any saved http:// URL on every startup so a hand-edited
-	// agent.yaml can't reintroduce a plaintext WS channel.
-	if err := validate.ControlServerURL(cfg.ControlServerURL); err != nil {
+	// Reject any saved http:// URL on every startup unless the config was
+	// installed with --insecure, so a hand-edited agent.yaml can't silently
+	// reintroduce a plaintext WS channel.
+	if err := validate.ControlServerURL(cfg.ControlServerURL, cfg.Insecure); err != nil {
 		log.Fatalf("Refusing to start with invalid control-server URL %q: %v", cfg.ControlServerURL, err)
+	}
+	if cfg.Insecure {
+		log.Printf("WARNING: agent configured with --insecure — control-server URL is http://, WS channel is plaintext (token + command stream are MITM-able)")
 	}
 
 	log.Printf("Starting WireWarp agent (mode=%s, version=%s)", cfg.Mode, version)

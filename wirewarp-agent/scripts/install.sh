@@ -4,36 +4,47 @@ set -euo pipefail
 # WireWarp Agent installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/.../install.sh | bash -s -- --mode client --url https://wirewarp.example.com --token TOKEN
 #
-# --url MUST start with https://. The agent refuses to connect over plain http
-# because the WS channel carries the registration token and root-level
-# command stream (see Architecture Rule 1 + the 2026-05-11 security audit).
+# --url MUST start with https:// by default. The agent refuses to connect over
+# plain http because the WS channel carries the registration token and
+# root-level command stream (see Architecture Rule 1 + the 2026-05-11 security
+# audit). Pass --insecure to opt in to plaintext http:// for homelab/bootstrap
+# setups where TLS termination isn't up yet.
 
 export DEBIAN_FRONTEND=noninteractive
 
 MODE=""
 URL=""
 TOKEN=""
+INSECURE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --mode)  MODE="$2";  shift 2 ;;
-    --url)   URL="$2";   shift 2 ;;
-    --token) TOKEN="$2"; shift 2 ;;
+    --mode)     MODE="$2";  shift 2 ;;
+    --url)      URL="$2";   shift 2 ;;
+    --token)    TOKEN="$2"; shift 2 ;;
+    --insecure) INSECURE=1; shift   ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
 done
 
 if [[ -z "$MODE" || -z "$URL" || -z "$TOKEN" ]]; then
-  echo "Usage: install.sh --mode <server|client> --url <https://control-server-url> --token <token>"
+  echo "Usage: install.sh --mode <server|client> --url <https://control-server-url> --token <token> [--insecure]"
   exit 1
 fi
 
 case "$URL" in
   https://*) ;;
+  http://*)
+    if [[ "$INSECURE" -ne 1 ]]; then
+      echo "error: --url is http:// (got: $URL) — pass --insecure to opt in" >&2
+      echo "  the WS channel carries the registration token and root-level command stream;" >&2
+      echo "  plaintext http:// is MITM-able. Use --insecure only for homelab/bootstrap." >&2
+      exit 1
+    fi
+    echo "WARNING: --insecure set — installing with plaintext http:// control-server URL" >&2
+    ;;
   *)
-    echo "error: --url must start with https:// (got: $URL)" >&2
-    echo "  the WS channel carries the registration token and root-level command stream;" >&2
-    echo "  plaintext http:// is refused to prevent MITM agent takeover." >&2
+    echo "error: --url must start with https:// or http:// (got: $URL)" >&2
     exit 1
     ;;
 esac
@@ -108,7 +119,11 @@ if ip link show wg0 &>/dev/null; then
   ip link delete wg0 2>/dev/null || true
 fi
 
-/usr/local/bin/wirewarp-agent --mode "$MODE" --url "$URL" --token "$TOKEN" &
+INSECURE_FLAG=()
+if [[ "$INSECURE" -eq 1 ]]; then
+  INSECURE_FLAG=(--insecure)
+fi
+/usr/local/bin/wirewarp-agent --mode "$MODE" --url "$URL" --token "$TOKEN" "${INSECURE_FLAG[@]}" &
 AGENT_PID=$!
 
 # Wait for the agent to register (config will have a non-empty agent_jwt after success)

@@ -16,6 +16,13 @@ type Config struct {
 	AgentJWT         string `yaml:"agent_jwt"`          // JWT issued after registration
 	AgentID          string `yaml:"agent_id"`
 
+	// Insecure opts the agent into accepting a plain http:// (and therefore
+	// ws://) control-server URL. Default false. Set at install time via
+	// --insecure; persisted so reconnects honour the same trust decision.
+	// Intended for homelab bootstrap where TLS isn't up yet — production
+	// deployments should always use https.
+	Insecure bool `yaml:"insecure,omitempty"`
+
 	// WireGuard server state (mode=server)
 	Server *ServerState `yaml:"server,omitempty"`
 

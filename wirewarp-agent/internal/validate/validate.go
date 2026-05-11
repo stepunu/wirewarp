@@ -150,14 +150,24 @@ func PeerName(s string) error {
 	return NoControlChars(s)
 }
 
-// ControlServerURL accepts only https:// URLs with a non-empty host. Used at
-// agent startup and before every WS dial.
-func ControlServerURL(s string) error {
+// ControlServerURL accepts https:// URLs with a non-empty host. When
+// allowHTTP is true, plain http:// is also accepted — used for homelab /
+// bootstrap deployments where TLS termination (Traefik etc.) isn't up yet.
+// The default (allowHTTP=false) stays strict because the WS channel carries
+// the registration token and root-level command stream; the relaxed mode is
+// strictly opt-in via the agent's --insecure flag and is persisted in
+// agent.yaml so reconnects don't silently re-trip the check.
+func ControlServerURL(s string, allowHTTP bool) error {
 	u, err := url.Parse(s)
 	if err != nil {
 		return fmt.Errorf("validate: control-server URL: %v", err)
 	}
-	if u.Scheme != "https" {
+	switch {
+	case u.Scheme == "https":
+	case u.Scheme == "http" && allowHTTP:
+	case u.Scheme == "http":
+		return fmt.Errorf("validate: control-server URL must use https:// (got http://) — pass --insecure to opt in to plaintext (homelab/bootstrap only)")
+	default:
 		return fmt.Errorf("validate: control-server URL must use https:// (got %q)", u.Scheme)
 	}
 	if u.Host == "" {

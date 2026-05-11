@@ -142,16 +142,16 @@ func TestEndpoint(t *testing.T) {
 }
 
 func TestWGKey(t *testing.T) {
-	// 44-char base64 of a 32-byte key.
-	good := "uK1n6gqWXJzKqYqXqYqXqYqXqYqXqYqXqYqXqYqXqQ="
+	// 44-char base64 of a 32-byte key (all-zero key).
+	good := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	if err := WGKey(good); err != nil {
 		t.Errorf("WGKey good: unexpected err %v", err)
 	}
 	bad := []string{
 		"",
 		"short",
-		"uK1n6gqWXJzKqYqXqYqXqYqXqYqXqYqXqYqXqYqXqQ", // 43 chars
-		"!!!n6gqWXJzKqYqXqYqXqYqXqYqXqYqXqYqXqYqXqQ=",
+		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", // 43 chars, no padding
+		"!!!AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 	}
 	for _, s := range bad {
 		if err := WGKey(s); err == nil {
@@ -205,13 +205,41 @@ func TestControlServerURL(t *testing.T) {
 		"javascript:alert(1)",
 	}
 	for _, s := range good {
-		if err := ControlServerURL(s); err != nil {
-			t.Errorf("ControlServerURL(%q) unexpected err %v", s, err)
+		if err := ControlServerURL(s, false); err != nil {
+			t.Errorf("ControlServerURL(%q, false) unexpected err %v", s, err)
 		}
 	}
 	for _, s := range bad {
-		if err := ControlServerURL(s); err == nil {
-			t.Errorf("ControlServerURL(%q) expected err", s)
+		if err := ControlServerURL(s, false); err == nil {
+			t.Errorf("ControlServerURL(%q, false) expected err", s)
+		}
+	}
+}
+
+func TestControlServerURLInsecure(t *testing.T) {
+	// With allowHTTP=true, http:// is accepted but other non-https schemes
+	// are still rejected — the opt-in is narrowly scoped to http.
+	good := []string{
+		"https://wirewarp.example.com",
+		"http://wirewarp.example.com",
+		"http://192.168.1.10:8100",
+	}
+	bad := []string{
+		"",
+		"ws://wirewarp.example.com",
+		"wss://wirewarp.example.com",
+		"http://",
+		"https://",
+		"javascript:alert(1)",
+	}
+	for _, s := range good {
+		if err := ControlServerURL(s, true); err != nil {
+			t.Errorf("ControlServerURL(%q, true) unexpected err %v", s, err)
+		}
+	}
+	for _, s := range bad {
+		if err := ControlServerURL(s, true); err == nil {
+			t.Errorf("ControlServerURL(%q, true) expected err", s)
 		}
 	}
 }
