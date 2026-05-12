@@ -172,6 +172,9 @@ func (c *Client) connect(ctx context.Context) error {
 		if allIPs := mergeIPSets(publicIP, enumerateLocalPublicIPs()); len(allIPs) > 0 {
 			h["public_ips"] = allIPs
 		}
+		if iface := defaultRouteIface(); iface != "" {
+			h["public_iface"] = iface
+		}
 		// On gateway clients, scrape conntrack + ARP to find LAN hosts
 		// using us as their egress route. Always include the field (even
 		// if empty) so the server can run its TTL sweep — rows whose
@@ -302,6 +305,38 @@ func fetchPublicIP() string {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	return strings.TrimSpace(string(body))
+}
+
+// defaultRouteIface returns the name of the interface that owns the IPv4
+// default route by parsing /proc/net/route. Empty string if none found or
+// /proc is unreadable. Used so the control server can auto-discover the
+// WAN iface for SNAT/MASQUERADE instead of defaulting to "eth0".
+func defaultRouteIface() string {
+	f, err := os.Open("/proc/net/route")
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		if i == 0 {
+			continue // header
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		// destination=00000000 (0.0.0.0) and flags has RTF_UP+RTF_GATEWAY (0x0003)
+		if fields[1] != "00000000" {
+			continue
+		}
+		return fields[0]
+	}
+	return ""
 }
 
 // enumerateLocalPublicIPs returns every routable IPv4 address bound to a

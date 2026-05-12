@@ -25,8 +25,19 @@ logger = logging.getLogger(__name__)
 
 
 async def dispatch_wg_init(server: TunnelServer, db: AsyncSession) -> tuple[bool, str]:
-    """Send wg_init to the server agent so it (re)builds the WireGuard interface."""
+    """Send wg_init to the server agent so it (re)builds the WireGuard interface.
+
+    Skips dispatch when no primary IP is known yet: the agent validates
+    `public_ip` as an IPv4 and would reject an empty string. The heartbeat
+    handler re-dispatches once an IP lands in `tunnel_server_ips`.
+    """
     primary = await get_primary_ip(server.id, db)
+    if not primary:
+        logger.warning(
+            "Skipping wg_init for server %s: no primary IP yet — will retry once heartbeat reports one",
+            server.id,
+        )
+        return False, ""
     sent, cmd_id = await send_command(
         agent_id=str(server.agent_id),
         command_type="wg_init",
@@ -36,7 +47,7 @@ async def dispatch_wg_init(server: TunnelServer, db: AsyncSession) -> tuple[bool
             "tunnel_network": server.tunnel_network,
             "tunnel_ip": server_tunnel_ip(server.tunnel_network),
             "public_iface": server.public_iface,
-            "public_ip": primary or "",
+            "public_ip": primary,
         },
         db=db,
     )
@@ -44,6 +55,20 @@ async def dispatch_wg_init(server: TunnelServer, db: AsyncSession) -> tuple[bool
         logger.info("Sent wg_init to server agent %s (cmd=%s)", server.agent_id, cmd_id)
     else:
         logger.warning("Server agent %s not connected — wg_init queued (cmd=%s)", server.agent_id, cmd_id)
+
+    # wg_init rebuilds wg0 from scratch on the agent, wiping any existing
+    # peers. Re-fire wg_add_peer for every attachment that has reported a
+    # public key so the peer list converges back. Commands queue FIFO per
+    # agent so the adds run after wg_init.
+    attachments = (await db.scalars(
+        select(TunnelClientAttachment).where(
+            TunnelClientAttachment.tunnel_server_id == server.id,
+            TunnelClientAttachment.wg_public_key.isnot(None),
+        )
+    )).all()
+    for att in attachments:
+        await dispatch_add_peer_for_attachment(att, db)
+
     return sent, cmd_id
 
 

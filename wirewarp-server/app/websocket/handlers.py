@@ -23,7 +23,7 @@ from app.realtime.events import (
     emit_tunnel_client_changed,
     emit_tunnel_server_changed,
 )
-from app.services.tunnel_server_ops import dispatch_add_peer_for_attachment
+from app.services.tunnel_server_ops import dispatch_add_peer_for_attachment, dispatch_wg_init
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,8 @@ async def handle_heartbeat(agent_id: str, msg: dict, db: AsyncSession) -> None:
 
     # For server agents, ensure every reported IP is in the tunnel_server_ips
     # pool. Heartbeat is additive only: never demote, never delete.
+    server_for_init: TunnelServer | None = None
+    seeded_primary = False
     if agent.type == "server":
         candidate_ips: list[str] = []
         seen: set[str] = set()
@@ -95,10 +97,38 @@ async def handle_heartbeat(agent_id: str, msg: dict, db: AsyncSession) -> None:
                         )
                     )
                     server_dirty = True
+                    if pool_size == 0:
+                        seeded_primary = True
                     logger.info(
                         "Added discovered IP %s to tunnel server %s pool (primary=%s)",
                         ip_addr, server.id, pool_size == 0,
                     )
+                # If we just seeded the first IP and wg_init never succeeded
+                # (wg_public_key still empty), fire wg_init now. Fixes the
+                # first-connect race where dispatch_wg_init runs before the
+                # initial heartbeat populates tunnel_server_ips.
+                if seeded_primary and not (server.wg_public_key or ""):
+                    server_for_init = server
+
+                # Auto-detect WAN iface: the agent reports its default-route
+                # iface. The column default is "eth0" as a placeholder; if it's
+                # still that and the agent reports a different real iface,
+                # adopt it and re-fire wg_init so SNAT/MASQUERADE rebind.
+                # Operator overrides via PATCH win once public_iface != "eth0".
+                reported_iface = msg.get("public_iface")
+                if (
+                    isinstance(reported_iface, str)
+                    and reported_iface
+                    and reported_iface != server.public_iface
+                    and server.public_iface == "eth0"
+                ):
+                    logger.info(
+                        "Auto-detected public_iface=%s for tunnel server %s (was %s)",
+                        reported_iface, server.id, server.public_iface,
+                    )
+                    server.public_iface = reported_iface
+                    server_dirty = True
+                    server_for_init = server
 
     # Gateway client agents report observed LAN hosts via heartbeat. Upsert
     # them into gateway_lan_clients so the dashboard can display + offer
@@ -191,6 +221,10 @@ async def handle_heartbeat(agent_id: str, msg: dict, db: AsyncSession) -> None:
         emit_tunnel_server_changed()
     if lan_dirty:
         emit_lan_client_changed()
+    # Re-dispatch wg_init after commit so get_primary_ip sees the newly
+    # inserted TunnelServerIP row.
+    if server_for_init is not None:
+        await dispatch_wg_init(server_for_init, db)
 
 
 async def handle_command_result(agent_id: str, msg: dict, db: AsyncSession) -> None:
