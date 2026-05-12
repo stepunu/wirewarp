@@ -167,10 +167,15 @@ async def handle_heartbeat(agent_id: str, msg: dict, db: AsyncSession) -> None:
                     lan_dirty = True
                 else:
                     existing.last_seen = now
-                    if entry.get("mac") and existing.mac != entry.get("mac"):
+                    # Heartbeat fills hostname/mac only when the operator
+                    # hasn't already set them. Once stored, an explicit
+                    # PATCH (or DELETE) is the only way to change them —
+                    # otherwise auto-discovery would silently overwrite
+                    # operator-curated names.
+                    if entry.get("mac") and not existing.mac:
                         existing.mac = entry.get("mac")
                         lan_dirty = True
-                    if entry.get("hostname") and existing.hostname != entry.get("hostname"):
+                    if entry.get("hostname") and not existing.hostname:
                         existing.hostname = entry.get("hostname")
                         lan_dirty = True
                     existing.bytes_recent = int(entry.get("bytes_recent") or 0)

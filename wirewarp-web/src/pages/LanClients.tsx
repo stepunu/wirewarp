@@ -81,6 +81,7 @@ export default function LanClients() {
   const [gatewayFilter, setGatewayFilter] = useState('all')
   const [showAdd, setShowAdd] = useState(false)
   const [dnsEditing, setDnsEditing] = useState<LanClient | null>(null)
+  const [metaEditing, setMetaEditing] = useState<LanClient | null>(null)
   const filterRef = useRef<HTMLInputElement>(null)
 
   const settingsQ = useQuery({ queryKey: ['settings'], queryFn: settingsApi.get })
@@ -332,16 +333,25 @@ export default function LanClients() {
                     <span>seen {relTime(lc.last_seen)}</span>
                   </div>
                 </div>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  leading={<Ic.trash />}
-                  onClick={() => {
-                    if (confirm(`Drop ${lc.lan_ip} from the discovered list?`)) del.mutate(lc)
-                  }}
-                  disabled={del.isPending}
-                  title="Drop from list (also clears egress pin)"
-                />
+                <div className="row" style={{ gap: 4 }}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    leading={<Ic.edit />}
+                    onClick={() => setMetaEditing(lc)}
+                    title="Edit hostname / MAC"
+                  />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    leading={<Ic.trash />}
+                    onClick={() => {
+                      if (confirm(`Drop ${lc.lan_ip} from the discovered list?`)) del.mutate(lc)
+                    }}
+                    disabled={del.isPending}
+                    title="Drop from list (also clears egress pin)"
+                  />
+                </div>
               </div>
 
               <div
@@ -536,7 +546,82 @@ export default function LanClients() {
           onClose={() => setDnsEditing(null)}
         />
       )}
+      {metaEditing && (
+        <EditLanClientMetaDialog
+          lc={metaEditing}
+          onClose={() => setMetaEditing(null)}
+        />
+      )}
     </div>
+  )
+}
+
+function EditLanClientMetaDialog({
+  lc,
+  onClose,
+}: {
+  lc: LanClient
+  onClose: () => void
+}) {
+  const qc = useQueryClient()
+  const push = useToast()
+  const [hostname, setHostname] = useState(lc.hostname ?? '')
+  const [mac, setMac] = useState(lc.mac ?? '')
+
+  const save = useMutation({
+    mutationFn: () =>
+      lanApi.updateMeta(lc.tunnel_client_id, lc.id, {
+        hostname: hostname.trim(),
+        mac: mac.trim(),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['lan-clients'] })
+      push('LAN client updated', 'ok', 'lan://')
+      onClose()
+    },
+    onError: (e: Error) => push(e.message, 'err', 'lan://'),
+  })
+
+  return (
+    <Dialog
+      title={`Edit ${lc.lan_ip}`}
+      scheme="PATCH /tunnel-clients/.../lan-clients/..."
+      onClose={onClose}
+      width={480}
+      footer={
+        <>
+          <span className="left" style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+            Empty value clears the override and lets heartbeat re-discovery fill it.
+          </span>
+          <div className="right">
+            <Button variant="ghost" onClick={onClose}>Cancel</Button>
+            <Button variant="primary" disabled={save.isPending} onClick={() => save.mutate()}>
+              {save.isPending ? 'saving…' : 'Save'}
+            </Button>
+          </div>
+        </>
+      }
+    >
+      <div className="col" style={{ gap: 12 }}>
+        <Field label="Hostname">
+          <Input
+            mono
+            placeholder="dev-docker"
+            value={hostname}
+            onChange={(e) => setHostname(e.target.value)}
+            autoFocus
+          />
+        </Field>
+        <Field label="MAC">
+          <Input
+            mono
+            placeholder="aa:bb:cc:dd:ee:ff"
+            value={mac}
+            onChange={(e) => setMac(e.target.value)}
+          />
+        </Field>
+      </div>
+    </Dialog>
   )
 }
 

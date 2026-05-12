@@ -356,7 +356,19 @@ async def update_lan_client(
             detail="egress_tunnel_server_ip_id requires egress_attachment_id to be set",
         )
 
-    if not manager.is_connected(str(client.agent_id)):
+    fields_set = body.model_fields_set
+    # Only touch egress fields when the caller actually sent them — a
+    # PATCH that just updates hostname/mac shouldn't accidentally clear
+    # an existing egress pin.
+    egress_touched = (
+        "egress_attachment_id" in fields_set
+        or "egress_tunnel_server_ip_id" in fields_set
+    )
+
+    # The agent-online gate only matters when we're going to dispatch
+    # routing/SNAT commands. Pure metadata edits (hostname, MAC, DNS
+    # bindings) don't talk to the agent.
+    if egress_touched and not manager.is_connected(str(client.agent_id)):
         raise HTTPException(
             status_code=503,
             detail=(
@@ -364,9 +376,9 @@ async def update_lan_client(
                 "bring it back online and retry."
             ),
         )
-
-    lan_client.egress_attachment_id = body.egress_attachment_id
-    lan_client.egress_tunnel_server_ip_id = body.egress_tunnel_server_ip_id
+    if egress_touched:
+        lan_client.egress_attachment_id = body.egress_attachment_id
+        lan_client.egress_tunnel_server_ip_id = body.egress_tunnel_server_ip_id
     # dns_record_ids can be patched independently of the egress fields —
     # operator wires up which records track this host once, then changes
     # egress freely. None on the body means "leave as-is"; an explicit
@@ -377,46 +389,54 @@ async def update_lan_client(
             if body.dns_record_ids
             else None
         )
+    # Hostname / MAC: empty string clears (back to auto-discovery), any
+    # other value pins the operator override. Heartbeat-upsert only fills
+    # these when they're null/empty, so the override sticks.
+    if "hostname" in fields_set:
+        lan_client.hostname = body.hostname or None
+    if "mac" in fields_set:
+        lan_client.mac = body.mac or None
     await db.commit()
     await db.refresh(lan_client)
 
-    # Routing pin: always re-issue (covers both set and clear).
-    await dispatch_set_lan_egress(client, lan_client.lan_ip, attachment, db)
+    if egress_touched:
+        # Routing pin: always re-issue (covers both set and clear).
+        await dispatch_set_lan_egress(client, lan_client.lan_ip, attachment, db)
 
-    # SNAT delta: clear the old VPS rule if the IP pin moved off it, then
-    # set on the new VPS. Skipped when both old and new are None or when
-    # the IP id didn't actually change.
-    if prev_ip_id is not None and prev_ip_id != body.egress_tunnel_server_ip_id:
-        if prev_attachment is not None:
-            old_server = await db.scalar(
-                select(TunnelServer).where(TunnelServer.id == prev_attachment.tunnel_server_id)
+        # SNAT delta: clear the old VPS rule if the IP pin moved off it, then
+        # set on the new VPS. Skipped when both old and new are None or when
+        # the IP id didn't actually change.
+        if prev_ip_id is not None and prev_ip_id != body.egress_tunnel_server_ip_id:
+            if prev_attachment is not None:
+                old_server = await db.scalar(
+                    select(TunnelServer).where(TunnelServer.id == prev_attachment.tunnel_server_id)
+                )
+                if old_server is not None and prev_ip_row is not None:
+                    await dispatch_set_lan_snat(old_server, lan_client.lan_ip, None, db)
+
+        if new_ip_row is not None and attachment is not None:
+            server = await db.scalar(
+                select(TunnelServer).where(TunnelServer.id == attachment.tunnel_server_id)
             )
-            if old_server is not None and prev_ip_row is not None:
-                await dispatch_set_lan_snat(old_server, lan_client.lan_ip, None, db)
+            if server is not None:
+                await dispatch_set_lan_snat(server, lan_client.lan_ip, new_ip_row.address, db)
 
-    if new_ip_row is not None and attachment is not None:
-        server = await db.scalar(
-            select(TunnelServer).where(TunnelServer.id == attachment.tunnel_server_id)
-        )
-        if server is not None:
-            await dispatch_set_lan_snat(server, lan_client.lan_ip, new_ip_row.address, db)
-
-    # Auto-migrate matching port forwards so inbound (DNAT) follows the new
-    # outbound pin. Skipped when egress is being cleared — operator may want
-    # the forwards to keep working independently of the egress pin.
-    if attachment is not None:
-        migrated = await migrate_port_forwards_to_pin(
-            lan_client.lan_ip,
-            attachment.id,
-            body.egress_tunnel_server_ip_id,
-            db,
-        )
-        if migrated:
-            emit_port_forward_changed()
-            emit_tunnel_server_changed()
-        new_ip = await _resolve_new_ip_address(attachment, body.egress_tunnel_server_ip_id, db)
-        if new_ip:
-            await _run_dns_sync(lan_client, new_ip, db)
+        # Auto-migrate matching port forwards so inbound (DNAT) follows the new
+        # outbound pin. Skipped when egress is being cleared — operator may want
+        # the forwards to keep working independently of the egress pin.
+        if attachment is not None:
+            migrated = await migrate_port_forwards_to_pin(
+                lan_client.lan_ip,
+                attachment.id,
+                body.egress_tunnel_server_ip_id,
+                db,
+            )
+            if migrated:
+                emit_port_forward_changed()
+                emit_tunnel_server_changed()
+            new_ip = await _resolve_new_ip_address(attachment, body.egress_tunnel_server_ip_id, db)
+            if new_ip:
+                await _run_dns_sync(lan_client, new_ip, db)
 
     emit_lan_client_changed()
     return lan_client

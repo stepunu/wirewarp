@@ -216,6 +216,15 @@ export const lanClients = {
         body: JSON.stringify({ egress_attachment_id, egress_tunnel_server_ip_id }),
       },
     ),
+  updateMeta: (
+    tunnelClientId: string,
+    lanClientId: string,
+    data: { hostname?: string; mac?: string },
+  ) =>
+    request<import('./types').LanClient>(
+      `/tunnel-clients/${tunnelClientId}/lan-clients/${lanClientId}`,
+      { method: 'PATCH', body: JSON.stringify(data) },
+    ),
   setDnsRecords: (
     tunnelClientId: string,
     lanClientId: string,

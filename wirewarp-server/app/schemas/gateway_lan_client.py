@@ -56,10 +56,16 @@ class GatewayLanClientUpdate(BaseModel):
     `egress_tunnel_server_ip_id` to a non-null value drives a per-host
     SNAT rule on the VPS so outbound appears as that specific IP rather
     than the server's primary.
+
+    `hostname` / `mac` overrides win over heartbeat-reported values: once
+    set by the operator, the heartbeat upsert won't clobber them. Pass an
+    empty string to clear back to auto-discovery.
     """
     egress_attachment_id: uuid.UUID | None = None
     egress_tunnel_server_ip_id: uuid.UUID | None = None
     dns_record_ids: list[DnsRecordRef] | None = None
+    hostname: str | None = None
+    mac: str | None = None
 
 
 class HeartbeatLanClient(BaseModel):
