@@ -579,7 +579,6 @@ function NewForwardDialog({ onClose }: { onClose: () => void }) {
     return out
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attachment?.id, client?.id, lanByIp])
-  const destListId = `pf-dest-ips-${form.attachment_id || 'none'}`
 
   const ipsQ = useQuery({
     queryKey: ['tunnel-server-ips', server?.id],
@@ -594,14 +593,16 @@ function NewForwardDialog({ onClose }: { onClose: () => void }) {
     return agents.find((a) => a.id === id)?.name || id.slice(0, 8)
   }
 
-  // Default destination_ip from the attachment's tunnel_ip
+  // Default destination_ip from the attachment's tunnel_ip — only when the
+  // attachment changes. Don't refire when the operator clears the field
+  // themselves, or the input would snap back to the tunnel IP on every delete.
   useEffect(() => {
     if (attachment && !form.destination_ip) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       set('destination_ip', attachment.tunnel_ip)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attachment, form.destination_ip])
+  }, [attachment?.id])
 
   // When destination_ip resolves to a pinned LAN client, mirror both its
   // egress attachment AND its IP pin into the form so inbound + outbound
@@ -825,24 +826,41 @@ function NewForwardDialog({ onClose }: { onClose: () => void }) {
           label="Destination IP"
           hint={
             destSuggestions.length > 1
-              ? `${destSuggestions.length - 1} LAN client${destSuggestions.length === 2 ? '' : 's'} behind this attachment — pick or type`
+              ? `${destSuggestions.length - 1} LAN client${destSuggestions.length === 2 ? '' : 's'} behind this attachment`
               : undefined
           }
         >
-          <Input
-            mono
-            placeholder="10.21.0.x"
-            value={form.destination_ip}
-            onChange={(e) => set('destination_ip', e.target.value)}
-            list={destListId}
-          />
-          <datalist id={destListId}>
-            {destSuggestions.map((s) => (
-              <option key={s.ip} value={s.ip}>
-                {s.label}
-              </option>
-            ))}
-          </datalist>
+          {(() => {
+            const isCustom =
+              destSuggestions.length === 0 ||
+              !destSuggestions.some((s) => s.ip === form.destination_ip)
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <Select
+                  value={isCustom ? '__custom__' : form.destination_ip}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    set('destination_ip', v === '__custom__' ? '' : v)
+                  }}
+                >
+                  {destSuggestions.map((s) => (
+                    <option key={s.ip} value={s.ip}>
+                      {s.label} — {s.ip}
+                    </option>
+                  ))}
+                  <option value="__custom__">— custom IP —</option>
+                </Select>
+                {isCustom && (
+                  <Input
+                    mono
+                    placeholder="10.21.0.x"
+                    value={form.destination_ip}
+                    onChange={(e) => set('destination_ip', e.target.value)}
+                  />
+                )}
+              </div>
+            )
+          })()}
         </Field>
         <Field
           label="Destination port"
@@ -970,7 +988,6 @@ function EditForwardDialog({ pf, onClose }: { pf: PortForward; onClose: () => vo
     return out
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lookup?.attachment?.id, lookup?.client?.id, lanByIp])
-  const destListId = `pf-dest-ips-edit-${pf.id}`
 
   const save = useMutation({
     mutationFn: () => {
@@ -1068,23 +1085,41 @@ function EditForwardDialog({ pf, onClose }: { pf: PortForward; onClose: () => vo
           label="Destination IP"
           hint={
             destSuggestions.length > 1
-              ? `${destSuggestions.length - 1} LAN client${destSuggestions.length === 2 ? '' : 's'} behind this attachment — pick or type`
+              ? `${destSuggestions.length - 1} LAN client${destSuggestions.length === 2 ? '' : 's'} behind this attachment`
               : undefined
           }
         >
-          <Input
-            mono
-            value={form.destination_ip}
-            onChange={(e) => setForm({ ...form, destination_ip: e.target.value })}
-            list={destListId}
-          />
-          <datalist id={destListId}>
-            {destSuggestions.map((s) => (
-              <option key={s.ip} value={s.ip}>
-                {s.label}
-              </option>
-            ))}
-          </datalist>
+          {(() => {
+            const isCustom =
+              destSuggestions.length === 0 ||
+              !destSuggestions.some((s) => s.ip === form.destination_ip)
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <Select
+                  value={isCustom ? '__custom__' : form.destination_ip}
+                  onChange={(e) => {
+                    const v = e.target.value
+                    setForm({ ...form, destination_ip: v === '__custom__' ? '' : v })
+                  }}
+                >
+                  {destSuggestions.map((s) => (
+                    <option key={s.ip} value={s.ip}>
+                      {s.label} — {s.ip}
+                    </option>
+                  ))}
+                  <option value="__custom__">— custom IP —</option>
+                </Select>
+                {isCustom && (
+                  <Input
+                    mono
+                    placeholder="10.21.0.x"
+                    value={form.destination_ip}
+                    onChange={(e) => setForm({ ...form, destination_ip: e.target.value })}
+                  />
+                )}
+              </div>
+            )
+          })()}
         </Field>
         <Field label="Destination port">
           <Input
