@@ -32,6 +32,29 @@ function parsePortRange(s: string): { port: number; portEnd: number | null } {
   return { port: parseInt(parts[0], 10), portEnd: null }
 }
 
+type PortToken = { port: number; portEnd: number | null }
+
+function parsePortTokens(s: string): PortToken[] {
+  return s
+    .split(',')
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0)
+    .map((t) => {
+      const parts = t.split('-')
+      const port = parseInt(parts[0], 10)
+      const portEnd = parts.length === 2 ? parseInt(parts[1], 10) : null
+      return { port, portEnd }
+    })
+}
+
+function isValidPort(p: number): boolean {
+  return Number.isFinite(p) && p >= 1 && p <= 65535
+}
+
+function tokenLabel(t: PortToken): string {
+  return t.portEnd !== null ? `${t.port}-${t.portEnd}` : String(t.port)
+}
+
 function portStr(pf: PortForward, field: 'public' | 'dest'): string {
   if (field === 'public') {
     return pf.public_port_end ? `${pf.public_port}-${pf.public_port_end}` : String(pf.public_port)
@@ -580,12 +603,17 @@ function NewForwardDialog({ onClose }: { onClose: () => void }) {
   }, [matchedLanClient, form.attachment_id, form.tunnel_server_ip_id])
 
   function applyTemplate(t: ServiceTemplate) {
-    const port = t.ports.split(',')[0].trim()
+    const ports = t.ports
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .join(',')
+    const firstPort = ports.split(',')[0] || ''
     setForm((f) => ({
       ...f,
       protocol: t.protocol === 'both' ? 'tcp' : (t.protocol as 'tcp' | 'udp'),
-      public_port: port,
-      destination_port: port,
+      public_port: ports,
+      destination_port: firstPort,
       description: t.name,
     }))
   }
@@ -599,39 +627,65 @@ function NewForwardDialog({ onClose }: { onClose: () => void }) {
   }
 
   const create = useMutation({
-    mutationFn: () => {
-      const pub = parsePortRange(form.public_port)
-      const dst = parsePortRange(form.destination_port)
-      return pfApi.create({
-        attachment_id: form.attachment_id,
-        tunnel_server_ip_id: form.tunnel_server_ip_id || null,
-        protocol: form.protocol,
-        public_port: pub.port,
-        public_port_end: pub.portEnd,
-        destination_ip: form.destination_ip,
-        destination_port: dst.port,
-        destination_port_end: dst.portEnd,
-        description: form.description || null,
-      })
+    mutationFn: async () => {
+      const tokens = parsePortTokens(form.public_port)
+      if (tokens.length === 0) throw new Error('no ports specified')
+      for (const t of tokens) {
+        if (!isValidPort(t.port)) throw new Error(`invalid port: ${form.public_port}`)
+        if (t.portEnd !== null && (!isValidPort(t.portEnd) || t.portEnd < t.port))
+          throw new Error(`invalid range: ${tokenLabel(t)}`)
+      }
+      const multi = tokens.length > 1
+      const dstSingle = multi ? null : parsePortRange(form.destination_port)
+
+      const created: PortForward[] = []
+      const failed: { token: PortToken; err: string }[] = []
+      for (const t of tokens) {
+        try {
+          const pf = await pfApi.create({
+            attachment_id: form.attachment_id,
+            tunnel_server_ip_id: form.tunnel_server_ip_id || null,
+            protocol: form.protocol,
+            public_port: t.port,
+            public_port_end: t.portEnd,
+            destination_ip: form.destination_ip,
+            destination_port: multi ? t.port : dstSingle!.port,
+            destination_port_end: multi ? t.portEnd : dstSingle!.portEnd,
+            description: form.description || null,
+          })
+          created.push(pf)
+        } catch (e) {
+          failed.push({ token: t, err: (e as Error).message })
+        }
+      }
+      return { created, failed }
     },
-    onSuccess: () => {
+    onSuccess: ({ created, failed }) => {
       qc.invalidateQueries({ queryKey: ['port-forwards'] })
       qc.invalidateQueries({ queryKey: ['tunnel-server-ips'] })
-      push(`forward created · :${form.public_port}`, 'ok', 'pf://')
-      onClose()
+      if (created.length > 0) {
+        const summary = created
+          .map((p) => (p.public_port_end ? `:${p.public_port}-${p.public_port_end}` : `:${p.public_port}`))
+          .join(' ')
+        push(`forward created · ${summary}`, 'ok', 'pf://')
+      }
+      for (const f of failed) {
+        const tag = `:${tokenLabel(f.token)}`
+        const msg = f.err.includes('409') ? 'duplicate' : f.err
+        push(`failed ${tag} · ${msg}`, 'err', 'pf://')
+      }
+      if (failed.length === 0) onClose()
     },
-    onError: (e: Error) => {
-      const msg = e.message
-      if (msg.includes('409')) push('duplicate: already exists for that ip:port', 'err', 'pf://')
-      else push(msg, 'err', 'pf://')
-    },
+    onError: (e: Error) => push(e.message, 'err', 'pf://'),
   })
 
+  const pubTokens = parsePortTokens(form.public_port)
+  const isMultiPort = pubTokens.length > 1
   const ok = !!(
     form.attachment_id &&
     form.public_port &&
     form.destination_ip &&
-    form.destination_port
+    (isMultiPort || form.destination_port)
   )
 
   return (
@@ -668,7 +722,7 @@ function NewForwardDialog({ onClose }: { onClose: () => void }) {
                 style={{ cursor: 'pointer' }}
               >
                 <span className="mono" style={{ color: 'var(--fg-0)' }}>{t.name}</span>
-                <span className="scheme">{t.protocol}/{t.ports.split(',')[0]}</span>
+                <span className="scheme">{t.protocol}/{t.ports}</span>
               </button>
             ))}
           </div>
@@ -723,7 +777,10 @@ function NewForwardDialog({ onClose }: { onClose: () => void }) {
             <option value="udp">UDP</option>
           </Select>
         </Field>
-        <Field label="Public port" hint="single (e.g. 25565) or range (50000-50100)">
+        <Field
+          label="Public port"
+          hint="single (25565), range (50000-50100), or list (80,443,8080) — one rule per entry"
+        >
           <div className="row" style={{ gap: 6 }}>
             <Input
               mono
@@ -748,12 +805,16 @@ function NewForwardDialog({ onClose }: { onClose: () => void }) {
             onChange={(e) => set('destination_ip', e.target.value)}
           />
         </Field>
-        <Field label="Destination port">
+        <Field
+          label="Destination port"
+          hint={isMultiPort ? 'auto: each public port maps to itself (port-preserve)' : undefined}
+        >
           <Input
             mono
-            placeholder="e.g. 25565"
-            value={form.destination_port}
+            placeholder={isMultiPort ? '— port-preserve —' : 'e.g. 25565'}
+            value={isMultiPort ? '' : form.destination_port}
             onChange={(e) => set('destination_port', e.target.value)}
+            disabled={isMultiPort}
           />
         </Field>
       </div>
@@ -768,24 +829,49 @@ function NewForwardDialog({ onClose }: { onClose: () => void }) {
 
       {ok && (
         <div className="outcome" style={{ marginTop: 14 }}>
-          <div className="ln">
-            <span className="k">iptables</span>
-            <span className="v">
-              -t nat -A WIREWARP-PRE -d {ip?.address || server?.primary_ip || '*'} -p {form.protocol} --dport{' '}
-              {form.public_port} -j DNAT --to-destination {form.destination_ip}:{form.destination_port}
-            </span>
-          </div>
-          <div className="english">
-            Inbound <span className="accent">{form.protocol.toUpperCase()}</span> traffic to{' '}
-            <span className="accent">
-              {ip?.address || server?.primary_ip || '*'}:{form.public_port}
-            </span>{' '}
-            forwards through <span className="accent">{agentName(server?.agent_id)}</span> to{' '}
-            <span className="accent">
-              {form.destination_ip}:{form.destination_port}
-            </span>{' '}
-            on {agentName(client?.agent_id)}.
-          </div>
+          {isMultiPort ? (
+            <>
+              {pubTokens.map((t) => (
+                <div className="ln" key={tokenLabel(t)}>
+                  <span className="k">iptables</span>
+                  <span className="v">
+                    -t nat -A WIREWARP-PRE -d {ip?.address || server?.primary_ip || '*'} -p {form.protocol} --dport{' '}
+                    {tokenLabel(t).replace('-', ':')} -j DNAT --to-destination {form.destination_ip}:{tokenLabel(t)}
+                  </span>
+                </div>
+              ))}
+              <div className="english">
+                Creates <span className="accent">{pubTokens.length} rules</span>. Inbound{' '}
+                <span className="accent">{form.protocol.toUpperCase()}</span> traffic to{' '}
+                <span className="accent">
+                  {ip?.address || server?.primary_ip || '*'}:{pubTokens.map(tokenLabel).join(',')}
+                </span>{' '}
+                forwards through <span className="accent">{agentName(server?.agent_id)}</span> to{' '}
+                <span className="accent">{form.destination_ip}</span> on the same ports (port-preserve).
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="ln">
+                <span className="k">iptables</span>
+                <span className="v">
+                  -t nat -A WIREWARP-PRE -d {ip?.address || server?.primary_ip || '*'} -p {form.protocol} --dport{' '}
+                  {form.public_port} -j DNAT --to-destination {form.destination_ip}:{form.destination_port}
+                </span>
+              </div>
+              <div className="english">
+                Inbound <span className="accent">{form.protocol.toUpperCase()}</span> traffic to{' '}
+                <span className="accent">
+                  {ip?.address || server?.primary_ip || '*'}:{form.public_port}
+                </span>{' '}
+                forwards through <span className="accent">{agentName(server?.agent_id)}</span> to{' '}
+                <span className="accent">
+                  {form.destination_ip}:{form.destination_port}
+                </span>{' '}
+                on {agentName(client?.agent_id)}.
+              </div>
+            </>
+          )}
         </div>
       )}
     </Dialog>
