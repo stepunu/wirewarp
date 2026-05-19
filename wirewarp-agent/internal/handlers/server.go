@@ -83,6 +83,19 @@ func (h *ServerHandlers) Shutdown() {
 	}
 }
 
+// MeshInterfaces returns the WG interfaces this server agent uses for
+// the tunnel mesh. Used by the heartbeat to surface peer stats. Server
+// agents host a single wg0; clients are handled in ClientHandlers.
+func (h *ServerHandlers) MeshInterfaces() []string {
+	if h.cfg.Server == nil || !h.cfg.Server.Initialized {
+		return nil
+	}
+	if h.cfg.Server.WGInterface == "" {
+		return nil
+	}
+	return []string{h.cfg.Server.WGInterface}
+}
+
 // Register binds all server-mode command handlers onto the given executor.
 func (h *ServerHandlers) Register(exec *executor.Executor) {
 	exec.Register("wg_init", h.handleWGInit)

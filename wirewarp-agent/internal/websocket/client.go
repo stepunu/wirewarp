@@ -211,8 +211,26 @@ func (c *Client) connect(ctx context.Context) error {
 		// On agents hosting a road-warrior VPN endpoint, scrape
 		// `wg show <iface> dump` per peer so the dashboard can show
 		// last-handshake / rx / tx. Empty slice when no endpoints.
-		if peers := collectVpnPeerStats(); peers != nil {
-			h["vpn_peers"] = peers
+		vpnPeers := collectVpnPeerStats()
+		if vpnPeers != nil {
+			h["vpn_peers"] = vpnPeers
+		}
+		// Same scrape on tunnel-mesh interfaces (server's wg0 +
+		// gateway-client wgN attachments). Surfaces RX/TX + last
+		// handshake for the wg-easy-style detail dashboards.
+		meshPeers := collectMeshPeerStats()
+		if meshPeers != nil {
+			h["mesh_peers"] = meshPeers
+		}
+		// Unified set for `wg_peer_snapshots`. Server handler keys the
+		// row by (agent_id, interface, public_key) — the kind column is
+		// derived from interface prefix. We send all peers in one slice
+		// so the upsert pass on the server is one branch, not two.
+		if total := len(vpnPeers) + len(meshPeers); total > 0 {
+			all := make([]VpnPeerStat, 0, total)
+			all = append(all, vpnPeers...)
+			all = append(all, meshPeers...)
+			h["all_peers"] = all
 		}
 		return h
 	}

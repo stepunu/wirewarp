@@ -95,6 +95,24 @@ func (h *ClientHandlers) Shutdown() {
 	}
 }
 
+// MeshInterfaces returns every WG interface this gateway client has
+// attached to a tunnel server. The heartbeat picks these up so the
+// dashboard can show per-attachment peer stats. Snapshots the slice
+// under the same defensive copy as the healer.
+func (h *ClientHandlers) MeshInterfaces() []string {
+	atts := h.snapshotAttachments()
+	if len(atts) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(atts))
+	for _, a := range atts {
+		if a.WGInterface != "" {
+			out = append(out, a.WGInterface)
+		}
+	}
+	return out
+}
+
 // Register binds all client-mode command handlers onto the given executor.
 func (h *ClientHandlers) Register(exec *executor.Executor) {
 	exec.Register("wg_attach", h.handleWGAttach)

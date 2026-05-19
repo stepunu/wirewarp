@@ -87,6 +87,7 @@ func main() {
 		srv.Register(client.Exec())
 		srv.SetEmit(client.Emit)
 		srv.StartHealer(ctx)
+		wsclient.SetMeshInterfacesProvider(client, srv.MeshInterfaces)
 		shutdownFn = srv.Shutdown
 	case "client":
 		cli, err := handlers.NewClient(cfg, *cfgPath)
@@ -96,6 +97,7 @@ func main() {
 		cli.Register(client.Exec())
 		cli.SetEmit(client.Emit)
 		cli.StartHealer(ctx)
+		wsclient.SetMeshInterfacesProvider(client, cli.MeshInterfaces)
 		shutdownFn = cli.Shutdown
 	default:
 		log.Fatalf("Unknown mode: %s (must be 'server' or 'client')", cfg.Mode)

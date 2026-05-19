@@ -17,6 +17,7 @@ from app.models.tunnel_server_ip import TunnelServerIP
 from app.models.tunnel_client import TunnelClient
 from app.models.vpn_endpoint import VpnEndpoint
 from app.models.vpn_profile import VpnProfile
+from app.models.wg_peer_snapshot import WgPeerSnapshot
 from app.realtime.events import (
     emit_agent_changed,
     emit_audit_changed,
@@ -24,6 +25,7 @@ from app.realtime.events import (
     emit_lan_client_changed,
     emit_tunnel_client_changed,
     emit_tunnel_server_changed,
+    emit_wg_peer_changed,
 )
 from app.services.tunnel_server_ops import dispatch_add_peer_for_attachment, dispatch_wg_init
 
@@ -221,6 +223,71 @@ async def handle_heartbeat(agent_id: str, msg: dict, db: AsyncSession) -> None:
             ):
                 profile.last_handshake_at = ts
 
+    # Reconcile the unified wg_peer_snapshots table. The agent ships one
+    # entry per peer it can see across every WG interface it owns; we
+    # UPSERT by (agent_id, interface, public_key). We do a SELECT+UPDATE
+    # / INSERT pattern instead of pg-flavoured ON CONFLICT so the same
+    # code works on SQLite in tests.
+    all_peers = msg.get("all_peers")
+    wg_peer_dirty = False
+    if isinstance(all_peers, list):
+        for entry in all_peers:
+            if not isinstance(entry, dict):
+                continue
+            iface = entry.get("interface")
+            pubkey = entry.get("public_key")
+            if not iface or not pubkey:
+                continue
+            kind = "vpn" if iface.startswith("wg-vpn") else "mesh"
+            existing = await db.scalar(
+                select(WgPeerSnapshot).where(
+                    WgPeerSnapshot.agent_id == agent_id,
+                    WgPeerSnapshot.interface == iface,
+                    WgPeerSnapshot.public_key == pubkey,
+                )
+            )
+            handshake = entry.get("last_handshake_unix")
+            try:
+                handshake_int = int(handshake) if handshake else None
+            except (TypeError, ValueError):
+                handshake_int = None
+            rx = int(entry.get("rx_bytes") or 0)
+            tx = int(entry.get("tx_bytes") or 0)
+            keepalive = entry.get("persistent_keepalive")
+            try:
+                keepalive_int = int(keepalive) if keepalive else None
+            except (TypeError, ValueError):
+                keepalive_int = None
+            endpoint = entry.get("endpoint") or None
+            allowed_ips = entry.get("allowed_ips") or None
+            now = datetime.now(timezone.utc)
+            if existing is not None:
+                existing.kind = kind
+                existing.endpoint = endpoint
+                existing.allowed_ips = allowed_ips
+                existing.last_handshake_unix = handshake_int
+                existing.rx_bytes = rx
+                existing.tx_bytes = tx
+                existing.persistent_keepalive = keepalive_int
+                existing.updated_at = now
+            else:
+                db.add(
+                    WgPeerSnapshot(
+                        agent_id=agent_id,
+                        interface=iface,
+                        kind=kind,
+                        public_key=pubkey,
+                        endpoint=endpoint,
+                        allowed_ips=allowed_ips,
+                        last_handshake_unix=handshake_int,
+                        rx_bytes=rx,
+                        tx_bytes=tx,
+                        persistent_keepalive=keepalive_int,
+                        updated_at=now,
+                    )
+                )
+            wg_peer_dirty = True
+
     await db.commit()
     if agent_dirty:
         emit_agent_changed()
@@ -228,6 +295,8 @@ async def handle_heartbeat(agent_id: str, msg: dict, db: AsyncSession) -> None:
         emit_tunnel_server_changed()
     if lan_dirty:
         emit_lan_client_changed()
+    if wg_peer_dirty:
+        emit_wg_peer_changed()
     # Re-dispatch wg_init after commit so get_primary_ip sees the newly
     # inserted TunnelServerIP row.
     if server_for_init is not None:

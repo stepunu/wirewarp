@@ -26,6 +26,7 @@ from app.models.user import User
 from app.models.vpn_endpoint import VpnEndpoint
 from app.models.vpn_permission import VpnPermission
 from app.models.vpn_profile import VpnProfile
+from app.models.wg_peer_snapshot import WgPeerSnapshot
 from app.schemas.vpn import (
     VpnEndpointCreate,
     VpnEndpointRead,
@@ -34,6 +35,7 @@ from app.schemas.vpn import (
     VpnPermissionRead,
     VpnUserPermissionsRead,
 )
+from app.schemas.wg_peer import WgPeerSnapshotRead
 from app.services.network_alloc import allocate_vpn_network
 from app.services.vpn_ops import (
     dispatch_vpn_endpoint_down,
@@ -56,6 +58,35 @@ async def list_endpoints(
 ):
     rows = (await db.execute(select(VpnEndpoint).order_by(VpnEndpoint.created_at.asc()))).scalars().all()
     return list(rows)
+
+
+@router.get("/{endpoint_id}/wg-peers", response_model=list[WgPeerSnapshotRead])
+async def list_endpoint_wg_peers(
+    endpoint_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("admin", "operator", "viewer")),
+):
+    """Snapshot of every VPN peer attached to this endpoint's wg iface.
+
+    Anchored on the endpoint's owning tunnel client (the gateway hosting
+    the road-warrior `wg-vpn*` interface). Scope by both `agent_id` and
+    `interface` so we don't accidentally surface mesh peers.
+    """
+    endpoint = await db.scalar(select(VpnEndpoint).where(VpnEndpoint.id == endpoint_id))
+    if not endpoint:
+        raise HTTPException(status_code=404, detail="VPN endpoint not found")
+    tc = await db.scalar(
+        select(TunnelClient).where(TunnelClient.id == endpoint.tunnel_client_id)
+    )
+    if not tc:
+        return []
+    result = await db.execute(
+        select(WgPeerSnapshot)
+        .where(WgPeerSnapshot.agent_id == tc.agent_id)
+        .where(WgPeerSnapshot.interface == endpoint.wg_interface)
+        .order_by(WgPeerSnapshot.last_handshake_unix.desc())
+    )
+    return result.scalars().all()
 
 
 @router.get("/{endpoint_id}", response_model=VpnEndpointRead)

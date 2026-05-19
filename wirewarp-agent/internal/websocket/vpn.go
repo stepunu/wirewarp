@@ -26,10 +26,22 @@ type VpnPeerStat struct {
 // heartbeat goroutine don't race with the (one-time) write in main.
 var vpnInterfacesFn atomic.Value // func() []string
 
+// meshInterfacesFn is the tunnel-mesh-interface provider — the server
+// agent's wg0 + every client attachment's wgN. Same pattern as
+// vpnInterfacesFn but feeds the second collection path.
+var meshInterfacesFn atomic.Value // func() []string
+
 // SetVpnInterfacesProvider lets main.go publish a callable that returns
 // the names of every WG VPN interface currently up on this agent.
 func SetVpnInterfacesProvider(_ *Client, fn func() []string) {
 	vpnInterfacesFn.Store(fn)
+}
+
+// SetMeshInterfacesProvider publishes the tunnel-mesh interface
+// enumerator. On a server agent this returns `[wg0]`; on a gateway
+// client it returns the WG interface for every active attachment.
+func SetMeshInterfacesProvider(_ *Client, fn func() []string) {
+	meshInterfacesFn.Store(fn)
 }
 
 // collectVpnPeerStats runs `wg show <iface> dump` for each live VPN
@@ -37,7 +49,16 @@ func SetVpnInterfacesProvider(_ *Client, fn func() []string) {
 // the dashboard's "last handshake" column. Errors are silently swallowed
 // — a transient `wg` failure shouldn't break the heartbeat.
 func collectVpnPeerStats() []VpnPeerStat {
-	fnAny := vpnInterfacesFn.Load()
+	return collectPeerStats(vpnInterfacesFn)
+}
+
+// collectMeshPeerStats does the same for tunnel-mesh interfaces.
+func collectMeshPeerStats() []VpnPeerStat {
+	return collectPeerStats(meshInterfacesFn)
+}
+
+func collectPeerStats(provider atomic.Value) []VpnPeerStat {
+	fnAny := provider.Load()
 	if fnAny == nil {
 		return nil
 	}

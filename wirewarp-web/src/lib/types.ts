@@ -105,6 +105,64 @@ export interface LanClient {
   created_at: string
 }
 
+export interface WgPeerSnapshot {
+  id: number
+  agent_id: string
+  interface: string
+  kind: 'mesh' | 'vpn'
+  public_key: string
+  endpoint: string | null
+  allowed_ips: string | null
+  last_handshake_unix: number | null
+  rx_bytes: number
+  tx_bytes: number
+  persistent_keepalive: number | null
+  updated_at: string
+  handshake_age_seconds: number | null
+}
+
+export interface TunnelServerSummary extends TunnelServer {
+  peer_count: number
+  total_rx_bytes: number
+  total_tx_bytes: number
+  recent_heal_count: number
+  forward_count: number
+}
+
+export interface TunnelClientAttachmentHealth {
+  attachment_id: string
+  wg_interface: string
+  peer_count: number
+  last_handshake_unix: number | null
+}
+
+export interface TunnelClientSummary extends TunnelClient {
+  total_rx_bytes: number
+  total_tx_bytes: number
+  recent_heal_count: number
+  attachment_health: TunnelClientAttachmentHealth[]
+}
+
+export interface CrowdSecScenario {
+  name: string
+  count: number
+}
+
+export interface CrowdSecTopIp {
+  ip: string
+  count: number
+}
+
+export interface CrowdSecStatus {
+  running: boolean
+  version: string | null
+  total_decisions: number
+  top_scenarios: CrowdSecScenario[]
+  top_ips: CrowdSecTopIp[]
+  error: string | null
+  updated_at: string | null
+}
+
 export interface HealEvent {
   id: number
   agent_id: string

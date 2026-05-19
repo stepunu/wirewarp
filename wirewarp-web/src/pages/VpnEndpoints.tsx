@@ -7,6 +7,7 @@ import {
 } from '../lib/api'
 import { Button, Field, Input, Toggle, relTime } from '../components/ui'
 import { VpnPermissionsSheet } from '../components/VpnPermissionsSheet'
+import { WgPeerTable } from '../components/WgPeerTable'
 import type {
   TunnelClient,
   VpnEndpoint,
@@ -129,12 +130,47 @@ export default function VpnEndpoints() {
         </table>
       </div>
 
+      <VpnLivePeersSection endpoints={endpointsQ.data ?? []} />
+
       {permissionsFor && (
         <VpnPermissionsSheet
           endpoint={permissionsFor}
           onClose={() => setPermissionsFor(null)}
         />
       )}
+    </div>
+  )
+}
+
+function VpnLivePeersSection({ endpoints }: { endpoints: VpnEndpoint[] }) {
+  if (endpoints.length === 0) return null
+  return (
+    <div style={{ marginTop: 24 }}>
+      <h2 className="page-section">Live peers</h2>
+      <p className="page-sub" style={{ marginBottom: 12 }}>
+        Per-peer RX/TX, endpoint, allowed IPs, and last handshake — reported
+        by each gateway agent on the ~30s heartbeat. Status colour follows
+        wg-easy: under 3 min ok, under 15 min warn, otherwise offline.
+      </p>
+      {endpoints.map((ep) => (
+        <VpnEndpointPeers key={ep.id} endpoint={ep} />
+      ))}
+    </div>
+  )
+}
+
+function VpnEndpointPeers({ endpoint }: { endpoint: VpnEndpoint }) {
+  const peersQ = useQuery({
+    queryKey: ['wg-peers', 'vpn-endpoint', endpoint.id],
+    queryFn: () => vpnEndpointsApi.wgPeers(endpoint.id),
+  })
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card-head">
+        <div className="title mono">{endpoint.wg_interface}</div>
+        <span className="scheme">{endpoint.public_endpoint}</span>
+      </div>
+      <WgPeerTable peers={peersQ.data ?? []} />
     </div>
   )
 }

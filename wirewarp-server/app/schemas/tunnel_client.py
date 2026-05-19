@@ -26,6 +26,22 @@ class TunnelClientRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class TunnelClientAttachmentHealth(BaseModel):
+    """Per-attachment slice of dashboard data — peer count + handshake."""
+
+    attachment_id: uuid.UUID
+    wg_interface: str
+    peer_count: int = 0
+    last_handshake_unix: int | None = None
+
+
+class TunnelClientSummary(TunnelClientRead):
+    total_rx_bytes: int = 0
+    total_tx_bytes: int = 0
+    recent_heal_count: int = 0
+    attachment_health: list[TunnelClientAttachmentHealth] = []
+
+
 class TunnelClientUpdate(BaseModel):
     vm_network: str | None = None
     lan_ip: str | None = None

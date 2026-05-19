@@ -8,13 +8,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
+from app.models.heal_event import AgentHealEvent
 from app.models.port_forward import PortForward
 from app.models.tunnel_client import TunnelClient
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
 from app.models.user import User
-from app.schemas.tunnel_server import TunnelServerRead, TunnelServerUpdate
+from app.models.wg_peer_snapshot import WgPeerSnapshot
+from app.schemas.tunnel_server import TunnelServerRead, TunnelServerSummary, TunnelServerUpdate
 from app.schemas.tunnel_server_ip import TunnelServerIPRead
+from app.schemas.wg_peer import WgPeerSnapshotRead
 from app.auth import require_ops_role, require_role
 from app.realtime.events import (
     emit_port_forward_changed,
@@ -82,6 +85,92 @@ async def get_tunnel_server(server_id: str, db: AsyncSession = Depends(get_db), 
     if not server:
         raise HTTPException(status_code=404, detail="Tunnel server not found")
     return _to_read(server)
+
+
+@router.get("/{server_id}/wg-peers", response_model=list[WgPeerSnapshotRead])
+async def list_tunnel_server_wg_peers(
+    server_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    """All `kind=mesh` peers seen on this server agent's wg interfaces.
+
+    Returns every row that the agent's last heartbeat reconciled. No
+    filtering by interface (the server may grow more than one wg port
+    in future) — sorted by interface, then handshake recency.
+    """
+    server = await db.scalar(select(TunnelServer).where(TunnelServer.id == server_id))
+    if not server:
+        raise HTTPException(status_code=404, detail="Tunnel server not found")
+    result = await db.execute(
+        select(WgPeerSnapshot)
+        .where(WgPeerSnapshot.agent_id == server.agent_id)
+        .where(WgPeerSnapshot.kind == "mesh")
+        .order_by(WgPeerSnapshot.interface.asc(), WgPeerSnapshot.last_handshake_unix.desc())
+    )
+    return result.scalars().all()
+
+
+@router.get("/{server_id}/summary", response_model=TunnelServerSummary)
+async def get_tunnel_server_summary(
+    server_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    """Aggregated dashboard payload for the per-server detail page."""
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import func as sa_func
+
+    server = (
+        await db.execute(
+            select(TunnelServer)
+            .options(selectinload(TunnelServer.ips))
+            .where(TunnelServer.id == server_id)
+        )
+    ).scalar_one_or_none()
+    if not server:
+        raise HTTPException(status_code=404, detail="Tunnel server not found")
+
+    # Per-peer aggregates, scoped to mesh peers on this agent.
+    agg = (
+        await db.execute(
+            select(
+                sa_func.count(WgPeerSnapshot.id),
+                sa_func.coalesce(sa_func.sum(WgPeerSnapshot.rx_bytes), 0),
+                sa_func.coalesce(sa_func.sum(WgPeerSnapshot.tx_bytes), 0),
+            )
+            .where(WgPeerSnapshot.agent_id == server.agent_id)
+            .where(WgPeerSnapshot.kind == "mesh")
+        )
+    ).first()
+    peer_count, total_rx, total_tx = (agg or (0, 0, 0))
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    heal_count = (
+        await db.scalar(
+            select(sa_func.count(AgentHealEvent.id))
+            .where(AgentHealEvent.agent_id == server.agent_id)
+            .where(AgentHealEvent.occurred_at >= cutoff)
+        )
+    ) or 0
+
+    forward_count = (
+        await db.scalar(
+            select(sa_func.count(PortForward.id))
+            .join(TunnelClientAttachment, PortForward.attachment_id == TunnelClientAttachment.id)
+            .where(TunnelClientAttachment.tunnel_server_id == server.id)
+        )
+    ) or 0
+
+    base = _to_read(server)
+    return TunnelServerSummary(
+        **base.model_dump(),
+        peer_count=int(peer_count),
+        total_rx_bytes=int(total_rx),
+        total_tx_bytes=int(total_tx),
+        recent_heal_count=int(heal_count),
+        forward_count=int(forward_count),
+    )
 
 
 @router.patch("/{server_id}", response_model=TunnelServerRead)

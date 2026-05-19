@@ -107,6 +107,12 @@ export const agents = {
 export const tunnelServers = {
   list: () => request<import('./types').TunnelServer[]>('/tunnel-servers'),
   get: (id: string) => request<import('./types').TunnelServer>(`/tunnel-servers/${id}`),
+  summary: (id: string) =>
+    request<import('./types').TunnelServerSummary>(`/tunnel-servers/${id}/summary`),
+  wgPeers: (id: string) =>
+    request<import('./types').WgPeerSnapshot[]>(`/tunnel-servers/${id}/wg-peers`),
+  crowdsec: (id: string) =>
+    request<import('./types').CrowdSecStatus>(`/tunnel-servers/${id}/crowdsec`),
   update: (id: string, data: Record<string, unknown>) =>
     request<import('./types').TunnelServer>(`/tunnel-servers/${id}`, {
       method: 'PATCH',
@@ -145,6 +151,10 @@ export const tunnelServerIPs = {
 export const tunnelClients = {
   list: () => request<import('./types').TunnelClient[]>('/tunnel-clients'),
   get: (id: string) => request<import('./types').TunnelClient>(`/tunnel-clients/${id}`),
+  summary: (id: string) =>
+    request<import('./types').TunnelClientSummary>(`/tunnel-clients/${id}/summary`),
+  wgPeers: (id: string) =>
+    request<import('./types').WgPeerSnapshot[]>(`/tunnel-clients/${id}/wg-peers`),
   update: (id: string, data: Record<string, unknown>) =>
     request<import('./types').TunnelClient>(`/tunnel-clients/${id}`, {
       method: 'PATCH',
@@ -315,6 +325,8 @@ export const vpnEndpoints = {
   list: () => request<import('./types').VpnEndpoint[]>('/vpn-endpoints'),
   get: (id: string) =>
     request<import('./types').VpnEndpoint>(`/vpn-endpoints/${id}`),
+  wgPeers: (id: string) =>
+    request<import('./types').WgPeerSnapshot[]>(`/vpn-endpoints/${id}/wg-peers`),
   create: (data: {
     tunnel_client_id: string
     public_endpoint: string

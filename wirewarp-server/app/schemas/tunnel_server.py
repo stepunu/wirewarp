@@ -21,6 +21,16 @@ class TunnelServerRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class TunnelServerSummary(TunnelServerRead):
+    """Per-server dashboard payload aggregating wg_peer_snapshots + heal_events."""
+
+    peer_count: int = 0
+    total_rx_bytes: int = 0
+    total_tx_bytes: int = 0
+    recent_heal_count: int = 0
+    forward_count: int = 0
+
+
 class TunnelServerUpdate(BaseModel):
     wg_port: int | None = None
     public_iface: str | None = None
