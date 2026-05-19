@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -216,6 +217,12 @@ func (h *ClientHandlers) handleWGAttach(raw json.RawMessage) (string, error) {
 	}
 	if saveErr := wireguard.SaveIPTables(); saveErr != nil {
 		log.Printf("[client] WARN: iptables save failed: %v", saveErr)
+	}
+
+	if exe, err := os.Executable(); err == nil {
+		if err := EnsureRoutingUnit(exe, h.cfgPath); err != nil {
+			log.Printf("[client] WARN: routing-restore unit install: %v", err)
+		}
 	}
 
 	return fmt.Sprintf("attachment %s up on %s; public key: %s", p.AttachmentID, p.WGInterface, pubKey), nil

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 	"sync/atomic"
@@ -181,6 +182,12 @@ func (h *ServerHandlers) handleWGInit(raw json.RawMessage) (string, error) {
 	}
 	if err := h.cfg.Save(h.cfgPath); err != nil {
 		log.Printf("[server] WARN: failed to save config after wg_init: %v", err)
+	}
+
+	if exe, err := os.Executable(); err == nil {
+		if err := EnsureRoutingUnit(exe, h.cfgPath); err != nil {
+			log.Printf("[server] WARN: routing-restore unit install: %v", err)
+		}
 	}
 
 	return fmt.Sprintf("WireGuard interface %s initialised; public key: %s", p.Interface, wgSrv.PublicKey), nil

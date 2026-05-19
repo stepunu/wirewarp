@@ -30,7 +30,14 @@ func main() {
 	url := flag.String("url", "", "Control server URL (e.g. https://wirewarp.example.com)")
 	token := flag.String("token", "", "Registration token (first run only)")
 	insecure := flag.Bool("insecure", false, "Allow plain http:// control-server URL (homelab/bootstrap only — MITM risk)")
+	restoreRouting := flag.Bool("restore-routing", false,
+		"Run as oneshot: re-install routing state from saved config and exit (used by wirewarp-routing.service)")
 	flag.Parse()
+
+	if *restoreRouting {
+		runRestoreRouting(*cfgPath)
+		return
+	}
 
 	// Load existing config or bootstrap from flags
 	cfg, err := config.Load(*cfgPath)
@@ -136,6 +143,24 @@ func main() {
 		shutdownFn()
 	}
 	log.Println("Agent stopped")
+}
+
+// runRestoreRouting is the oneshot entry point invoked by the
+// wirewarp-routing.service systemd unit. It loads the saved config and
+// asks handlers.RestoreRouting to reapply host-wide routing state, then
+// exits — no WebSocket loop, no handlers registered.
+func runRestoreRouting(cfgPath string) {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("[restore-routing] no config at %s — nothing to restore", cfgPath)
+			return
+		}
+		log.Fatalf("[restore-routing] failed to load config: %v", err)
+	}
+	if err := handlers.RestoreRouting(cfg); err != nil {
+		log.Fatalf("[restore-routing] %v", err)
+	}
 }
 
 func handleAgentUpdate(_ json.RawMessage) (string, error) {
