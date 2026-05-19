@@ -113,6 +113,11 @@ export const tunnelServers = {
     request<import('./types').WgPeerSnapshot[]>(`/tunnel-servers/${id}/wg-peers`),
   crowdsec: (id: string) =>
     request<import('./types').CrowdSecStatus>(`/tunnel-servers/${id}/crowdsec`),
+  installCrowdsec: (id: string) =>
+    request<{ command_id: string; sent: boolean }>(
+      `/tunnel-servers/${id}/crowdsec/install`,
+      { method: 'POST' },
+    ),
   update: (id: string, data: Record<string, unknown>) =>
     request<import('./types').TunnelServer>(`/tunnel-servers/${id}`, {
       method: 'PATCH',

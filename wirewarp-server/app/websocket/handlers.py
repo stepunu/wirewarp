@@ -29,6 +29,8 @@ from app.realtime.events import (
     emit_tunnel_server_changed,
     emit_wg_peer_changed,
 )
+from app.services.agent_commands import send_command
+from app.services.crowdsec_ops import build_whitelist, whitelist_hash
 from app.services.tunnel_server_ops import dispatch_add_peer_for_attachment, dispatch_wg_init
 
 logger = logging.getLogger(__name__)
@@ -523,6 +525,29 @@ async def handle_crowdsec_status(agent_id: str, msg: dict, db: AsyncSession) -> 
     agent = result.scalar_one_or_none()
     if agent:
         agent.last_seen = now
+
+    # When crowdsec is running, diff the expected auto-whitelist against
+    # what the agent currently holds and dispatch a sync if drifted. We
+    # piggyback on the 5-min heartbeat rather than spinning up a server-
+    # side scheduler — see crowdsec_ops.build_whitelist for what's in
+    # scope (other agents' public IPs, mesh + VPN subnets, gateway LAN
+    # subnets + discovered LAN clients).
+    snapshot = await db.scalar(
+        select(CrowdSecSnapshot).where(CrowdSecSnapshot.agent_id == agent_id)
+    )
+    if snapshot and snapshot.running:
+        payload = await build_whitelist(agent_id, db)
+        h = whitelist_hash(payload)
+        if snapshot.whitelist_hash != h:
+            sent, _ = await send_command(
+                agent_id=str(agent_id),
+                command_type="crowdsec_sync_whitelist",
+                params=payload,
+                db=db,
+            )
+            if sent:
+                snapshot.whitelist_hash = h
+                await db.commit()
 
     await db.commit()
     emit_crowdsec_changed()

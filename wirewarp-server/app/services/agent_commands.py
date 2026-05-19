@@ -26,6 +26,8 @@ VALID_COMMAND_TYPES = {
     "vpn_peer_add",
     "vpn_peer_remove",
     "vpn_peer_update_rules",
+    "crowdsec_install",
+    "crowdsec_sync_whitelist",
 }
 
 

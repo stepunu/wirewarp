@@ -43,6 +43,12 @@ class CrowdSecSnapshot(Base):
     top_scenarios: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     top_ips: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(String, nullable=True)
+    # SHA-256 hex of the JSON-encoded `{ips, cidrs}` payload the agent
+    # last applied. NULL means the agent has never been told to apply a
+    # whitelist (either freshly installed or pre-feature). The control
+    # server re-renders the expected payload on every crowdsec_status
+    # heartbeat and dispatches a sync command if this hash differs.
+    whitelist_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

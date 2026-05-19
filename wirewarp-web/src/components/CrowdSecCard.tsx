@@ -1,6 +1,8 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { tunnelServers as tsApi } from '../lib/api'
-import { Badge, Stat } from './ui'
+import { useRole } from '../hooks/useRole'
+import { useToast } from './Toasts'
+import { Badge, Button, Stat } from './ui'
 
 /** CrowdSec status card on the tunnel-server detail overview tab.
  *  Polled status comes from the server agent's 5-minute poller (see
@@ -8,11 +10,24 @@ import { Badge, Stat } from './ui'
  *  on the host, `running: false` is the sentinel — render a muted card
  *  rather than nothing, so the operator can see the slot exists. */
 export function CrowdSecCard({ serverId }: { serverId: string }) {
+  const qc = useQueryClient()
+  const push = useToast()
+  const { isAdmin } = useRole()
   const q = useQuery({
     queryKey: ['crowdsec', serverId],
     queryFn: () => tsApi.crowdsec(serverId),
   })
   const data = q.data
+
+  const install = useMutation({
+    mutationFn: () => tsApi.installCrowdsec(serverId),
+    onSuccess: () => {
+      push('crowdsec install dispatched — install runs in the background and the card updates within 5 min', 'ok', 'cs://')
+      qc.invalidateQueries({ queryKey: ['crowdsec', serverId] })
+      qc.invalidateQueries({ queryKey: ['audit'] })
+    },
+    onError: (e: Error) => push(e.message, 'err', 'cs://'),
+  })
   if (q.isLoading) {
     return (
       <div className="card">
@@ -29,13 +44,39 @@ export function CrowdSecCard({ serverId }: { serverId: string }) {
           <Badge tone="neutral">not detected</Badge>
         </div>
         <div style={{ padding: 14, color: 'var(--fg-3)', fontSize: 12, lineHeight: 1.6 }}>
-          CrowdSec is not installed on this tunnel server (no <span className="mono">cscli</span> found in PATH).
-          Recommended for SSH bruteforce, HTTP CVE, and mail abuse mitigation —
-          run <span className="mono">apt install crowdsec</span> on the host then{' '}
-          <span className="mono">cscli collections install crowdsecurity/linux</span>.
+          CrowdSec is not running on this tunnel server. Recommended for SSH
+          bruteforce, HTTP CVE, and mail abuse mitigation. WireWarp can install
+          it on Debian-family hosts and auto-apply a whitelist covering every
+          known IP / subnet in your environment (other agents, mesh + VPN
+          subnets, gateway LAN subnets, discovered LAN clients).
           {data?.error && (
             <div style={{ marginTop: 8, color: 'var(--warn)' }}>
               last error: <span className="mono">{data.error}</span>
+            </div>
+          )}
+          {isAdmin && (
+            <div style={{ marginTop: 12 }}>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => {
+                  if (
+                    confirm(
+                      'Install CrowdSec on this tunnel server?\n\n' +
+                        'Runs apt install + cscli capi register + collections install\n' +
+                        'on the remote host as root (~1-2 min). Idempotent — re-run safely.',
+                    )
+                  ) {
+                    install.mutate()
+                  }
+                }}
+                disabled={install.isPending}
+              >
+                {install.isPending ? 'dispatching…' : 'Install CrowdSec'}
+              </Button>
+              <span style={{ marginLeft: 10, color: 'var(--fg-3)' }}>
+                admin only · runs apt + cscli on the remote
+              </span>
             </div>
           )}
         </div>

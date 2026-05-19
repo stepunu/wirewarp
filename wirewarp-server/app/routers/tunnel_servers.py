@@ -27,6 +27,7 @@ from app.realtime.events import (
     emit_tunnel_server_changed,
 )
 from app.services.agent_commands import send_command
+from app.services.crowdsec_ops import build_whitelist
 from app.services.network_alloc import allocate_tunnel_network, renumber_host
 from app.services.primary_ip import resolve_public_ip
 from app.services.tunnel_server_ops import dispatch_wg_attach, dispatch_wg_init
@@ -111,6 +112,38 @@ async def list_tunnel_server_wg_peers(
         .order_by(WgPeerSnapshot.interface.asc(), WgPeerSnapshot.last_handshake_unix.desc())
     )
     return result.scalars().all()
+
+
+@router.post("/{server_id}/crowdsec/install", status_code=202)
+async def install_crowdsec_on_tunnel_server(
+    server_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("admin")),
+):
+    """Install CrowdSec on a tunnel server's host via the agent.
+
+    Admin-only because this runs apt as root on a remote host. Dispatches
+    a `crowdsec_install` command with the auto-built whitelist payload
+    so the agent applies the WireWarp-managed allowlist as part of the
+    initial install — no second command needed.
+    """
+    server = await db.scalar(select(TunnelServer).where(TunnelServer.id == server_id))
+    if not server:
+        raise HTTPException(status_code=404, detail="Tunnel server not found")
+    whitelist = await build_whitelist(server.agent_id, db)
+    sent, command_id = await send_command(
+        agent_id=str(server.agent_id),
+        command_type="crowdsec_install",
+        params=whitelist,
+        db=db,
+        actor_user_id=user.id,
+    )
+    if not sent:
+        raise HTTPException(
+            status_code=409,
+            detail="Agent is not currently connected. Reconnect the agent, then retry.",
+        )
+    return {"command_id": command_id, "sent": True}
 
 
 @router.get("/{server_id}/crowdsec", response_model=CrowdSecSnapshotRead)

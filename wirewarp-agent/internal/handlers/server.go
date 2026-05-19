@@ -116,6 +116,8 @@ func (h *ServerHandlers) Register(exec *executor.Executor) {
 	exec.Register("iptables_add_forward", h.handleAddForward)
 	exec.Register("iptables_remove_forward", h.handleRemoveForward)
 	exec.Register("set_lan_snat", h.handleSetLANSNAT)
+	exec.Register("crowdsec_install", h.handleCrowdSecInstall)
+	exec.Register("crowdsec_sync_whitelist", h.handleCrowdSecSyncWhitelist)
 }
 
 // --- command handlers ---
