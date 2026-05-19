@@ -85,6 +85,7 @@ func main() {
 			log.Fatalf("Failed to initialise server handlers: %v", err)
 		}
 		srv.Register(client.Exec())
+		srv.StartHealer(ctx)
 		shutdownFn = srv.Shutdown
 	case "client":
 		cli, err := handlers.NewClient(cfg, *cfgPath)
@@ -92,6 +93,7 @@ func main() {
 			log.Fatalf("Failed to initialise client handlers: %v", err)
 		}
 		cli.Register(client.Exec())
+		cli.StartHealer(ctx)
 		shutdownFn = cli.Shutdown
 	default:
 		log.Fatalf("Unknown mode: %s (must be 'server' or 'client')", cfg.Mode)
