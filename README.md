@@ -8,19 +8,44 @@ Managing WireGuard across a homelab — multiple VPS exit nodes, gateway LXCs, p
 
 ## Features
 
+### Tunnel management
+
 - **Tunnel servers and clients** — register VPS or gateway agents, push initial config, edit live. No SSH after install.
 - **Multi-server gateways** — one gateway client can peer with N tunnel servers simultaneously; each attachment gets its own `wgN` interface, fwmark, and routing table.
 - **Multi-IP per tunnel server** — bind port forwards to a specific public IP; DNAT rules disambiguate by destination IP.
 - **Port forwarding** — TCP/UDP DNAT with templates (DayZ, Minecraft, Web, RDP). Live iptables preview.
 - **VPN endpoints + per-user permissions** — admins configure a VPN endpoint per gateway; users get device profiles + QR code at `/vpn`. Per-(user, endpoint) firewall rules.
-- **Auth** — local users (bcrypt), OIDC (Google/GitHub/generic), and LDAP. Roles: `admin`, `operator`, `viewer`.
-- **Audit log** — every dispatched command logged with actor, type, and details. Visible in dashboard.
-- **Real-time updates** — single WebSocket hub fan-out; no polling. Dashboard reacts within ~50 ms of a server-side change.
 - **LAN client discovery + DNS sync** — gateway agents scrape conntrack for LAN hosts; DNS records sync to Cloudflare automatically when egress IP changes (or surface a manual-update notice).
+
+### Observability
+
+- **Per-server / per-client detail pages** — `/tunnel-servers/:id` and `/tunnel-clients/:id` aggregate peer count, total RX/TX, recent heal events, and active forwards. Four tabs: Overview, Peers, Heal events, Forwards.
+- **wg-easy-style peer tables** — every WireGuard interface (mesh `wg0/wgN` + road-warrior `wg-vpnN`) ships per-peer RX/TX, endpoint, allowed IPs, persistent-keepalive, and a handshake-recency status dot. Same component on tunnel-server detail, tunnel-client detail, and `VPN endpoints`.
+- **Heal events feed** — when the agent's 60s self-healer re-installs missing routing state, the event lands in `agent_heal_events`; the agent detail page grows a warn badge with the count of last-24h drift incidents.
+- **CrowdSec status card** — tunnel-server detail surfaces `cscli` version, active decisions, top scenarios, top banned IPs. Polled every 5 min by the agent.
+- **Real-time updates** — single WebSocket hub fan-out; no polling. Dashboard reacts within ~50 ms of a server-side change.
+
+### Resilience
+
+- **Self-healing routing** — every 60 s the agent verifies each piece of per-attachment state (`ip rule fwmark`, custom-table routes, mangle `CONNMARK --set/--restore`, MSS clamp, MASQUERADE, DOCKER-USER) and re-installs only what's missing. Silent when healthy; logs `[heal] re-installed: …` and pushes a `heal_event` frame on drift. Server-side state (`ip_forward` sysctl, MASQUERADE on the public iface, MSS clamp on the tunnel iface) gets the same treatment.
+- **Reboot-safe routing** — first successful `wg_init` / `wg_attach` writes `/etc/systemd/system/wirewarp-routing.service`, a oneshot unit ordered before `network-pre.target` that calls the agent in `--restore-routing` mode. iptables + ip rules survive reboots even when the agent isn't yet up.
+- **MSS clamp on the tunnel server** — `iptables -t mangle -A POSTROUTING -o wg0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu` is installed alongside the gateway-side clamp so PMTUD-blackholed clients (mobile carriers, strict NATs) don't stall mid-TLS.
+- **Offline resilience** — agents apply last-known config from disk before the WS connection completes; tunnels survive control-server outages.
+- **Clean shutdown** — agents tear down WireGuard + routing on stop. No leftover rules.
+
+### Security
+
+- **CrowdSec one-click install** — admin opens the tunnel-server detail page → CrowdSec card → "Install CrowdSec". The agent runs the apt install, registers with the CrowdSec Central API (free community blocklist), installs `crowdsecurity/linux`, and writes an auto-whitelist parser covering every IP and subnet known to the control server (other agents' public IPs, mesh + VPN subnets, gateway LAN subnets, every discovered LAN client). Whitelist re-syncs on hash drift via the same 5-min poll cycle, so adding a LAN client auto-allows it within minutes.
+- **Sensitive-port advisory** — the "New port forward" dialog runs the chosen (protocol, port) through a server-side classifier and renders a tip card before submit. Catalogue covers SSH, Telnet, MySQL, Postgres, MongoDB, Redis, Memcached, Elasticsearch, CouchDB, RDP, VNC, Webmin, mail submission, admin HTTP. Tip copy stays narrow on purpose — recommends host-local mitigations (CrowdSec, fail2ban, hide behind WireWarp), no third-party CDN / edge service.
+- **Auth** — local users (bcrypt), OIDC (Google/GitHub/generic), and LDAP. Roles: `admin`, `operator`, `viewer`, plus a `vpn_user` role whose only access is `/vpn`.
+- **Audit log** — every dispatched command logged with actor, type, and details. Visible in dashboard.
+- **No arbitrary shell execution** — agents execute whitelisted command types only. No `eval`, no `bash -c`. Privileged installer subcommands (apt, cscli) escape the agent's restricted `CapabilityBoundingSet` via `systemd-run` transient units, not by relaxing the agent itself.
+
+### Operator UX
+
 - **Mobile-responsive dashboard** — phone-first layout with bottom-tab nav, full-screen sheets for dialogs, table-as-card lists. Viewer role lands on `/vpn` directly.
 - **One-command install** — `curl … | bash -s -- --mode <s|c>`. Idempotent. Supports Debian/Ubuntu, RHEL/Fedora, Alpine.
 - **In-place agent update** — dashboard "Update Agent" button. SHA256-verified, restart via systemd.
-- **Offline resilience** — agents apply last-known config from disk before the WS connection completes; tunnels survive control-server outages.
 
 ## Architecture
 
@@ -239,34 +264,55 @@ wirewarp/
 ├── wirewarp-server/          # Control server (FastAPI + PostgreSQL)
 │   ├── app/
 │   │   ├── main.py           # App entrypoint, WebSocket handler, SPA serving
-│   │   ├── models/           # SQLAlchemy ORM models
+│   │   ├── models/           # SQLAlchemy ORM. Notable tables:
+│   │   │                     #   agent_heal_events     (drift audit, 0020)
+│   │   │                     #   wg_peer_snapshots     (unified mesh+VPN, 0021)
+│   │   │                     #   crowdsec_snapshots    (per-agent, 0022/0023)
 │   │   ├── schemas/          # Pydantic request/response schemas
-│   │   ├── routers/          # REST API endpoints (auth, agents, tunnels,
-│   │   │                     #   port-forwards, vpn-endpoints, oidc, ldap, …)
-│   │   ├── websocket/        # WebSocket hub + agent message handlers
+│   │   ├── routers/          # REST API. Per-entity dashboards live at
+│   │   │                     #   /tunnel-servers/{id}/{summary,wg-peers,crowdsec,crowdsec/install}
+│   │   │                     #   /tunnel-clients/{id}/{summary,wg-peers}
+│   │   │                     #   /vpn-endpoints/{id}/wg-peers
+│   │   │                     #   /agents/{id}/heal-events
+│   │   │                     #   /port-forwards/classify  (sensitive-service)
+│   │   ├── websocket/        # WS hub + dispatch (heartbeat, command_result,
+│   │   │                     #   metrics, heal_event, crowdsec_status)
 │   │   ├── realtime/         # Event bus + typed dashboard emitters
-│   │   └── services/         # Command dispatch, network alloc, dns_sync, secrets
+│   │   └── services/         # Command dispatch, network alloc, dns_sync,
+│   │                         #   port_security (catalogue), crowdsec_ops
+│   │                         #   (auto-whitelist builder), secrets
 │   ├── alembic/              # Migrations 0001 … current head
 │   ├── Dockerfile            # Multi-stage build (frontend + backend)
 │   └── docker-compose.yml
 ├── wirewarp-web/             # React dashboard
 │   └── src/
-│       ├── pages/            # Login, Dashboard, Agents, TunnelServers,
-│       │                     #   TunnelClients, PortForwards, VpnEndpoints,
-│       │                     #   MyVpn, Users, Settings, …
+│       ├── pages/            # Login, Dashboard, Agents, AgentDetail,
+│       │                     #   TunnelServers, TunnelServerDetail,
+│       │                     #   TunnelClients, TunnelClientDetail,
+│       │                     #   PortForwards, VpnEndpoints, MyVpn,
+│       │                     #   LanClients, Users, Settings, …
 │       ├── components/       # Layout, BottomNav, ui.tsx, icons.tsx,
-│       │                     #   CommandPalette, HelpOverlay, Toasts
+│       │                     #   WgPeerTable, CrowdSecCard, Toasts,
+│       │                     #   CommandPalette, HelpOverlay
 │       └── lib/              # api.ts, realtime.ts, types.ts
 ├── wirewarp-agent/           # Go agent
-│   ├── cmd/agent/main.go     # Entrypoint (--mode flag)
+│   ├── cmd/agent/main.go     # Entrypoint (--mode, --restore-routing flags)
 │   ├── scripts/              # install.sh, verify-gateway.sh, systemd unit
 │   └── internal/
 │       ├── config/           # YAML config persistence
-│       ├── websocket/        # Persistent WebSocket connection
+│       ├── websocket/        # Persistent WS + heartbeat (wg peer scrape,
+│       │                     #   LAN client scrape) + Emit() unsolicited push
 │       ├── executor/         # Command dispatcher
-│       ├── handlers/         # Server + client command handlers
-│       ├── wireguard/        # WireGuard + gateway routing wrappers
-│       └── iptables/         # iptables DNAT/FORWARD wrappers
+│       ├── handlers/         # Server + client command handlers, plus
+│       │                     #   client_heal.go      (60s drift heal)
+│       │                     #   server_heal.go      (server-side heal)
+│       │                     #   crowdsec.go         (5min cscli poll)
+│       │                     #   crowdsec_install.go (one-click installer)
+│       │                     #   routing_restore.go  (boot-time --restore)
+│       │                     #   systemd_unit.go     (writes wirewarp-routing.service)
+│       ├── wireguard/        # WireGuard + gateway routing wrappers,
+│       │                     #   HealAttachment() check-or-add inspector
+│       └── iptables/         # iptables wrappers + HealServerNetwork()
 ├── legacy/                   # Original bash scripts (reference only)
 ├── docs/superpowers/specs/   # Per-feature design specs
 ├── ARCHITECTURE.md           # Full system design
