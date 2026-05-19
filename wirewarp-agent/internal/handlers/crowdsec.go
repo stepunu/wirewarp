@@ -43,8 +43,12 @@ func (h *ServerHandlers) StartCrowdSecPoller(ctx context.Context) {
 
 func (h *ServerHandlers) crowdSecPollLoop(ctx context.Context) {
 	// Fire once immediately so the UI doesn't wait the full interval
-	// before the first card has data.
-	h.pollAndEmitCrowdSec(ctx)
+	// before the first card has data. The "immediate" fire actually
+	// races the WS connection coming up — Emit returns ErrNotConnected
+	// for the first ~1 sec of agent life. Retry on a tight backoff
+	// during that window; once we land one frame, settle into the
+	// normal 5-min cadence.
+	h.pollAndEmitCrowdSec(ctx, true)
 	t := time.NewTicker(crowdSecPollInterval)
 	defer t.Stop()
 	for {
@@ -52,22 +56,52 @@ func (h *ServerHandlers) crowdSecPollLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			h.pollAndEmitCrowdSec(ctx)
+			h.pollAndEmitCrowdSec(ctx, false)
 		}
 	}
 }
 
-func (h *ServerHandlers) pollAndEmitCrowdSec(ctx context.Context) {
+// pollAndEmitCrowdSec collects + emits one snapshot. When `retry` is
+// true and the emit returns ErrNotConnected, retry every 2s for up to
+// 30s — covers the agent-startup race where the WS hasn't authed yet.
+// Steady-state polls pass retry=false; a dropped frame just waits 5min.
+func (h *ServerHandlers) pollAndEmitCrowdSec(ctx context.Context, retry bool) {
 	payload := collectCrowdSec(ctx)
+	if !h.tryEmitCrowdSec(payload) && retry {
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
+			if h.tryEmitCrowdSec(payload) {
+				return
+			}
+		}
+	}
+}
+
+func (h *ServerHandlers) tryEmitCrowdSec(payload map[string]any) bool {
 	p := h.emit.Load()
 	if p == nil {
-		return
+		return false
 	}
 	fn := *p
 	if fn == nil {
-		return
+		return false
 	}
-	_ = fn("crowdsec_status", payload)
+	return fn("crowdsec_status", payload) == nil
+}
+
+// EmitCrowdSecNow triggers an out-of-band crowdsec snapshot + emit on
+// the calling goroutine. Used by the install handler so the dashboard
+// flips from "not detected" to "running" the moment install finishes,
+// rather than waiting for the next 5-min cycle.
+func (h *ServerHandlers) EmitCrowdSecNow() {
+	ctx, cancel := context.WithTimeout(context.Background(), crowdSecCmdTimeout)
+	defer cancel()
+	h.pollAndEmitCrowdSec(ctx, true)
 }
 
 // collectCrowdSec runs cscli (version, metrics, decisions) and

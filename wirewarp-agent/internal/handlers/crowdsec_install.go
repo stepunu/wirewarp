@@ -129,6 +129,14 @@ func (h *ServerHandlers) handleCrowdSecInstall(raw json.RawMessage) (string, err
 		}
 	}
 
+	// Push a crowdsec_status frame immediately so the dashboard card
+	// flips from "not detected" to "running" the instant install
+	// finishes, rather than waiting up to 5 min for the next poll.
+	// Spawn in a goroutine — collectCrowdSec runs cscli metrics which
+	// can take 20-40s on a busy LAPI, and we want this handler to
+	// return its log payload to the control server right now.
+	go h.EmitCrowdSecNow()
+
 	return logBuf.String() + "\nOK — CrowdSec installed and whitelist applied.", nil
 }
 
@@ -150,6 +158,10 @@ func (h *ServerHandlers) handleCrowdSecSyncWhitelist(raw json.RawMessage) (strin
 			return "", fmt.Errorf("reload+restart crowdsec: %w / %v\n%s\n%s", err, err2, out, out2)
 		}
 	}
+	// Refresh the snapshot — total_decisions / version may have moved
+	// since the last 5-min cycle. Same async pattern as the install
+	// handler so the caller's WS reply isn't blocked on cscli metrics.
+	go h.EmitCrowdSecNow()
 	return fmt.Sprintf("whitelist applied: %d ips, %d cidrs", len(p.IPs), len(p.CIDRs)), nil
 }
 

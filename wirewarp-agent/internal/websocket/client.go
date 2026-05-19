@@ -65,18 +65,21 @@ func (c *Client) Exec() *executor.Executor {
 	return c.exec
 }
 
-// Emit pushes an unsolicited frame to the control server. Returns nil
-// silently when there is no live connection — callers (the healer, the
-// CrowdSec poller, etc.) treat emission as best-effort. The server
-// already reconciles authoritative state on reconnect, so dropping a
-// telemetry frame here is harmless.
+// Emit pushes an unsolicited frame to the control server.
+//
+// Returns ErrNotConnected when there is no live WS connection.
+// Callers that need the frame to land (e.g. the post-install crowdsec
+// poll — operators expect the dashboard to update instantly) should
+// retry on this error. Callers that are happy with best-effort
+// (heartbeat-driven telemetry that will refire next cycle) may ignore
+// it.
 //
 // The frame is `{"type": <eventType>, ...payload}` — the eventType
 // overwrites any "type" key in payload, so callers cannot accidentally
 // route their event onto a different dispatch branch.
 func (c *Client) Emit(eventType string, payload map[string]any) error {
 	if c.sendFn == nil {
-		return nil
+		return ErrNotConnected
 	}
 	frame := make(map[string]any, len(payload)+1)
 	for k, v := range payload {
@@ -85,6 +88,15 @@ func (c *Client) Emit(eventType string, payload map[string]any) error {
 	frame["type"] = eventType
 	return c.sendFn(frame)
 }
+
+// ErrNotConnected is returned by Emit when the WS channel has no live
+// connection. It's a sentinel — callers can re-export it via the
+// EmitFn signature used by handlers.
+var ErrNotConnected = errNotConnected{}
+
+type errNotConnected struct{}
+
+func (errNotConnected) Error() string { return "wirewarp: not connected to control server" }
 
 // Run connects and reconnects forever with exponential backoff.
 func (c *Client) Run(ctx context.Context) {
