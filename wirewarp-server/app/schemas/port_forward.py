@@ -14,6 +14,17 @@ class SensitiveServiceTipRead(BaseModel):
     message: str
 
 
+class ClassifyResponse(BaseModel):
+    """Reply shape for GET /port-forwards/classify.
+
+    Either `{tip: null}` (the protocol/port is not in the sensitive
+    catalogue) or `{tip: {...}}` with the same payload that the read-time
+    computed field puts on PortForwardRead.sensitive_service.
+    """
+
+    tip: SensitiveServiceTipRead | None = None
+
+
 class PortForwardCreate(BaseModel):
     attachment_id: uuid.UUID
     tunnel_server_ip_id: uuid.UUID | None = None

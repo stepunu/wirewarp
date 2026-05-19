@@ -290,6 +290,13 @@ export const portForwards = {
       body: JSON.stringify(data),
     }),
   del: (id: string) => request<void>(`/port-forwards/${id}`, { method: 'DELETE' }),
+  classify: (protocol: 'tcp' | 'udp', port: number, portEnd?: number | null) => {
+    const q = new URLSearchParams({ protocol, port: String(port) })
+    if (portEnd) q.set('port_end', String(portEnd))
+    return request<{ tip: import('./types').SensitiveServiceTip | null }>(
+      `/port-forwards/classify?${q.toString()}`,
+    )
+  },
 }
 
 // Settings

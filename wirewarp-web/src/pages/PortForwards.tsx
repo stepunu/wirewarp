@@ -761,6 +761,21 @@ function NewForwardDialog({ onClose }: { onClose: () => void }) {
     (isMultiPort || form.destination_port)
   )
 
+  // Pre-create advisory: hit the classify endpoint for the first token
+  // whenever the operator has settled on (protocol, port). The result
+  // is cached aggressively because the catalogue doesn't change between
+  // requests — 5 min staleTime is plenty.
+  const firstToken = pubTokens[0]
+  const firstPort = firstToken && isValidPort(firstToken.port) ? firstToken.port : null
+  const firstPortEnd = firstToken?.portEnd && isValidPort(firstToken.portEnd) ? firstToken.portEnd : null
+  const classifyQ = useQuery({
+    queryKey: ['pf-classify', form.protocol, firstPort, firstPortEnd],
+    queryFn: () => pfApi.classify(form.protocol, firstPort!, firstPortEnd),
+    enabled: firstPort !== null,
+    staleTime: 5 * 60 * 1000,
+  })
+  const classifyTip = classifyQ.data?.tip
+
   return (
     <Dialog
       title="New port forward"
@@ -931,6 +946,8 @@ function NewForwardDialog({ onClose }: { onClose: () => void }) {
           onChange={(e) => set('description', e.target.value)}
         />
       </Field>
+
+      {classifyTip && <SensitiveTipCard tip={classifyTip} />}
 
       {ok && (
         <div className="outcome" style={{ marginTop: 14 }}>

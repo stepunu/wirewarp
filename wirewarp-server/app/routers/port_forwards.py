@@ -11,10 +11,17 @@ from app.models.port_forward import PortForward
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
 from app.models.user import User
-from app.schemas.port_forward import PortForwardCreate, PortForwardRead, PortForwardUpdate
+from app.schemas.port_forward import (
+    ClassifyResponse,
+    PortForwardCreate,
+    PortForwardRead,
+    PortForwardUpdate,
+    SensitiveServiceTipRead,
+)
 from app.auth import get_current_user, require_role, require_ops_role
 from app.realtime.events import emit_port_forward_changed, emit_tunnel_server_changed
 from app.services.agent_commands import send_command
+from app.services.port_security import classify_forward
 from app.services.primary_ip import resolve_public_ip
 
 router = APIRouter()
@@ -150,6 +157,44 @@ async def migrate_port_forwards_to_pin(
         migrated += 1
 
     return migrated
+
+
+@router.get("/classify", response_model=ClassifyResponse)
+async def classify_port_forward(
+    protocol: str,
+    port: int,
+    port_end: int | None = None,
+    _: User = Depends(require_ops_role),
+):
+    """Classify a (protocol, port[, port_end]) tuple against the
+    sensitive-service catalogue.
+
+    Used by the New Port Forward dialog to show the advisory tip
+    *before* the operator clicks submit. Same classifier as the
+    read-time computed field on PortForwardRead.sensitive_service, so
+    there is no chance of the pre-create advice disagreeing with the
+    post-create badge.
+
+    Registered before the `/{pf_id}` route so FastAPI doesn't try to
+    parse "classify" as a UUID path parameter.
+    """
+    if protocol not in ("tcp", "udp"):
+        raise HTTPException(status_code=400, detail="protocol must be tcp or udp")
+    if port < 1 or port > 65535:
+        raise HTTPException(status_code=400, detail="port out of range")
+    if port_end is not None and (port_end < port or port_end > 65535):
+        raise HTTPException(status_code=400, detail="port_end out of range")
+    tip = classify_forward(protocol, port, port_end)
+    if tip is None:
+        return ClassifyResponse(tip=None)
+    return ClassifyResponse(
+        tip=SensitiveServiceTipRead(
+            key=tip.key,
+            label=tip.label,
+            severity=tip.severity,
+            message=tip.message,
+        )
+    )
 
 
 @router.get("", response_model=list[PortForwardRead])

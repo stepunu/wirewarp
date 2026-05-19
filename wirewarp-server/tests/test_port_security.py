@@ -81,3 +81,44 @@ def test_classify_message_mentions_mitigations():
     # SSH tip must reference at least one of the three mitigations the user
     # asked for. If this fails because copy was edited, update the assert.
     assert any(s in tip.message for s in ("CrowdSec", "fail2ban", "WireWarp"))
+
+
+# --- Classify REST endpoint -------------------------------------------------
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_classify_endpoint_returns_tip_for_sensitive_port(client) -> None:
+    resp = await client.get("/api/port-forwards/classify?protocol=tcp&port=22")
+    assert resp.status_code == 200
+    tip = resp.json()["tip"]
+    assert tip is not None
+    assert tip["key"] == "ssh"
+    assert tip["severity"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_classify_endpoint_returns_null_for_safe_port(client) -> None:
+    resp = await client.get("/api/port-forwards/classify?protocol=tcp&port=25565")
+    assert resp.status_code == 200
+    assert resp.json()["tip"] is None
+
+
+@pytest.mark.asyncio
+async def test_classify_endpoint_rejects_bad_protocol(client) -> None:
+    resp = await client.get("/api/port-forwards/classify?protocol=icmp&port=22")
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_classify_endpoint_handles_ranges(client) -> None:
+    resp = await client.get(
+        "/api/port-forwards/classify?protocol=tcp&port=20&port_end=25"
+    )
+    assert resp.status_code == 200
+    tip = resp.json()["tip"]
+    # Range [20..25] includes telnet (23) which is high severity.
+    assert tip is not None
+    assert tip["severity"] == "high"
