@@ -76,6 +76,15 @@ func NewClient(cfg *config.Config, cfgPath string) (*ClientHandlers, error) {
 		}
 	}
 
+	// Idempotently install the reboot-safe routing-restore unit on every
+	// startup. See the same hook in NewServer for why this can't be
+	// limited to fresh wg_attach calls.
+	if exe, err := os.Executable(); err == nil {
+		if err := EnsureRoutingUnit(exe, cfgPath); err != nil {
+			log.Printf("[client] WARN: routing-restore unit install: %v", err)
+		}
+	}
+
 	return h, nil
 }
 

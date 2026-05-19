@@ -69,6 +69,17 @@ func NewServer(cfg *config.Config, cfgPath string) (*ServerHandlers, error) {
 		}
 	}
 
+	// Idempotently install the reboot-safe routing-restore unit on every
+	// startup. EnsureRoutingUnit no-ops when the file content already
+	// matches; without this hook, agents whose wg_init landed before
+	// EnsureRoutingUnit existed would never get the unit (handleWGInit
+	// is a one-shot — the control server doesn't replay it on reconnect).
+	if exe, err := os.Executable(); err == nil {
+		if err := EnsureRoutingUnit(exe, cfgPath); err != nil {
+			log.Printf("[server] WARN: routing-restore unit install: %v", err)
+		}
+	}
+
 	h.wg = wgSrv
 	return h, nil
 }
