@@ -8,6 +8,7 @@ from sqlalchemy import delete, select, func
 
 from app.models.agent import Agent
 from app.models.command_log import CommandLog
+from app.models.crowdsec_snapshot import CrowdSecSnapshot
 from app.models.gateway_lan_client import GatewayLanClient
 from app.models.heal_event import AgentHealEvent
 from app.models.metric import Metric
@@ -21,6 +22,7 @@ from app.models.wg_peer_snapshot import WgPeerSnapshot
 from app.realtime.events import (
     emit_agent_changed,
     emit_audit_changed,
+    emit_crowdsec_changed,
     emit_heal_event_changed,
     emit_lan_client_changed,
     emit_tunnel_client_changed,
@@ -467,6 +469,65 @@ async def handle_heal_event(agent_id: str, msg: dict, db: AsyncSession) -> None:
     emit_heal_event_changed()
 
 
+async def handle_crowdsec_status(agent_id: str, msg: dict, db: AsyncSession) -> None:
+    """Upsert this agent's CrowdSec snapshot from a `crowdsec_status` frame.
+
+    The agent always sends a status frame, even when cscli is missing —
+    `running=False` is the explicit sentinel. We accept any frame as
+    long as it has `running` set; everything else (version, counts,
+    lists) is optional and stored as-is.
+    """
+    if "running" not in msg:
+        return
+    running = bool(msg.get("running"))
+    version = msg.get("version") if isinstance(msg.get("version"), str) else None
+    try:
+        total_decisions = int(msg.get("total_decisions") or 0)
+    except (TypeError, ValueError):
+        total_decisions = 0
+    top_scenarios = msg.get("top_scenarios")
+    if not isinstance(top_scenarios, list):
+        top_scenarios = None
+    top_ips = msg.get("top_ips")
+    if not isinstance(top_ips, list):
+        top_ips = None
+    err = msg.get("error") if isinstance(msg.get("error"), str) else None
+
+    existing = await db.scalar(
+        select(CrowdSecSnapshot).where(CrowdSecSnapshot.agent_id == agent_id)
+    )
+    now = datetime.now(timezone.utc)
+    if existing is not None:
+        existing.running = running
+        existing.version = version
+        existing.total_decisions = total_decisions
+        existing.top_scenarios = top_scenarios
+        existing.top_ips = top_ips
+        existing.error = err
+        existing.updated_at = now
+    else:
+        db.add(
+            CrowdSecSnapshot(
+                agent_id=agent_id,
+                running=running,
+                version=version,
+                total_decisions=total_decisions,
+                top_scenarios=top_scenarios,
+                top_ips=top_ips,
+                error=err,
+                updated_at=now,
+            )
+        )
+
+    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    if agent:
+        agent.last_seen = now
+
+    await db.commit()
+    emit_crowdsec_changed()
+
+
 async def dispatch(agent_id: str, msg: dict, db: AsyncSession) -> None:
     msg_type = msg.get("type")
     if msg_type == "heartbeat":
@@ -477,4 +538,6 @@ async def dispatch(agent_id: str, msg: dict, db: AsyncSession) -> None:
         await handle_metrics(agent_id, msg, db)
     elif msg_type == "heal_event":
         await handle_heal_event(agent_id, msg, db)
+    elif msg_type == "crowdsec_status":
+        await handle_crowdsec_status(agent_id, msg, db)
     # Unknown message types are silently ignored

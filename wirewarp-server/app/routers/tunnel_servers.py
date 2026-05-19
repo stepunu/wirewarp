@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
+from app.models.crowdsec_snapshot import CrowdSecSnapshot
 from app.models.heal_event import AgentHealEvent
 from app.models.port_forward import PortForward
 from app.models.tunnel_client import TunnelClient
@@ -15,6 +16,7 @@ from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
 from app.models.user import User
 from app.models.wg_peer_snapshot import WgPeerSnapshot
+from app.schemas.crowdsec import CrowdSecSnapshotRead
 from app.schemas.tunnel_server import TunnelServerRead, TunnelServerSummary, TunnelServerUpdate
 from app.schemas.tunnel_server_ip import TunnelServerIPRead
 from app.schemas.wg_peer import WgPeerSnapshotRead
@@ -109,6 +111,29 @@ async def list_tunnel_server_wg_peers(
         .order_by(WgPeerSnapshot.interface.asc(), WgPeerSnapshot.last_handshake_unix.desc())
     )
     return result.scalars().all()
+
+
+@router.get("/{server_id}/crowdsec", response_model=CrowdSecSnapshotRead)
+async def get_tunnel_server_crowdsec(
+    server_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    """Return the latest CrowdSec snapshot for this server's agent.
+
+    Always returns 200 — when the agent hasn't reported yet (or cscli
+    is missing on the host), we send `{running: false}` so the UI can
+    render its "not detected" card without special-casing 404.
+    """
+    server = await db.scalar(select(TunnelServer).where(TunnelServer.id == server_id))
+    if not server:
+        raise HTTPException(status_code=404, detail="Tunnel server not found")
+    snap = await db.scalar(
+        select(CrowdSecSnapshot).where(CrowdSecSnapshot.agent_id == server.agent_id)
+    )
+    if snap is None:
+        return CrowdSecSnapshotRead(running=False)
+    return snap
 
 
 @router.get("/{server_id}/summary", response_model=TunnelServerSummary)

@@ -16,6 +16,7 @@ from app.models.vpn_profile import VpnProfile
 from app.models.vpn_permission import VpnPermission
 from app.models.heal_event import AgentHealEvent
 from app.models.wg_peer_snapshot import WgPeerSnapshot
+from app.models.crowdsec_snapshot import CrowdSecSnapshot
 
 __all__ = [
     "Agent",
@@ -36,4 +37,5 @@ __all__ = [
     "VpnPermission",
     "AgentHealEvent",
     "WgPeerSnapshot",
+    "CrowdSecSnapshot",
 ]
