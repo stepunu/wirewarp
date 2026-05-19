@@ -105,6 +105,13 @@ export interface LanClient {
   created_at: string
 }
 
+export interface SensitiveServiceTip {
+  key: string
+  label: string
+  severity: 'high' | 'medium'
+  message: string
+}
+
 export interface PortForward {
   id: string
   attachment_id: string
@@ -118,6 +125,7 @@ export interface PortForward {
   description: string | null
   active: boolean
   created_at: string
+  sensitive_service: SensitiveServiceTip | null
 }
 
 export interface ServiceTemplate {

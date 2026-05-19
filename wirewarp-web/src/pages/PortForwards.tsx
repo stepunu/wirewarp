@@ -24,7 +24,7 @@ import {
 } from '../components/ui'
 import { Ic } from '../components/icons'
 import { useToast } from '../components/Toasts'
-import type { LanClient, PortForward, ServiceTemplate, TunnelClient, TunnelClientAttachment, TunnelServer, TunnelServerIP } from '../lib/types'
+import type { LanClient, PortForward, SensitiveServiceTip, ServiceTemplate, TunnelClient, TunnelClientAttachment, TunnelServer, TunnelServerIP } from '../lib/types'
 
 function parsePortRange(s: string): { port: number; portEnd: number | null } {
   const parts = s.trim().split('-')
@@ -53,6 +53,53 @@ function isValidPort(p: number): boolean {
 
 function tokenLabel(t: PortToken): string {
   return t.portEnd !== null ? `${t.port}-${t.portEnd}` : String(t.port)
+}
+
+function SensitiveBadge({ tip }: { tip: SensitiveServiceTip }) {
+  const isHigh = tip.severity === 'high'
+  const bg = isHigh ? 'var(--err-bg)' : 'var(--warn-bg)'
+  const fg = isHigh ? 'var(--err)' : 'var(--warn)'
+  return (
+    <span
+      title={`${tip.label} — ${tip.message}`}
+      style={{
+        marginLeft: 6,
+        padding: '1px 6px',
+        borderRadius: 3,
+        fontSize: 10,
+        fontFamily: 'var(--font-mono)',
+        background: bg,
+        color: fg,
+        cursor: 'help',
+        verticalAlign: 'middle',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {isHigh ? '⚠ ' : '! '}{tip.label}
+    </span>
+  )
+}
+
+function SensitiveTipCard({ tip }: { tip: SensitiveServiceTip }) {
+  const isHigh = tip.severity === 'high'
+  return (
+    <div
+      style={{
+        marginTop: 12,
+        padding: '10px 12px',
+        borderRadius: 4,
+        background: isHigh ? 'var(--err-bg)' : 'var(--warn-bg)',
+        border: `1px solid ${isHigh ? 'var(--err)' : 'var(--warn)'}`,
+        fontSize: 12,
+        lineHeight: 1.5,
+      }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: 4, color: isHigh ? 'var(--err)' : 'var(--warn)' }}>
+        {isHigh ? '⚠' : '!'} Exposing {tip.label} publicly
+      </div>
+      <div style={{ color: 'var(--fg-1)' }}>{tip.message}</div>
+    </div>
+  )
 }
 
 function portStr(pf: PortForward, field: 'public' | 'dest'): string {
@@ -413,6 +460,7 @@ export default function PortForwards() {
                       <span style={{ color: 'var(--fg-3)' }}>{ip?.address || s?.primary_ip || '*'}</span>
                       <span style={{ color: 'var(--fg-3)' }}>:</span>
                       <span style={{ color: 'var(--fg-0)', fontWeight: 500 }}>{portStr(p, 'public')}</span>
+                      {p.sensitive_service && <SensitiveBadge tip={p.sensitive_service} />}
                     </td>
                     <td data-label="" style={{ textAlign: 'center', color: 'var(--fg-3)' }}>
                       <Ic.arrow s={10} />
@@ -1064,6 +1112,7 @@ function EditForwardDialog({ pf, onClose }: { pf: PortForward; onClose: () => vo
             attIndex={attIndex}
             agentName={agentName}
           />
+          {pf.sensitive_service && <SensitiveTipCard tip={pf.sensitive_service} />}
         </div>
         <Field label="Protocol">
           <Select

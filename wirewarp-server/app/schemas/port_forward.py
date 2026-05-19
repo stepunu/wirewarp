@@ -1,7 +1,17 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
+
+from app.services.port_security import classify_forward
+
+
+class SensitiveServiceTipRead(BaseModel):
+    key: str
+    label: str
+    severity: Literal["high", "medium"]
+    message: str
 
 
 class PortForwardCreate(BaseModel):
@@ -31,6 +41,19 @@ class PortForwardRead(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def sensitive_service(self) -> SensitiveServiceTipRead | None:
+        tip = classify_forward(self.protocol, self.public_port, self.public_port_end)
+        if tip is None:
+            return None
+        return SensitiveServiceTipRead(
+            key=tip.key,
+            label=tip.label,
+            severity=tip.severity,
+            message=tip.message,
+        )
 
 
 class PortForwardUpdate(BaseModel):
