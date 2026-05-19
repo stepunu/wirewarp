@@ -24,8 +24,11 @@ const crowdSecPollInterval = 5 * time.Minute
 const crowdSecTopN = 5
 
 // crowdSecCmdTimeout caps each cscli subprocess so a wedged cscli
-// (broken DB, hung backend) can't stall the agent's WS loop.
-const crowdSecCmdTimeout = 15 * time.Second
+// (broken DB, hung backend) can't stall the agent's WS loop. 45s is
+// generous because cscli metrics on a busy LAPI can take 20s+ to
+// assemble; the loop runs every 5 min so even a worst-case run is a
+// small fraction of the cycle.
+const crowdSecCmdTimeout = 45 * time.Second
 
 // StartCrowdSecPoller fires off the per-tunnel-server CrowdSec snapshot
 // loop. No-op on hosts without cscli — the first poll detects absence
@@ -148,29 +151,77 @@ func parseVersionLine(s string) string {
 	return ""
 }
 
-// summariseDecisions parses `cscli decisions list -o json` output —
-// an array of decision objects — and returns (total, topIPs).
-// Top is by frequency of the `value` field (which is the banned IP
-// for ip-scope decisions). cscli sometimes wraps the array; tolerate
-// either shape.
+// summariseDecisions parses `cscli decisions list -o json` output and
+// returns (total, topIPs). Top is by frequency of the `value` field
+// (which is the banned IP for ip-scope decisions).
+//
+// cscli wraps every decision inside an alert envelope:
+//
+//	[
+//	  {"capacity": ..., "decisions": [{"value": "1.2.3.4", "scope": "Ip", ...}], "events": ...},
+//	  ...
+//	]
+//
+// Older / non-default invocations sometimes emit a flat decision array
+// or a `{decisions: [...]}` wrapper. Try all three shapes — first match
+// wins — so a cscli upgrade that flips the format doesn't break us
+// silently.
 func summariseDecisions(raw string) (int, []map[string]any) {
 	type decision struct {
 		Value string `json:"value"`
 		Scope string `json:"scope"`
 	}
-	var list []decision
-	if err := json.Unmarshal([]byte(raw), &list); err != nil {
-		// Some cscli versions wrap the array: { "decisions": [...] }
+	type alertEnvelope struct {
+		Decisions []decision `json:"decisions"`
+	}
+
+	var flat []decision
+
+	// Shape A: array of alert envelopes, each with `decisions[]` nested.
+	// This is the cscli default since at least 1.5.
+	var alerts []alertEnvelope
+	if err := json.Unmarshal([]byte(raw), &alerts); err == nil {
+		anyNested := false
+		for _, a := range alerts {
+			if len(a.Decisions) > 0 {
+				anyNested = true
+				flat = append(flat, a.Decisions...)
+			}
+		}
+		if !anyNested {
+			flat = nil
+		}
+	}
+
+	// Shape B: flat array of decisions (older cscli or `--no-aggregate`).
+	if flat == nil {
+		var direct []decision
+		if err := json.Unmarshal([]byte(raw), &direct); err == nil {
+			for _, d := range direct {
+				if d.Value != "" {
+					flat = direct
+					break
+				}
+			}
+		}
+	}
+
+	// Shape C: `{decisions: [...]}` top-level wrapper.
+	if flat == nil {
 		var wrapped struct {
 			Decisions []decision `json:"decisions"`
 		}
-		if err2 := json.Unmarshal([]byte(raw), &wrapped); err2 != nil {
-			return 0, nil
+		if err := json.Unmarshal([]byte(raw), &wrapped); err == nil {
+			flat = wrapped.Decisions
 		}
-		list = wrapped.Decisions
 	}
+
+	if flat == nil {
+		return 0, nil
+	}
+
 	counts := map[string]int{}
-	for _, d := range list {
+	for _, d := range flat {
 		if d.Value == "" {
 			continue
 		}
@@ -192,8 +243,9 @@ func summariseDecisions(raw string) (int, []map[string]any) {
 	for _, p := range pairs {
 		top = append(top, map[string]any{"ip": p.k, "count": p.v})
 	}
-	return len(list), top
+	return len(flat), top
 }
+
 
 // summariseScenarios extracts the top-N scenario names + bucket-pour
 // counts from `cscli metrics -o json`. The metrics JSON shape changes
