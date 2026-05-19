@@ -211,12 +211,37 @@ func assertDebianFamily() error {
 	return fmt.Errorf("auto-install requires a Debian-family host; got:\n%s", s)
 }
 
+// runShell + runCmd both invoke their target via `systemd-run` so the
+// subprocess escapes the agent's restricted capability set. The agent
+// systemd unit pins CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+// (so wg / iptables work without unconfined root); apt-get, cscli, and
+// the packagecloud installer all need additional caps (DAC_OVERRIDE
+// for /var/lib/apt + /etc writes, SETUID so apt can drop priv to
+// `_apt`). Launching via systemd-run as a fresh transient unit with
+// CapabilityBoundingSet=~ resets the bounding set to the manager's
+// default — i.e. full root.
+//
+// --pipe + --wait stream output back to us and block until the
+// transient unit exits. --collect garbage-collects the unit after.
 func runShell(ctx context.Context, script string) ([]byte, error) {
-	return exec.CommandContext(ctx, "sh", "-c", script).CombinedOutput()
+	args := []string{
+		"--pipe", "--wait", "--quiet", "--collect",
+		"--property=CapabilityBoundingSet=~",
+		"--property=AmbientCapabilities=~",
+		"--", "sh", "-c", script,
+	}
+	return exec.CommandContext(ctx, "systemd-run", args...).CombinedOutput()
 }
 
-func runCmd(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+func runCmd(ctx context.Context, name string, cmdArgs ...string) ([]byte, error) {
+	args := []string{
+		"--pipe", "--wait", "--quiet", "--collect",
+		"--property=CapabilityBoundingSet=~",
+		"--property=AmbientCapabilities=~",
+		"--", name,
+	}
+	args = append(args, cmdArgs...)
+	return exec.CommandContext(ctx, "systemd-run", args...).CombinedOutput()
 }
 
 // tail returns the last n lines of output (trimmed). Keeps the command
