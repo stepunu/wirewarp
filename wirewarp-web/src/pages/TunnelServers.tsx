@@ -182,6 +182,13 @@ function ServerCard({
           <Button
             size="sm"
             variant="ghost"
+            onClick={() => navigate(`/tunnel-servers/${server.id}`)}
+          >
+            details <Ic.arrow />
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
             onClick={() => navigate(`/agents/${server.agent_id}`)}
           >
             open agent <Ic.arrow />

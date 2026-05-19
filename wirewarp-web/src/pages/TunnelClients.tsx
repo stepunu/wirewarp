@@ -148,7 +148,7 @@ export default function TunnelClients() {
               return (
                 <tr
                   key={c.id}
-                  onClick={() => navigate(`/agents/${c.agent_id}`)}
+                  onClick={() => navigate(`/tunnel-clients/${c.id}`)}
                   style={{ cursor: 'pointer' }}
                 >
                   <td data-label=""><StatusDot status={c.status} label={false} /></td>

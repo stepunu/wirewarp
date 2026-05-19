@@ -12,7 +12,9 @@ import Dashboard from './pages/Dashboard'
 import Agents from './pages/Agents'
 import AgentDetail from './pages/AgentDetail'
 import TunnelServers from './pages/TunnelServers'
+import TunnelServerDetail from './pages/TunnelServerDetail'
 import TunnelClients from './pages/TunnelClients'
+import TunnelClientDetail from './pages/TunnelClientDetail'
 import LanClients from './pages/LanClients'
 import PortForwards from './pages/PortForwards'
 import Settings from './pages/Settings'
@@ -133,10 +135,26 @@ export default function App() {
                 }
               />
               <Route
+                path="tunnel-servers/:id"
+                element={
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <TunnelServerDetail />
+                  </RoleGuard>
+                }
+              />
+              <Route
                 path="tunnel-clients"
                 element={
                   <RoleGuard allow={['admin', 'operator', 'viewer']}>
                     <TunnelClients />
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="tunnel-clients/:id"
+                element={
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <TunnelClientDetail />
                   </RoleGuard>
                 }
               />
