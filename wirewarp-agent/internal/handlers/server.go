@@ -57,6 +57,11 @@ func NewServer(cfg *config.Config, cfgPath string) (*ServerHandlers, error) {
 				log.Printf("[server] WARN: masquerade on %s: %v", s.PublicIface, err)
 			}
 		}
+		if s.WGInterface != "" {
+			if err := iptables.EnsureMSSClamp(s.WGInterface); err != nil {
+				log.Printf("[server] WARN: mss clamp on %s: %v", s.WGInterface, err)
+			}
+		}
 	}
 
 	h.wg = wgSrv
@@ -139,6 +144,9 @@ func (h *ServerHandlers) handleWGInit(raw json.RawMessage) (string, error) {
 	}
 	if err := iptables.EnsureMasquerade(p.PublicIface); err != nil {
 		log.Printf("[server] WARN: masquerade on %s: %v", p.PublicIface, err)
+	}
+	if err := iptables.EnsureMSSClamp(p.Interface); err != nil {
+		log.Printf("[server] WARN: mss clamp on %s: %v", p.Interface, err)
 	}
 	if saveErr := iptables.SaveRules(); saveErr != nil {
 		log.Printf("[server] WARN: iptables save failed: %v", saveErr)

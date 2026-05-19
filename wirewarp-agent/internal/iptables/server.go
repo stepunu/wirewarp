@@ -46,6 +46,28 @@ func EnsureMasquerade(iface string) error {
 	return checkOrAppend(args)
 }
 
+// EnsureMSSClamp installs a mangle POSTROUTING TCPMSS --clamp-mss-to-pmtu rule
+// on the given tunnel interface. Mirror of the gateway-side clamp in
+// wireguard.applyMSSClamping — without this on the VPS, the client→server SYN
+// crossing the VPS keeps its mss=1460 untouched, so the LAN service replies
+// with full-sized segments that don't fit inside wg0's 1420 MTU. Path-MTU
+// discovery relies on ICMP frag-needed making it back to the originating
+// client; mobile carriers and strict NATs often filter that ICMP, producing
+// a blackhole where TCP handshakes complete but TLS records stall mid-stream.
+// Clamping at the egress of the VPS's tunnel iface fixes both directions for
+// every inbound DNAT'd flow.
+func EnsureMSSClamp(iface string) error {
+	args := []string{
+		"-t", "mangle", "POSTROUTING",
+		"-o", iface,
+		"-p", "tcp",
+		"--tcp-flags", "SYN,RST", "SYN",
+		"-j", "TCPMSS",
+		"--clamp-mss-to-pmtu",
+	}
+	return checkOrAppend(args)
+}
+
 // snatArgs builds the iptables args for a per-LAN-host SNAT rule.
 // The rule is inserted before the generic MASQUERADE so it wins for
 // traffic originating at this specific source.
