@@ -9,6 +9,7 @@ from sqlalchemy import delete, select, func
 from app.models.agent import Agent
 from app.models.command_log import CommandLog
 from app.models.gateway_lan_client import GatewayLanClient
+from app.models.heal_event import AgentHealEvent
 from app.models.metric import Metric
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
@@ -19,6 +20,7 @@ from app.models.vpn_profile import VpnProfile
 from app.realtime.events import (
     emit_agent_changed,
     emit_audit_changed,
+    emit_heal_event_changed,
     emit_lan_client_changed,
     emit_tunnel_client_changed,
     emit_tunnel_server_changed,
@@ -360,6 +362,42 @@ async def handle_metrics(agent_id: str, msg: dict, db: AsyncSession) -> None:
     await db.commit()
 
 
+async def handle_heal_event(agent_id: str, msg: dict, db: AsyncSession) -> None:
+    """Persist one heal event emitted by an agent.
+
+    The agent's 60s healer fires this whenever it re-installs missing
+    routing state. We only store what the agent reports — we don't
+    second-guess `healed` items because the catalogue of names is
+    defined entirely in the agent's iptables / wireguard heal layer.
+    """
+    mode = msg.get("mode")
+    if mode not in ("server", "client"):
+        return
+    healed_raw = msg.get("healed")
+    if not isinstance(healed_raw, list):
+        return
+    healed = [str(x) for x in healed_raw if isinstance(x, str)]
+    interface = msg.get("interface")
+    if interface is not None and not isinstance(interface, str):
+        interface = None
+
+    event = AgentHealEvent(
+        agent_id=agent_id,
+        mode=mode,
+        interface=interface,
+        healed=healed,
+    )
+    db.add(event)
+
+    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    if agent:
+        agent.last_seen = datetime.now(timezone.utc)
+
+    await db.commit()
+    emit_heal_event_changed()
+
+
 async def dispatch(agent_id: str, msg: dict, db: AsyncSession) -> None:
     msg_type = msg.get("type")
     if msg_type == "heartbeat":
@@ -368,4 +406,6 @@ async def dispatch(agent_id: str, msg: dict, db: AsyncSession) -> None:
         await handle_command_result(agent_id, msg, db)
     elif msg_type == "metrics":
         await handle_metrics(agent_id, msg, db)
+    elif msg_type == "heal_event":
+        await handle_heal_event(agent_id, msg, db)
     # Unknown message types are silently ignored

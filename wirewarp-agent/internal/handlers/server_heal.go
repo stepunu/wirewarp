@@ -43,8 +43,31 @@ func (h *ServerHandlers) healOnce() {
 	}
 	if len(healed) > 0 {
 		log.Printf("[heal] server network re-installed: %v", healed)
+		h.emitHealEvent("server", h.cfg.Server.WGInterface, healed)
 		if err := iptables.SaveRules(); err != nil {
 			log.Printf("[heal] WARN: persist iptables failed: %v", err)
 		}
 	}
+}
+
+// SetEmit installs the upstream telemetry channel. See ClientHandlers.SetEmit.
+func (h *ServerHandlers) SetEmit(fn EmitFn) {
+	h.emit.Store(&fn)
+}
+
+func (h *ServerHandlers) emitHealEvent(mode, iface string, healed []string) {
+	p := h.emit.Load()
+	if p == nil {
+		return
+	}
+	fn := *p
+	if fn == nil {
+		return
+	}
+	_ = fn("heal_event", map[string]any{
+		"mode":      mode,
+		"interface": iface,
+		"healed":    healed,
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	})
 }

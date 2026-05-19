@@ -22,11 +22,14 @@ type EventHandler = (payload: Record<string, unknown>) => void
 
 const eventToKeys: Record<string, string[][]> = {
   'agent.changed': [['agents']],
-  'tunnel_server.changed': [['tunnel-servers'], ['tunnel-server-ips']],
-  'tunnel_client.changed': [['tunnel-clients'], ['tunnel-client-attachments']],
+  'tunnel_server.changed': [['tunnel-servers'], ['tunnel-server-ips'], ['tunnel-server-summary']],
+  'tunnel_client.changed': [['tunnel-clients'], ['tunnel-client-attachments'], ['tunnel-client-summary']],
   'port_forward.changed': [['port-forwards']],
   'lan_client.changed': [['lan-clients']],
   'audit.changed': [['audit']],
+  'heal_event.changed': [['heal-events'], ['tunnel-server-summary'], ['tunnel-client-summary']],
+  'wg_peer.changed': [['wg-peers'], ['tunnel-server-summary'], ['tunnel-client-summary']],
+  'crowdsec.changed': [['crowdsec']],
 }
 
 interface MountOpts {

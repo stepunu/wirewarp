@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/wirewarp/agent/internal/config"
 	"github.com/wirewarp/agent/internal/executor"
@@ -37,6 +38,10 @@ type ClientHandlers struct {
 	cfgPath string
 	cfg     *config.Config
 	wgs     map[string]*wireguard.Client
+	// emit is the upstream telemetry channel set by SetEmit. The healer
+	// goroutine (see client_heal.go) loads this atomically to push
+	// heal_event frames to the control server.
+	emit atomic.Pointer[EmitFn]
 }
 
 // NewClient initialises the WireGuard client(s) from saved config and

@@ -99,6 +99,8 @@ export const agents = {
     request<{ agent_id: string; jwt: string }>(`/agents/${id}/issue-jwt`, { method: 'POST' }),
   update: (id: string) =>
     request<{ command_id: string }>(`/agents/${id}/update`, { method: 'POST' }),
+  healEvents: (id: string, limit = 50) =>
+    request<import('./types').HealEvent[]>(`/agents/${id}/heal-events?limit=${limit}`),
 }
 
 // Tunnel Servers

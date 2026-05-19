@@ -35,3 +35,21 @@ def emit_lan_client_changed() -> None:
 
 def emit_audit_changed() -> None:
     bus.publish_nowait("audit.changed")
+
+
+def emit_heal_event_changed() -> None:
+    bus.publish_nowait("heal_event.changed")
+
+
+def emit_wg_peer_changed() -> None:
+    """Cheaper fan-out for wg_peer_snapshot upserts.
+
+    The peer table is interface-scoped (no per-server / per-client
+    affinity) so we use one event for the whole table. Both the
+    tunnel-server detail page and tunnel-client detail page subscribe.
+    """
+    bus.publish_nowait("wg_peer.changed")
+
+
+def emit_crowdsec_changed() -> None:
+    bus.publish_nowait("crowdsec.changed")

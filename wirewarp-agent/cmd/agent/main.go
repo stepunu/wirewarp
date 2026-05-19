@@ -85,6 +85,7 @@ func main() {
 			log.Fatalf("Failed to initialise server handlers: %v", err)
 		}
 		srv.Register(client.Exec())
+		srv.SetEmit(client.Emit)
 		srv.StartHealer(ctx)
 		shutdownFn = srv.Shutdown
 	case "client":
@@ -93,6 +94,7 @@ func main() {
 			log.Fatalf("Failed to initialise client handlers: %v", err)
 		}
 		cli.Register(client.Exec())
+		cli.SetEmit(client.Emit)
 		cli.StartHealer(ctx)
 		shutdownFn = cli.Shutdown
 	default:

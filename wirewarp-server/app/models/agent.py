@@ -25,3 +25,4 @@ class Agent(Base):
     tunnel_client: Mapped["TunnelClient"] = relationship("TunnelClient", back_populates="agent", uselist=False, passive_deletes=True)  # noqa: F821
     command_logs: Mapped[list["CommandLog"]] = relationship("CommandLog", back_populates="agent", passive_deletes=True)  # noqa: F821
     metrics: Mapped[list["Metric"]] = relationship("Metric", back_populates="agent", passive_deletes=True)  # noqa: F821
+    heal_events: Mapped[list["AgentHealEvent"]] = relationship("AgentHealEvent", back_populates="agent", passive_deletes=True)  # noqa: F821

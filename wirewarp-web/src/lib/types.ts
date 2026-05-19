@@ -105,6 +105,15 @@ export interface LanClient {
   created_at: string
 }
 
+export interface HealEvent {
+  id: number
+  agent_id: string
+  mode: 'server' | 'client'
+  interface: string | null
+  healed: string[]
+  occurred_at: string
+}
+
 export interface SensitiveServiceTip {
   key: string
   label: string

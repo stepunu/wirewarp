@@ -14,6 +14,7 @@ from app.models.oauth_state import OAuthState
 from app.models.vpn_endpoint import VpnEndpoint
 from app.models.vpn_profile import VpnProfile
 from app.models.vpn_permission import VpnPermission
+from app.models.heal_event import AgentHealEvent
 
 __all__ = [
     "Agent",
@@ -32,4 +33,5 @@ __all__ = [
     "VpnEndpoint",
     "VpnProfile",
     "VpnPermission",
+    "AgentHealEvent",
 ]

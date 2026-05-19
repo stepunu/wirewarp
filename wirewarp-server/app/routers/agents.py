@@ -8,9 +8,11 @@ from sqlalchemy import select
 
 from app.database import get_db
 from app.models.agent import Agent
+from app.models.heal_event import AgentHealEvent
 from app.models.user import User
 from app.models.registration_token import RegistrationToken
 from app.schemas.agent import AgentRead, AgentJWTRead
+from app.schemas.heal_event import HealEventRead
 from app.schemas.registration_token import TokenCreate, TokenIssueResponse
 from app.auth import create_agent_token, log_auth_event, require_role
 from app.models.system_settings import SystemSettings
@@ -46,6 +48,33 @@ async def get_agent(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     return agent
+
+
+@router.get("/{agent_id}/heal-events", response_model=list[HealEventRead])
+async def list_agent_heal_events(
+    agent_id: str,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("admin", "operator", "viewer")),
+):
+    """List the agent's most recent heal events, newest first.
+
+    The healer runs every 60s and only emits when it actually re-installs
+    something, so the natural cardinality on a healthy lab is near-zero.
+    Cap the page size at 100 regardless of caller request so a misbehaving
+    client can't drag the dashboard down.
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 100:
+        limit = 100
+    result = await db.execute(
+        select(AgentHealEvent)
+        .where(AgentHealEvent.agent_id == agent_id)
+        .order_by(AgentHealEvent.occurred_at.desc())
+        .limit(limit)
+    )
+    return result.scalars().all()
 
 
 @router.delete("/{agent_id}", status_code=204)

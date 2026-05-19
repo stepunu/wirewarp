@@ -16,6 +16,12 @@ import (
 // cost anything noticeable on the host.
 const healInterval = 60 * time.Second
 
+// EmitFn is the signature of the agent's upstream telemetry channel.
+// Healers and pollers call it to push a structured event to the control
+// server. Returning nil silently when there is no live connection is the
+// expected behaviour — see `*websocket.Client.Emit`.
+type EmitFn func(eventType string, payload map[string]any) error
+
 // StartHealer launches the background goroutine that verifies per-
 // attachment routing state on a cadence and re-installs anything that
 // drifted. Returns immediately. The goroutine exits when ctx is done.
@@ -58,6 +64,7 @@ func (h *ClientHandlers) healOnce() {
 		if len(healed) > 0 {
 			anyHealed = true
 			log.Printf("[heal] attachment %s re-installed: %v", att.WGInterface, healed)
+			h.emitHealEvent("client", att.WGInterface, healed)
 		}
 	}
 	if anyHealed {
@@ -66,6 +73,32 @@ func (h *ClientHandlers) healOnce() {
 		}
 	}
 }
+
+// SetEmit installs the upstream telemetry channel. Safe to call once at
+// agent startup; the healer's goroutine reads the pointer atomically.
+func (h *ClientHandlers) SetEmit(fn EmitFn) {
+	h.emit.Store(&fn)
+}
+
+// emitHealEvent pushes a `heal_event` frame to the control server. Safe
+// to call when no emit fn has been installed (no-op).
+func (h *ClientHandlers) emitHealEvent(mode, iface string, healed []string) {
+	p := h.emit.Load()
+	if p == nil {
+		return
+	}
+	fn := *p
+	if fn == nil {
+		return
+	}
+	_ = fn("heal_event", map[string]any{
+		"mode":      mode,
+		"interface": iface,
+		"healed":    healed,
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
 
 // snapshotAttachments returns a shallow copy of the attachment slice for
 // the healer to iterate over safely while wg_attach / wg_detach handlers

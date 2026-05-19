@@ -12,7 +12,7 @@ import { Badge, Button, Dialog, KV, StatusDot, Tabs, relTime } from '../componen
 import { Ic } from '../components/icons'
 import { useToast } from '../components/Toasts'
 
-type Tab = 'overview' | 'config' | 'audit'
+type Tab = 'overview' | 'config' | 'audit' | 'heal'
 
 export default function AgentDetail() {
   const { id } = useParams<{ id: string }>()
@@ -46,6 +46,19 @@ export default function AgentDetail() {
     queryKey: ['audit', id],
     queryFn: () => auditApi.list({ agent_id: id, limit: 100 }),
     enabled: tab === 'audit' && !!id,
+  })
+
+  // Heal events query — also fetched eagerly so the tab label can show a
+  // warn badge when recent drift exists without waiting for the user to
+  // open the tab.
+  const healQ = useQuery({
+    queryKey: ['heal-events', id],
+    queryFn: () => agentsApi.healEvents(id!, 50),
+    enabled: !!id,
+  })
+  const healRecent24h = (healQ.data ?? []).filter((e) => {
+    const t = new Date(e.occurred_at).getTime()
+    return Date.now() - t < 24 * 3600 * 1000
   })
 
   const deleteAgent = useMutation({
@@ -128,6 +141,17 @@ export default function AgentDetail() {
           { value: 'overview', label: 'Overview' },
           { value: 'config', label: 'Config' },
           { value: 'audit', label: 'Audit log' },
+          {
+            value: 'heal',
+            label: (
+              <>
+                Heal events
+                {healRecent24h.length > 0 && (
+                  <Badge tone="warn">{healRecent24h.length}</Badge>
+                )}
+              </>
+            ),
+          },
         ]}
       />
 
@@ -247,6 +271,54 @@ status: ${tc.status}`
                 </span>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {tab === 'heal' && (
+        <div className="card">
+          <div className="card-head">
+            <div className="title">Auto-healed routing state</div>
+            <span className="scheme">last 50 · newest first</span>
+          </div>
+          <div style={{ padding: 14, fontSize: 12, color: 'var(--fg-2)' }}>
+            Each row is one cycle of the agent's 60s healer re-installing rules
+            that drifted out from under it (manual <span className="mono">ip rule del</span>,
+            network restart, etc.). Silent runs are <em>not</em> recorded.
+          </div>
+          <div className="tbl-wrap" style={{ borderTop: '1px solid var(--border-soft)' }}>
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th style={{ width: 130 }}>When</th>
+                  <th style={{ width: 80 }}>Mode</th>
+                  <th style={{ width: 100 }}>Interface</th>
+                  <th>Healed items</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(healQ.data ?? []).length === 0 && (
+                  <tr>
+                    <td colSpan={4}>
+                      <div className="tbl-empty">
+                        <h3>{healQ.isLoading ? 'loading…' : 'No drift recorded'}</h3>
+                        <p>Routing state for this agent has been stable.</p>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                {(healQ.data ?? []).map((e) => (
+                  <tr key={e.id}>
+                    <td className="mono" style={{ color: 'var(--fg-2)' }}>{relTime(e.occurred_at)}</td>
+                    <td>
+                      <Badge tone={e.mode === 'server' ? 'info' : 'neutral'}>{e.mode}</Badge>
+                    </td>
+                    <td className="mono">{e.interface || '—'}</td>
+                    <td className="mono" style={{ color: 'var(--fg-1)' }}>{e.healed.join(', ')}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}

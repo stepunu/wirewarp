@@ -65,6 +65,27 @@ func (c *Client) Exec() *executor.Executor {
 	return c.exec
 }
 
+// Emit pushes an unsolicited frame to the control server. Returns nil
+// silently when there is no live connection — callers (the healer, the
+// CrowdSec poller, etc.) treat emission as best-effort. The server
+// already reconciles authoritative state on reconnect, so dropping a
+// telemetry frame here is harmless.
+//
+// The frame is `{"type": <eventType>, ...payload}` — the eventType
+// overwrites any "type" key in payload, so callers cannot accidentally
+// route their event onto a different dispatch branch.
+func (c *Client) Emit(eventType string, payload map[string]any) error {
+	if c.sendFn == nil {
+		return nil
+	}
+	frame := make(map[string]any, len(payload)+1)
+	for k, v := range payload {
+		frame[k] = v
+	}
+	frame["type"] = eventType
+	return c.sendFn(frame)
+}
+
 // Run connects and reconnects forever with exponential backoff.
 func (c *Client) Run(ctx context.Context) {
 	backoff := initialBackoff

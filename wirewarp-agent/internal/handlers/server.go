@@ -7,6 +7,7 @@ import (
 	"log"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 
 	"github.com/wirewarp/agent/internal/config"
 	"github.com/wirewarp/agent/internal/executor"
@@ -20,6 +21,9 @@ type ServerHandlers struct {
 	cfgPath string
 	cfg     *config.Config
 	wg      *wireguard.Server
+	// emit is the upstream telemetry channel set by SetEmit. See
+	// ClientHandlers.emit for the same pattern.
+	emit atomic.Pointer[EmitFn]
 }
 
 // NewServer initialises the WireGuard server from config and returns a handler set.
