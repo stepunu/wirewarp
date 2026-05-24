@@ -1,11 +1,12 @@
 """Pydantic schemas for VPN endpoints, profiles, permissions."""
 from __future__ import annotations
 
+import ipaddress
 import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 Protocol = Literal["tcp", "udp", "icmp", "any"]
@@ -34,6 +35,31 @@ class VpnPermissionInput(BaseModel):
     protocol: Protocol = "any"
     port_range_start: int | None = Field(default=None, ge=1, le=65535)
     port_range_end: int | None = Field(default=None, ge=1, le=65535)
+
+    @field_validator("destination")
+    @classmethod
+    def _one_ipv4_host_or_cidr(cls, v: str) -> str:
+        # Each row holds exactly one CIDR. Comma/whitespace-joined values
+        # were silently stored as a single destination string, which the
+        # agent's IPv4CIDR validator rejects — the peer never reaches
+        # wg-vpn0. Reject at the API boundary so server and agent agree
+        # on what's acceptable. The UI splits multi-host input client-side
+        # before submit; this is the safety net.
+        s = v.strip() if isinstance(v, str) else v
+        if not isinstance(s, str) or not s:
+            raise ValueError("destination must be a non-empty string")
+        if any(ch in s for ch in ",; \t"):
+            raise ValueError(
+                "Each permission row holds one CIDR; "
+                "submit multiple rows for multiple destinations.",
+            )
+        try:
+            ipaddress.IPv4Network(s, strict=False)
+        except (ipaddress.AddressValueError, ipaddress.NetmaskValueError, ValueError) as exc:
+            raise ValueError(
+                f"destination must be an IPv4 host or CIDR (got {s!r})",
+            ) from exc
+        return s
 
 
 class VpnUserPermissionsRead(BaseModel):

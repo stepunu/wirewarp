@@ -82,7 +82,7 @@ For tasks.md:
 ### Control server (Python)
 - Python 3.11+, FastAPI, async throughout.
 - SQLAlchemy 2.0 with async engine (asyncpg driver).
-- Alembic for migrations — never modify schema without a migration. Current head is `0018` (VPN permissions per-(user, endpoint) instead of per-profile, so admins can pre-provision access before a user creates a device profile).
+- Alembic for migrations — never modify schema without a migration. Current head is `0024` (data fix: split comma-joined `vpn_permissions.destination` rows; the API now rejects joined values at the boundary, see `app/schemas/vpn.py::VpnPermissionInput`).
 - Pydantic v2 for all request/response schemas.
 - JWT (python-jose); passwords bcrypt-hashed.
 - FastAPI native WebSockets at `/ws/agent` (no socket.io, no

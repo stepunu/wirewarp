@@ -95,8 +95,16 @@ function UserPermissionsEditor({
   }, [row.user_id, row.permissions])
 
   const saveM = useMutation({
-    mutationFn: () =>
-      vpnEndpointsApi.setUserPermissions(endpoint.id, row.user_id, rules),
+    mutationFn: () => {
+      const expanded = expandDestinations(rules)
+      // Reflect the expansion back in the editor so admins see the rows
+      // they're about to submit (and the server response after save
+      // matches the visible state).
+      if (expanded.length !== rules.length) {
+        setRules(expanded)
+      }
+      return vpnEndpointsApi.setUserPermissions(endpoint.id, row.user_id, expanded)
+    },
     onSuccess: () => {
       setSaved('ok')
       setDirty(false)
@@ -208,7 +216,10 @@ function RuleRow({
         alignItems: 'end',
       }}
     >
-      <Field label="Destination" hint="IP or CIDR (e.g. 192.168.1.50 or 192.168.2.0/24).">
+      <Field
+        label="Destination"
+        hint="IP or CIDR (e.g. 192.168.1.50 or 192.168.2.0/24). Multiple comma- or space-separated entries are split into separate rules on save."
+      >
         <Input
           mono
           value={rule.destination}
@@ -280,4 +291,26 @@ function fromExisting(perms: VpnPermission[]): VpnPermissionInput[] {
     port_range_start: p.port_range_start,
     port_range_end: p.port_range_end,
   }))
+}
+
+/** Expand any rule whose destination field contains multiple comma- or
+ * whitespace-separated entries into one rule per entry. Each row in the
+ * `vpn_permissions` table must hold a single CIDR — the agent's
+ * validator rejects joined strings, breaking peer setup. */
+function expandDestinations(rules: VpnPermissionInput[]): VpnPermissionInput[] {
+  const out: VpnPermissionInput[] = []
+  for (const r of rules) {
+    const parts = (r.destination ?? '')
+      .split(/[\s,;]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (parts.length <= 1) {
+      out.push({ ...r, destination: parts[0] ?? '' })
+      continue
+    }
+    for (const p of parts) {
+      out.push({ ...r, destination: p })
+    }
+  }
+  return out
 }

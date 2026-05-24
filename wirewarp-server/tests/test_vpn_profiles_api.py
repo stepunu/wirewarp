@@ -246,6 +246,78 @@ async def test_self_serve_allowed_after_permissions_provisioned(client, db, fact
 
 
 @pytest.mark.asyncio
+async def test_permissions_reject_joined_destination(client, db, factories):
+    """The agent's IPv4CIDR validator can't parse comma-joined strings.
+    The API must reject them at the boundary so the bad row never lands
+    in `vpn_permissions` and the gateway never sees a malformed
+    `vpn_peer_add`."""
+    endpoint_id = await _bootstrap_endpoint(client, db, factories)
+    user = await _seed_vpn_user(db)
+
+    resp = await client.put(
+        f"/api/vpn-endpoints/{endpoint_id}/users/{user.id}/permissions",
+        json={
+            "permissions": [
+                {
+                    "destination": "192.168.20.5/32,192.168.20.90/32",
+                    "protocol": "any",
+                }
+            ]
+        },
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert "multiple rows" in resp.text or "one CIDR" in resp.text, body
+
+
+@pytest.mark.asyncio
+async def test_permissions_reject_malformed_cidr(client, db, factories):
+    endpoint_id = await _bootstrap_endpoint(client, db, factories)
+    user = await _seed_vpn_user(db)
+
+    resp = await client.put(
+        f"/api/vpn-endpoints/{endpoint_id}/users/{user.id}/permissions",
+        json={
+            "permissions": [
+                {"destination": "not-an-ip", "protocol": "any"},
+            ]
+        },
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_permissions_replace_four_entries_creates_four_rows(client, db, factories):
+    """The fix for the joined-destination bug requires the UI to split
+    a multi-host paste into N entries. Verify the server happily writes
+    N rows when given N entries."""
+    endpoint_id = await _bootstrap_endpoint(client, db, factories)
+    user = await _seed_vpn_user(db)
+
+    payload = {
+        "permissions": [
+            {"destination": "192.168.20.5/32", "protocol": "any"},
+            {"destination": "192.168.20.90/32", "protocol": "any"},
+            {"destination": "192.168.20.111/32", "protocol": "any"},
+            {"destination": "192.168.20.115/32", "protocol": "any"},
+        ]
+    }
+    resp = await client.put(
+        f"/api/vpn-endpoints/{endpoint_id}/users/{user.id}/permissions",
+        json=payload,
+    )
+    assert resp.status_code == 200, resp.text
+    perms = resp.json()
+    assert len(perms) == 4
+    assert {p["destination"] for p in perms} == {
+        "192.168.20.5/32",
+        "192.168.20.90/32",
+        "192.168.20.111/32",
+        "192.168.20.115/32",
+    }
+
+
+@pytest.mark.asyncio
 async def test_endpoint_permissions_sheet_payload(client, db, factories):
     """Sheet GET returns every vpn_enabled user with their permission
     set + profile count, including users without any permissions yet."""
