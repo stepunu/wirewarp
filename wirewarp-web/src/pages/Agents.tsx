@@ -15,6 +15,7 @@ import {
 } from '../components/ui'
 import { Ic } from '../components/icons'
 import { useToast } from '../components/Toasts'
+import { useRole } from '../hooks/useRole'
 
 const INSTALL_SCRIPT =
   'https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agent/scripts/install.sh'
@@ -23,12 +24,14 @@ export default function Agents() {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const push = useToast()
+  const { canMutate } = useRole()
   const [params, setParams] = useSearchParams()
   const [filter, setFilter] = useState('')
   const [type, setType] = useState('all')
   const [status, setStatus] = useState('all')
   const [showToken, setShowToken] = useState(params.get('new') === '1')
   const [focusIdx, setFocusIdx] = useState(0)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
   const filterRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -92,6 +95,58 @@ export default function Agents() {
     onError: (e) => push(e instanceof Error ? e.message : 'delete failed', 'err', 'agent://'),
   })
 
+  // Bulk update: dispatch agent_update to each selected agent. Each call is
+  // independent (Promise.allSettled) so one offline agent (503) doesn't abort
+  // the rest — we summarise how many were reached vs skipped.
+  const bulkUpdate = useMutation({
+    mutationFn: async (ids: string[]) => {
+      const results = await Promise.allSettled(ids.map((id) => agentsApi.update(id)))
+      const ok = results.filter((r) => r.status === 'fulfilled').length
+      return { ok, failed: results.length - ok }
+    },
+    onSuccess: ({ ok, failed }) => {
+      const msg =
+        `update dispatched to ${ok} agent${ok === 1 ? '' : 's'}` +
+        (failed ? ` · ${failed} offline/skipped` : '')
+      push(msg, failed ? 'info' : 'ok', 'agent://')
+      qc.invalidateQueries({ queryKey: ['audit'] })
+      setSelected(new Set())
+    },
+    onError: (e) => push(e instanceof Error ? e.message : 'update failed', 'err', 'agent://'),
+  })
+
+  // Selection helpers. Select-all targets the currently *filtered* rows so an
+  // operator can e.g. filter status=connected, then select-all → update all.
+  const allFilteredSelected = filtered.length > 0 && filtered.every((a) => selected.has(a.id))
+  const someFilteredSelected = filtered.some((a) => selected.has(a.id))
+  const toggleOne = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  const toggleAll = () =>
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (allFilteredSelected) filtered.forEach((a) => next.delete(a.id))
+      else filtered.forEach((a) => next.add(a.id))
+      return next
+    })
+  const runBulkUpdate = () => {
+    const ids = [...selected]
+    if (!ids.length) return
+    if (
+      confirm(
+        `Update ${ids.length} agent${ids.length === 1 ? '' : 's'}?\n\n` +
+          'Each downloads the latest binary from main and restarts via systemd.\n' +
+          'Offline agents are skipped.',
+      )
+    ) {
+      bulkUpdate.mutate(ids)
+    }
+  }
+
   return (
     <div className="page">
       <div className="page-head">
@@ -144,10 +199,55 @@ export default function Agents() {
         }
       />
 
+      {canMutate && selected.size > 0 && (
+        <div
+          className="row"
+          style={{
+            gap: 12,
+            alignItems: 'center',
+            margin: '10px 0',
+            padding: '8px 12px',
+            background: 'var(--accent-bg)',
+            border: '1px solid var(--accent)',
+            borderRadius: 'var(--r-2)',
+          }}
+        >
+          <span className="mono" style={{ fontSize: 12, color: 'var(--accent)' }}>
+            {selected.size} selected
+          </span>
+          <Button
+            size="sm"
+            variant="primary"
+            leading={<Ic.download />}
+            onClick={runBulkUpdate}
+            disabled={bulkUpdate.isPending}
+          >
+            {bulkUpdate.isPending ? 'dispatching…' : `Update ${selected.size} selected`}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
+            Clear
+          </Button>
+        </div>
+      )}
+
       <div className="tbl-wrap">
         <table className="tbl">
           <thead>
             <tr>
+              {canMutate && (
+                <th style={{ width: 32 }}>
+                  <input
+                    type="checkbox"
+                    aria-label="select all"
+                    checked={allFilteredSelected}
+                    ref={(el) => {
+                      if (el) el.indeterminate = someFilteredSelected && !allFilteredSelected
+                    }}
+                    onChange={toggleAll}
+                    style={{ accentColor: 'var(--accent)', cursor: 'pointer' }}
+                  />
+                </th>
+              )}
               <th style={{ width: 28 }}></th>
               <th>Name</th>
               <th>Type</th>
@@ -169,6 +269,17 @@ export default function Agents() {
                 onClick={() => navigate(`/agents/${a.id}`)}
                 style={{ cursor: 'pointer' }}
               >
+                {canMutate && (
+                  <td data-label="" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      aria-label={`select ${a.name}`}
+                      checked={selected.has(a.id)}
+                      onChange={() => toggleOne(a.id)}
+                      style={{ accentColor: 'var(--accent)', cursor: 'pointer' }}
+                    />
+                  </td>
+                )}
                 <td data-label=""><StatusDot status={a.status} label={false} /></td>
                 <td data-label="name"><span className="tbl-link mono">{a.name}</span></td>
                 <td data-label="type">
