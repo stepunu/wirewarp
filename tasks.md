@@ -201,3 +201,50 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
 ### 11.3 Go agent unit tests
 - [ ] Unit tests for config, executor, handlers
 - [ ] Mock wireguard/iptables for testability
+
+---
+
+## Phase 12: Security Edge Console
+
+Self-hosted, Cloudflare-like security edge for the HTTP(S) services
+WireWarp exposes. Design:
+[`docs/superpowers/specs/2026-05-29-security-edge-console-design.md`](docs/superpowers/specs/2026-05-29-security-edge-console-design.md).
+Engines: Traefik (managed systemd binary) + CrowdSec AppSec (Coraza +
+OWASP CRS) via `crowdsec-bouncer-traefik-plugin`. UI inspired by
+SafeLine; config model by BunkerWeb. Each phase ends with: migration
+applied, tests green, `/rebuild`, manual gate verified, commit.
+
+### 12.0 CrowdSec reliability fix
+- [x] Split `installed` vs `running`; PATH-independent cscli/systemctl detection; surface service errors (commit `212eb1b`)
+
+### 12.1 Security Overview + charting layer
+- [ ] `wg_traffic_samples` append-only table sampled from `wg_peer_snapshots` + retention/downsampling
+- [ ] Aggregate endpoints (per-server + global) over CrowdSec snapshots + traffic samples
+- [ ] `/security` Overview page; add uPlot; KPI tiles + access/block time-series + top attackers; Security sidebar section
+- [ ] Gate: Overview renders real aggregates with a working time-range toggle
+
+### 12.2 Events / Reports
+- [ ] Normalize CrowdSec decisions/alerts into a filterable feed + drill-down endpoint
+- [ ] `/security/events` table → request drill-down (payload, matched rule, attack type, action, attacker IP + geo)
+- [ ] Gate: a triggered detection appears with full drill-down
+
+### 12.3 Traefik edge + Sites
+- [ ] Agent: `traefik_install` + `traefik_sync_config` commands; file-provider config under `/etc/traefik/dynamic/`; offline-resilient
+- [ ] `port_forwards.service_kind` (http|raw) + `domain`; new `edge_route_config` table
+- [ ] HTTP-service CRUD → Traefik routers (Host rule → upstream over tunnel); raw stays DNAT
+- [ ] `/security/sites` page with run-mode + feature-toggle chips
+- [ ] Gate: an HTTP service is reachable through Traefik+TLS; raw forward still works; Traefik survives agent restart from disk
+
+### 12.4 WAF (CrowdSec AppSec via Traefik plugin)
+- [ ] Agent: AppSec collections (`appsec-virtual-patching`, appsec-config `crowdsecurity/crs`); `cscli bouncers add`; render bouncer+AppSec into Traefik config
+- [ ] Per-route WAF mode (off/observe/block) on `edge_route_config` + Sites run-mode
+- [ ] Gate: simulated SQLi/XSS blocked (block) or logged (observe) → appears in Events
+
+### 12.5 Protections (edge rules)
+- [ ] Per-route middlewares + CrowdSec config: rate-limit, antibot (captcha), auth, ACL (IPAllowList + CrowdSec blacklist/whitelist), geo-block, dnsbl
+- [ ] `/security/protections` editor; presets via `service_templates`
+- [ ] Gate: each toggle visibly takes effect on a test request
+
+### 12.6 Bans + Certs + polish + alerts
+- [ ] `/security/bans` (CrowdSec decisions; manual add/remove); `/security/certs` (Traefik Let's Encrypt status); alert hooks
+- [ ] Gate: manual ban blocks an IP; cert status shown; threshold alert fires
