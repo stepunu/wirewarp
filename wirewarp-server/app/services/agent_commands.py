@@ -28,6 +28,9 @@ VALID_COMMAND_TYPES = {
     "vpn_peer_update_rules",
     "crowdsec_install",
     "crowdsec_sync_whitelist",
+    "traefik_install",
+    "traefik_sync_config",
+    "crowdsec_appsec_enable",
 }
 
 

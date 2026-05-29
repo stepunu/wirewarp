@@ -131,6 +131,13 @@ export const tunnelServers = {
       method: 'POST',
       body: JSON.stringify({ tunnel_network }),
     }),
+  traefik: (id: string) =>
+    request<import('./types').TraefikStatus>(`/tunnel-servers/${id}/traefik`),
+  installTraefik: (id: string) =>
+    request<{ command_id: string; sent: boolean }>(
+      `/tunnel-servers/${id}/traefik/install`,
+      { method: 'POST' },
+    ),
 }
 
 // Tunnel Server IPs
@@ -435,6 +442,45 @@ export const vpnProfiles = {
     }),
   del: (id: string) =>
     request<void>(`/vpn-profiles/${id}`, { method: 'DELETE' }),
+}
+
+// Security Edge Console
+export const security = {
+  overview: (range: '24h' | '7d' | '30d' = '24h') =>
+    request<import('./types').SecurityOverview>(`/security/overview?range=${range}`),
+  events: (params: { limit?: number; agent_id?: string; source?: string } = {}) => {
+    const q = new URLSearchParams()
+    if (params.limit != null) q.set('limit', String(params.limit))
+    if (params.agent_id) q.set('agent_id', params.agent_id)
+    if (params.source) q.set('source', params.source)
+    const qs = q.toString()
+    return request<import('./types').SecurityEvent[]>(`/security/events${qs ? `?${qs}` : ''}`)
+  },
+  sites: () => request<import('./types').Site[]>('/security/sites'),
+  createSite: (data: import('./types').SiteCreate) =>
+    request<import('./types').Site>('/security/sites', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateSite: (id: string, data: import('./types').SiteUpdate) =>
+    request<import('./types').Site>(`/security/sites/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  deleteSite: (id: string) =>
+    request<void>(`/security/sites/${id}`, { method: 'DELETE' }),
+  bans: (params: { server_id?: string } = {}) => {
+    const q = new URLSearchParams()
+    if (params.server_id) q.set('server_id', params.server_id)
+    const qs = q.toString()
+    return request<import('./types').BanEntry[]>(`/security/bans${qs ? `?${qs}` : ''}`)
+  },
+  certs: (params: { server_id?: string } = {}) => {
+    const q = new URLSearchParams()
+    if (params.server_id) q.set('server_id', params.server_id)
+    const qs = q.toString()
+    return request<import('./types').CertEntry[]>(`/security/certs${qs ? `?${qs}` : ''}`)
+  },
 }
 
 // Audit log

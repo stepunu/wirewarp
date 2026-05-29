@@ -333,3 +333,151 @@ export interface AuditEntry {
   details_json: Record<string, unknown> | null
   executed_at: string
 }
+
+// ──────────────────────────────────────────────
+// Security Edge Console (Phase 12)
+// ──────────────────────────────────────────────
+
+export type WafMode = 'off' | 'observe' | 'block'
+export type AuthMode = 'none' | 'basic' | 'forward'
+export type TlsSource = 'letsencrypt' | 'manual' | 'self_signed'
+export type ServiceKind = 'raw' | 'http'
+export type SecurityEventSource = 'crowdsec' | 'appsec' | 'traefik'
+
+export interface EdgeRouteConfig {
+  id: string
+  port_forward_id: string
+  waf_mode: WafMode
+  rate_limit_rps: number | null
+  rate_limit_burst: number | null
+  antibot: boolean
+  auth_mode: AuthMode
+  auth_config: Record<string, unknown> | null
+  ip_allow: string[] | null
+  ip_deny: string[] | null
+  geo_block: string[] | null
+  tls_source: TlsSource
+  created_at: string
+  updated_at: string
+}
+
+export interface Site {
+  id: string
+  attachment_id: string
+  tunnel_server_ip_id: string | null
+  protocol: 'tcp' | 'udp'
+  public_port: number
+  public_port_end: number | null
+  destination_ip: string
+  destination_port: number
+  destination_port_end: number | null
+  description: string | null
+  active: boolean
+  service_kind: ServiceKind
+  domain: string | null
+  created_at: string
+  edge_config: EdgeRouteConfig | null
+}
+
+export interface SiteCreate {
+  attachment_id: string
+  tunnel_server_ip_id?: string | null
+  protocol: 'tcp' | 'udp'
+  public_port: number
+  destination_ip: string
+  destination_port: number
+  description?: string | null
+  domain: string
+  waf_mode?: WafMode
+  rate_limit_rps?: number | null
+  rate_limit_burst?: number | null
+  antibot?: boolean
+  auth_mode?: AuthMode
+  geo_block?: string[] | null
+  tls_source?: TlsSource
+}
+
+export interface SiteUpdate {
+  description?: string | null
+  active?: boolean
+  domain?: string | null
+  waf_mode?: WafMode
+  rate_limit_rps?: number | null
+  rate_limit_burst?: number | null
+  antibot?: boolean
+  auth_mode?: AuthMode
+  auth_config?: Record<string, unknown> | null
+  ip_allow?: string[] | null
+  ip_deny?: string[] | null
+  geo_block?: string[] | null
+  tls_source?: TlsSource
+}
+
+export interface SecurityEvent {
+  id: number
+  agent_id: string
+  source: SecurityEventSource
+  kind: string
+  ip: string | null
+  value: string | null
+  action: string | null
+  raw: Record<string, unknown> | null
+  occurred_at: string
+}
+
+export interface SecurityOverviewKpis {
+  access: number
+  visitors: number
+  blocked: number
+  attack_ips: number
+  err_4xx: number
+  err_5xx: number
+}
+
+export interface SecurityTimePoint {
+  t: string
+  value: number
+}
+
+export interface SecurityTopEntry {
+  name?: string
+  ip?: string
+  count: number
+}
+
+export interface SecurityServerStatus {
+  server_id: string
+  name: string | null
+  crowdsec_running: boolean
+  traefik_running: boolean
+}
+
+export interface SecurityOverview {
+  kpis: SecurityOverviewKpis
+  access_series: SecurityTimePoint[]
+  block_series: SecurityTimePoint[]
+  top_attackers: SecurityTopEntry[]
+  top_scenarios: SecurityTopEntry[]
+  servers: SecurityServerStatus[]
+}
+
+export interface TraefikStatus {
+  installed: boolean
+  running: boolean
+  version: string | null
+  routes_count: number
+  error: string | null
+  updated_at: string | null
+}
+
+export interface BanEntry {
+  ip: string
+  count: number
+  source: string
+}
+
+export interface CertEntry {
+  domain: string
+  status: 'managed' | 'pending' | 'error'
+  port_forward_id: string
+}

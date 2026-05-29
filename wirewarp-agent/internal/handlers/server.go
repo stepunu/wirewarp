@@ -118,6 +118,9 @@ func (h *ServerHandlers) Register(exec *executor.Executor) {
 	exec.Register("set_lan_snat", h.handleSetLANSNAT)
 	exec.Register("crowdsec_install", h.handleCrowdSecInstall)
 	exec.Register("crowdsec_sync_whitelist", h.handleCrowdSecSyncWhitelist)
+	exec.Register("traefik_install", h.handleTraefikInstall)
+	exec.Register("traefik_sync_config", h.handleTraefikSyncConfig)
+	exec.Register("crowdsec_appsec_enable", h.handleCrowdSecAppSecEnable)
 }
 
 // --- command handlers ---

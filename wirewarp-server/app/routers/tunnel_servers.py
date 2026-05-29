@@ -11,18 +11,21 @@ from app.database import get_db
 from app.models.crowdsec_snapshot import CrowdSecSnapshot
 from app.models.heal_event import AgentHealEvent
 from app.models.port_forward import PortForward
+from app.models.traefik_snapshot import TraefikSnapshot
 from app.models.tunnel_client import TunnelClient
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
 from app.models.user import User
 from app.models.wg_peer_snapshot import WgPeerSnapshot
 from app.schemas.crowdsec import CrowdSecSnapshotRead
+from app.schemas.security import TraefikStatusRead
 from app.schemas.tunnel_server import TunnelServerRead, TunnelServerSummary, TunnelServerUpdate
 from app.schemas.tunnel_server_ip import TunnelServerIPRead
 from app.schemas.wg_peer import WgPeerSnapshotRead
 from app.auth import require_ops_role, require_role
 from app.realtime.events import (
     emit_port_forward_changed,
+    emit_traefik_changed,
     emit_tunnel_client_changed,
     emit_tunnel_server_changed,
 )
@@ -30,6 +33,11 @@ from app.services.agent_commands import send_command
 from app.services.crowdsec_ops import build_whitelist
 from app.services.network_alloc import allocate_tunnel_network, renumber_host
 from app.services.primary_ip import resolve_public_ip
+from app.services.traefik_ops import (
+    build_traefik_dynamic_config,
+    build_traefik_static_config,
+    dispatch_traefik_sync,
+)
 from app.services.tunnel_server_ops import dispatch_wg_attach, dispatch_wg_init
 from app.websocket.hub import manager
 
@@ -166,6 +174,71 @@ async def get_tunnel_server_crowdsec(
     )
     if snap is None:
         return CrowdSecSnapshotRead(installed=False, running=False)
+    return snap
+
+
+@router.post("/{server_id}/traefik/install", status_code=202)
+async def install_traefik_on_tunnel_server(
+    server_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_role("admin")),
+):
+    """Install Traefik on a tunnel server's host via the agent.
+
+    Admin-only. Dispatches a `traefik_install` command with the full
+    static config, followed immediately by a `traefik_sync_config` with
+    the current dynamic config so Traefik has its routes on first start.
+    """
+    from app.config import settings as app_settings
+
+    server = await db.scalar(select(TunnelServer).where(TunnelServer.id == server_id))
+    if not server:
+        raise HTTPException(status_code=404, detail="Tunnel server not found")
+
+    le_email = getattr(app_settings, "LE_EMAIL", None)
+    static_cfg = build_traefik_static_config(le_email=le_email)
+
+    sent, command_id = await send_command(
+        agent_id=str(server.agent_id),
+        command_type="traefik_install",
+        params={"static_config": static_cfg, "le_email": le_email, "version": None},
+        db=db,
+        actor_user_id=user.id,
+    )
+    if not sent:
+        raise HTTPException(
+            status_code=409,
+            detail="Agent is not currently connected. Reconnect the agent, then retry.",
+        )
+
+    # Follow up immediately with the current dynamic config so Traefik
+    # has its routes as soon as it starts (mirrors the CrowdSec install path).
+    await dispatch_traefik_sync(str(server.agent_id), db, actor_user_id=user.id)
+    emit_traefik_changed()
+
+    return {"command_id": command_id, "sent": True}
+
+
+@router.get("/{server_id}/traefik", response_model=TraefikStatusRead)
+async def get_tunnel_server_traefik(
+    server_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    """Return the latest Traefik snapshot for this server's agent.
+
+    Always returns 200 — `{installed: false, running: false}` is the
+    sentinel for "Traefik not yet deployed" so the UI can render its
+    install-prompt card without special-casing 404.
+    """
+    server = await db.scalar(select(TunnelServer).where(TunnelServer.id == server_id))
+    if not server:
+        raise HTTPException(status_code=404, detail="Tunnel server not found")
+    snap = await db.scalar(
+        select(TraefikSnapshot).where(TraefikSnapshot.agent_id == server.agent_id)
+    )
+    if snap is None:
+        return TraefikStatusRead(installed=False, running=False)
     return snap
 
 

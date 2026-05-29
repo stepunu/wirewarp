@@ -12,6 +12,8 @@ from app.models.crowdsec_snapshot import CrowdSecSnapshot
 from app.models.gateway_lan_client import GatewayLanClient
 from app.models.heal_event import AgentHealEvent
 from app.models.metric import Metric
+from app.models.security_event import SecurityEvent
+from app.models.traefik_snapshot import TraefikSnapshot
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
 from app.models.tunnel_server_ip import TunnelServerIP
@@ -25,6 +27,8 @@ from app.realtime.events import (
     emit_crowdsec_changed,
     emit_heal_event_changed,
     emit_lan_client_changed,
+    emit_security_changed,
+    emit_traefik_changed,
     emit_tunnel_client_changed,
     emit_tunnel_server_changed,
     emit_wg_peer_changed,
@@ -558,6 +562,109 @@ async def handle_crowdsec_status(agent_id: str, msg: dict, db: AsyncSession) -> 
     emit_crowdsec_changed()
 
 
+async def handle_traefik_status(agent_id: str, msg: dict, db: AsyncSession) -> None:
+    """Upsert this agent's Traefik snapshot from a `traefik_status` frame.
+
+    Mirrors handle_crowdsec_status: a frame without `running` is silently
+    ignored, and `installed` defaults to `running` for older agents that
+    may not send it separately.
+    """
+    if "running" not in msg:
+        return
+    running = bool(msg.get("running"))
+    installed = bool(msg.get("installed", running))
+    version = msg.get("version") if isinstance(msg.get("version"), str) else None
+    try:
+        routes_count = int(msg.get("routes_count") or 0)
+    except (TypeError, ValueError):
+        routes_count = 0
+    err = msg.get("error") if isinstance(msg.get("error"), str) else None
+
+    existing = await db.scalar(
+        select(TraefikSnapshot).where(TraefikSnapshot.agent_id == agent_id)
+    )
+    now = datetime.now(timezone.utc)
+    if existing is not None:
+        existing.installed = installed
+        existing.running = running
+        existing.version = version
+        existing.routes_count = routes_count
+        existing.error = err
+        existing.updated_at = now
+    else:
+        db.add(
+            TraefikSnapshot(
+                agent_id=agent_id,
+                installed=installed,
+                running=running,
+                version=version,
+                routes_count=routes_count,
+                error=err,
+                updated_at=now,
+            )
+        )
+
+    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    if agent:
+        agent.last_seen = now
+
+    await db.commit()
+    emit_traefik_changed()
+
+
+async def handle_security_events(agent_id: str, msg: dict, db: AsyncSession) -> None:
+    """Persist a batch of security events from a `security_events` frame.
+
+    The agent sends events as a list under `events`. Each entry has:
+    source, kind, ip, value, action, occurred_at (ISO-8601), raw (dict).
+    """
+    events_raw = msg.get("events")
+    if not isinstance(events_raw, list) or not events_raw:
+        return
+
+    now = datetime.now(timezone.utc)
+    for entry in events_raw:
+        if not isinstance(entry, dict):
+            continue
+        source = entry.get("source")
+        kind = entry.get("kind")
+        if not source or not kind:
+            continue
+        occurred_raw = entry.get("occurred_at")
+        try:
+            occurred_at = (
+                datetime.fromisoformat(occurred_raw)
+                if occurred_raw
+                else now
+            )
+        except (TypeError, ValueError):
+            occurred_at = now
+        raw = entry.get("raw")
+        if not isinstance(raw, dict):
+            raw = None
+        db.add(
+            SecurityEvent(
+                agent_id=agent_id,
+                source=str(source),
+                kind=str(kind),
+                ip=entry.get("ip") or None,
+                value=entry.get("value") or None,
+                action=entry.get("action") or None,
+                raw=raw,
+                occurred_at=occurred_at,
+            )
+        )
+
+    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    if agent:
+        agent.last_seen = now
+
+    await db.commit()
+    emit_security_changed()
+
+
 async def dispatch(agent_id: str, msg: dict, db: AsyncSession) -> None:
     msg_type = msg.get("type")
     if msg_type == "heartbeat":
@@ -570,4 +677,8 @@ async def dispatch(agent_id: str, msg: dict, db: AsyncSession) -> None:
         await handle_heal_event(agent_id, msg, db)
     elif msg_type == "crowdsec_status":
         await handle_crowdsec_status(agent_id, msg, db)
+    elif msg_type == "traefik_status":
+        await handle_traefik_status(agent_id, msg, db)
+    elif msg_type == "security_events":
+        await handle_security_events(agent_id, msg, db)
     # Unknown message types are silently ignored

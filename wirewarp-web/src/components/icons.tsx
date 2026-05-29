@@ -141,4 +141,48 @@ export const Ic = {
       <path d="M10 2v4H3.5l2-2M3.5 6l2 2" />
     </svg>
   ),
+  shield: (p?: IP) => (
+    <svg width={p?.s || 14} height={p?.s || 14} viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <path d="M7 1.5L2 4v4c0 2.5 2.2 4.5 5 5 2.8-.5 5-2.5 5-5V4L7 1.5z" />
+    </svg>
+  ),
+  alert: (p?: IP) => (
+    <svg width={p?.s || 14} height={p?.s || 14} viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <path d="M7 1.5L1.5 12h11L7 1.5z" />
+      <path d="M7 5.5v3M7 9.5v.5" />
+    </svg>
+  ),
+  chart: (p?: IP) => (
+    <svg width={p?.s || 14} height={p?.s || 14} viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <path d="M1.5 12.5V2" />
+      <path d="M1.5 12.5H13" />
+      <path d="M3 9l3-3 2.5 2 3.5-4.5" />
+    </svg>
+  ),
+  globe: (p?: IP) => (
+    <svg width={p?.s || 14} height={p?.s || 14} viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <circle cx="7" cy="7" r="5.5" />
+      <path d="M1.5 7h11M7 1.5c-1.5 1.5-2 3.3-2 5.5s.5 4 2 5.5M7 1.5c1.5 1.5 2 3.3 2 5.5s-.5 4-2 5.5" />
+    </svg>
+  ),
+  ban: (p?: IP) => (
+    <svg width={p?.s || 14} height={p?.s || 14} viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <circle cx="7" cy="7" r="5.5" />
+      <path d="M3.1 3.1l7.8 7.8" />
+    </svg>
+  ),
+  cert: (p?: IP) => (
+    <svg width={p?.s || 14} height={p?.s || 14} viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <rect x="2" y="1.5" width="10" height="8" rx="0.5" />
+      <circle cx="7" cy="9.5" r="2.5" />
+      <path d="M5.5 12l1.5-.5 1.5.5v-2.5" />
+      <path d="M4.5 5h5M4.5 7h3" />
+    </svg>
+  ),
+  lock: (p?: IP) => (
+    <svg width={p?.s || 14} height={p?.s || 14} viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <rect x="3" y="6" width="8" height="6.5" rx="0.5" />
+      <path d="M5 6V4.5a2 2 0 1 1 4 0V6" />
+    </svg>
+  ),
 }

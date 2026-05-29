@@ -35,6 +35,15 @@ const NAV: NavEntry[] = [
   { path: '/settings', label: 'Settings', icon: Ic.settings, roles: ['admin'] },
 ]
 
+const SECURITY_NAV: NavEntry[] = [
+  { path: '/security', label: 'Overview', icon: Ic.chart, exact: true, roles: ['admin', 'operator', 'viewer'] },
+  { path: '/security/events', label: 'Events', icon: Ic.alert, roles: ['admin', 'operator', 'viewer'] },
+  { path: '/security/sites', label: 'Sites', icon: Ic.globe, roles: ['admin', 'operator', 'viewer'] },
+  { path: '/security/protections', label: 'Protections', icon: Ic.shield, roles: ['admin', 'operator', 'viewer'] },
+  { path: '/security/bans', label: 'Bans', icon: Ic.ban, roles: ['admin', 'operator', 'viewer'] },
+  { path: '/security/certs', label: 'Certs', icon: Ic.cert, roles: ['admin', 'operator', 'viewer'] },
+]
+
 function getInitialTheme(): 'dark' | 'light' {
   const saved = localStorage.getItem('theme')
   return saved === 'light' ? 'light' : 'dark'
@@ -107,6 +116,11 @@ export default function Layout() {
     active: !cmdkOpen && !helpOpen,
   })
 
+  const visibleSecurityNav = SECURITY_NAV.filter((n) => {
+    if (n.roles && (!role || !n.roles.includes(role))) return false
+    return true
+  })
+
   const agents = agentsQ.data ?? []
   const pfCount = pfQ.data?.length ?? 0
   const crumb = pathToCrumb(location.pathname)
@@ -146,6 +160,24 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
+        {visibleSecurityNav.length > 0 && (
+          <>
+            <div className="sb-section">Security</div>
+            <nav className="sb-nav">
+              {visibleSecurityNav.map((p) => (
+                <NavLink
+                  key={p.path}
+                  to={p.path}
+                  end={p.exact}
+                  className={({ isActive }) => `sb-link ${isActive ? 'active' : ''}`}
+                >
+                  <p.icon s={14} />
+                  <span>{p.label}</span>
+                </NavLink>
+              ))}
+            </nav>
+          </>
+        )}
         <div className="sb-foot">
           <button className="sb-link" onClick={() => setHelpOpen(true)}>
             <Ic.help s={14} />

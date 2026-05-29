@@ -37,9 +37,16 @@ class PortForward(Base):
     destination_port_end: Mapped[int | None] = mapped_column(Integer, nullable=True)  # set for ranges
     description: Mapped[str | None] = mapped_column(String)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 'raw' (iptables DNAT) | 'http' (Traefik reverse-proxy + WAF)
+    service_kind: Mapped[str] = mapped_column(String, nullable=False, default="raw")
+    # Fully-qualified domain name for HTTP services (Host rule in Traefik)
+    domain: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     attachment: Mapped["TunnelClientAttachment"] = relationship(  # noqa: F821
         "TunnelClientAttachment", back_populates="port_forwards"
     )
     tunnel_server_ip: Mapped["TunnelServerIP | None"] = relationship("TunnelServerIP")  # noqa: F821
+    edge_route_config: Mapped["EdgeRouteConfig | None"] = relationship(  # noqa: F821
+        "EdgeRouteConfig", back_populates="port_forward", uselist=False
+    )

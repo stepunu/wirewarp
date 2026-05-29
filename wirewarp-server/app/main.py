@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -13,10 +14,11 @@ from fastapi.responses import FileResponse
 from app.database import engine, Base, SessionLocal
 from app.realtime.bus import bus
 from app.realtime.events import emit_agent_changed
-from app.routers import auth, agents, tunnel_servers, tunnel_clients, tunnel_client_attachments, lan_clients, port_forwards, service_templates, settings, tunnel_server_ips, audit, users, oidc, ldap as ldap_router, vpn_endpoints, vpn_profiles
+from app.routers import auth, agents, tunnel_servers, tunnel_clients, tunnel_client_attachments, lan_clients, port_forwards, service_templates, settings, tunnel_server_ips, audit, users, oidc, ldap as ldap_router, vpn_endpoints, vpn_profiles, security
 from app.websocket.hub import manager
 from app.websocket.handlers import dispatch
 from app.services.agent_commands import send_command
+from app.services.traffic_sampler import run_traffic_sampler
 
 logger = logging.getLogger(__name__)
 
@@ -26,8 +28,16 @@ async def lifespan(app: FastAPI):
     # Create tables on startup (migrations handle production schema)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    yield
-    await engine.dispose()
+    sampler_task = asyncio.create_task(run_traffic_sampler())
+    try:
+        yield
+    finally:
+        sampler_task.cancel()
+        try:
+            await sampler_task
+        except asyncio.CancelledError:
+            pass
+        await engine.dispose()
 
 
 app = FastAPI(title="WireWarp Control Server", version="0.1.0", lifespan=lifespan)
@@ -56,6 +66,7 @@ app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(audit.router, prefix="/api/audit", tags=["audit"])
 app.include_router(vpn_endpoints.router, prefix="/api/vpn-endpoints", tags=["vpn"])
 app.include_router(vpn_profiles.router, prefix="/api/vpn-profiles", tags=["vpn"])
+app.include_router(security.router, prefix="/api/security", tags=["security"])
 
 
 @app.get("/api/health")

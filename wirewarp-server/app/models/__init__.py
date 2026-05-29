@@ -17,6 +17,10 @@ from app.models.vpn_permission import VpnPermission
 from app.models.heal_event import AgentHealEvent
 from app.models.wg_peer_snapshot import WgPeerSnapshot
 from app.models.crowdsec_snapshot import CrowdSecSnapshot
+from app.models.wg_traffic_sample import WgTrafficSample
+from app.models.edge_route_config import EdgeRouteConfig
+from app.models.traefik_snapshot import TraefikSnapshot
+from app.models.security_event import SecurityEvent
 
 __all__ = [
     "Agent",
@@ -38,4 +42,8 @@ __all__ = [
     "AgentHealEvent",
     "WgPeerSnapshot",
     "CrowdSecSnapshot",
+    "WgTrafficSample",
+    "EdgeRouteConfig",
+    "TraefikSnapshot",
+    "SecurityEvent",
 ]

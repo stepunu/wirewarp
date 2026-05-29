@@ -30,6 +30,8 @@ const eventToKeys: Record<string, string[][]> = {
   'heal_event.changed': [['heal-events'], ['tunnel-server-summary'], ['tunnel-client-summary']],
   'wg_peer.changed': [['wg-peers'], ['tunnel-server-summary'], ['tunnel-client-summary']],
   'crowdsec.changed': [['crowdsec']],
+  'security.changed': [['security-overview'], ['security-events'], ['sites']],
+  'traefik.changed': [['traefik']],
 }
 
 interface MountOpts {

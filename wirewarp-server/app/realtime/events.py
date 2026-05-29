@@ -53,3 +53,11 @@ def emit_wg_peer_changed() -> None:
 
 def emit_crowdsec_changed() -> None:
     bus.publish_nowait("crowdsec.changed")
+
+
+def emit_security_changed() -> None:
+    bus.publish_nowait("security.changed")
+
+
+def emit_traefik_changed() -> None:
+    bus.publish_nowait("traefik.changed")

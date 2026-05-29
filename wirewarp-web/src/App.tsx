@@ -21,6 +21,12 @@ import Settings from './pages/Settings'
 import Users from './pages/Users'
 import VpnEndpoints from './pages/VpnEndpoints'
 import MyVpn from './pages/MyVpn'
+import SecurityOverview from './pages/SecurityOverview'
+import SecurityEvents from './pages/SecurityEvents'
+import SecuritySites from './pages/SecuritySites'
+import SecurityProtections from './pages/SecurityProtections'
+import SecurityBans from './pages/SecurityBans'
+import SecurityCerts from './pages/SecurityCerts'
 
 // OIDC callback redirects to `/#token=<jwt>`. Pull the token out of the
 // URL fragment, store it, and replace the URL so the secret doesn't sit
@@ -196,6 +202,54 @@ export default function App() {
                 element={
                   <RoleGuard allow={['admin']}>
                     <Settings />
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="security"
+                element={
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <SecurityOverview />
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="security/events"
+                element={
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <SecurityEvents />
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="security/sites"
+                element={
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <SecuritySites />
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="security/protections"
+                element={
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <SecurityProtections />
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="security/bans"
+                element={
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <SecurityBans />
+                  </RoleGuard>
+                }
+              />
+              <Route
+                path="security/certs"
+                element={
+                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
+                    <SecurityCerts />
                   </RoleGuard>
                 }
               />
