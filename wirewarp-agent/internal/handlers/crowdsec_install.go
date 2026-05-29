@@ -48,7 +48,7 @@ func (h *ServerHandlers) handleCrowdSecInstall(raw json.RawMessage) (string, err
 		}
 	}
 
-	already := cscliPath() != ""
+	already := resolveCSCli() != ""
 	if already {
 		logf("cscli already present — skipping apt install")
 	} else {
@@ -129,6 +129,15 @@ func (h *ServerHandlers) handleCrowdSecInstall(raw json.RawMessage) (string, err
 		}
 	}
 
+	// Surface the post-install service state in the command output so an
+	// install that succeeds but whose unit fails to start is visible in
+	// the audit log instead of looking like a silent "not detected".
+	if active, statusMsg := crowdSecServiceActive(ctx); active {
+		logf("==> crowdsec service is active")
+	} else {
+		logf("WARN: crowdsec service not active after install:\n%s", statusMsg)
+	}
+
 	// Push a crowdsec_status frame immediately so the dashboard card
 	// flips from "not detected" to "running" the instant install
 	// finishes, rather than waiting up to 5 min for the next poll.
@@ -145,7 +154,7 @@ func (h *ServerHandlers) handleCrowdSecSyncWhitelist(raw json.RawMessage) (strin
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
 	}
-	if cscliPath() == "" {
+	if resolveCSCli() == "" {
 		return "", fmt.Errorf("cscli not installed — run crowdsec_install first")
 	}
 	if err := writeWhitelist(p); err != nil {
@@ -201,11 +210,6 @@ func writeWhitelist(p CrowdSecInstallParams) error {
 		b.WriteString("  ip: []\n")
 	}
 	return os.WriteFile(crowdSecWhitelistFile, []byte(b.String()), 0644)
-}
-
-func cscliPath() string {
-	p, _ := exec.LookPath("cscli")
-	return p
 }
 
 // assertDebianFamily refuses to run the apt install path on non-Debian

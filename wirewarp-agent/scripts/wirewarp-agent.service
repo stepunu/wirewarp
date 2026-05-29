@@ -15,5 +15,12 @@ RestartSec=5
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 
+# Deterministic environment. The restricted capability set above means
+# this unit otherwise inherits a minimal env; without an explicit PATH,
+# cscli/systemctl detection and any helper tools they invoke can fail to
+# resolve. HOME is set so cscli's config lookups have a stable base.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=/root
+
 [Install]
 WantedBy=multi-user.target

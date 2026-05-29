@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -104,37 +105,58 @@ func (h *ServerHandlers) EmitCrowdSecNow() {
 	h.pollAndEmitCrowdSec(ctx, true)
 }
 
-// collectCrowdSec runs cscli (version, metrics, decisions) and
-// assembles the heartbeat payload. Errors are swallowed into the
-// payload's `error` field — the UI will surface them, and a missing
-// `cscli` binary results in `running: false` without an error.
+// collectCrowdSec resolves cscli, checks the service state, and (when
+// up) runs cscli (version, metrics, decisions) to assemble the status
+// payload. It reports two distinct facts the dashboard can act on:
+//
+//   - installed: the cscli binary is present on the host.
+//   - running:   the crowdsec systemd service is active.
+//
+// Splitting them is the fix for the "installed but reported as not
+// detected" bug: a host where the apt install succeeded but the service
+// failed to start now surfaces installed=true, running=false, and the
+// `systemctl status` tail in `error` — instead of looking identical to a
+// host with no CrowdSec at all. Detection is also made independent of
+// the agent unit's inherited environment: cscli is invoked by absolute
+// path with an explicit PATH/HOME (the unit pins a restricted capability
+// set and provides no PATH), so a minimal service env can't make a
+// working install read as absent.
 func collectCrowdSec(parent context.Context) map[string]any {
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := exec.LookPath("cscli"); err != nil {
-		return map[string]any{"running": false, "timestamp": now}
+	bin := resolveCSCli()
+	if bin == "" {
+		return map[string]any{"installed": false, "running": false, "timestamp": now}
 	}
 
-	version, vErr := runCSCli(parent, "version")
-	if vErr != nil {
+	// Binary present — is the daemon up? `cscli version` works without
+	// the daemon, so the service state (not a cscli exit code) is what
+	// "running" means.
+	active, statusMsg := crowdSecServiceActive(parent)
+	if !active {
 		return map[string]any{
+			"installed": true,
 			"running":   false,
-			"error":     vErr.Error(),
+			"version":   csVersion(parent, bin),
+			"error":     statusMsg,
 			"timestamp": now,
 		}
 	}
 
-	decisions, dErr := runCSCli(parent, "decisions", "list", "-o", "json")
+	version := csVersion(parent, bin)
+
+	decisions, dErr := runCSCli(parent, bin, "decisions", "list", "-o", "json")
 	if dErr != nil {
 		return map[string]any{
+			"installed": true,
 			"running":   true,
-			"version":   parseVersionLine(version),
+			"version":   version,
 			"error":     "decisions list: " + dErr.Error(),
 			"timestamp": now,
 		}
 	}
 	totalDecisions, topIPs := summariseDecisions(decisions)
 
-	scenarios, mErr := runCSCli(parent, "metrics", "-o", "json")
+	scenarios, mErr := runCSCli(parent, bin, "metrics", "-o", "json")
 	var topScenarios []map[string]any
 	var metricsErr string
 	if mErr != nil {
@@ -144,23 +166,123 @@ func collectCrowdSec(parent context.Context) map[string]any {
 	}
 
 	return map[string]any{
+		"installed":       true,
 		"running":         true,
-		"version":         parseVersionLine(version),
+		"version":         version,
 		"total_decisions": totalDecisions,
-		"top_scenarios":  topScenarios,
-		"top_ips":        topIPs,
-		"error":          metricsErr, // non-fatal — we still have decisions
-		"timestamp":      now,
+		"top_scenarios":   topScenarios,
+		"top_ips":         topIPs,
+		"error":           metricsErr, // non-fatal — we still have decisions
+		"timestamp":       now,
 	}
 }
 
-// runCSCli executes `cscli <args>` with a hard timeout, returning
-// combined stdout. cscli prints errors on stdout in JSON mode anyway,
-// so we don't try to separate streams here.
-func runCSCli(parent context.Context, args ...string) (string, error) {
+// resolveCSCli returns the absolute path to cscli, or "" if it isn't
+// installed. It falls back to the standard install locations when cscli
+// isn't on the inherited PATH — the agent's systemd unit pins a
+// restricted environment and may not export a PATH that includes
+// /usr/bin, which would otherwise make exec.LookPath miss a perfectly
+// installed binary.
+func resolveCSCli() string {
+	if p, err := exec.LookPath("cscli"); err == nil {
+		return p
+	}
+	for _, c := range []string{"/usr/bin/cscli", "/usr/local/bin/cscli", "/usr/sbin/cscli"} {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+// resolveBin is resolveCSCli for tools we always expect to exist
+// (systemctl): same PATH-independent lookup, but returns the bare name
+// as a last resort so exec still yields a useful error.
+func resolveBin(name string, candidates ...string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	return name
+}
+
+// csCmdEnv builds the environment for cscli/systemctl invocations. The
+// agent unit may provide no PATH (and no HOME) because it runs with a
+// pinned capability set; cscli resolves helper tools and its own config
+// relative to a sane environment, so we guarantee one. We replace rather
+// than append PATH/HOME so the child sees a single, well-formed value.
+func csCmdEnv() []string {
+	const path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	src := os.Environ()
+	out := make([]string, 0, len(src)+2)
+	for _, e := range src {
+		if strings.HasPrefix(e, "PATH=") || strings.HasPrefix(e, "HOME=") {
+			continue
+		}
+		out = append(out, e)
+	}
+	return append(out, "PATH="+path, "HOME=/root")
+}
+
+// csVersion is a best-effort `cscli version` parse. It works without the
+// daemon, so we can report a version even for an installed-but-stopped
+// service; on any error we just return "".
+func csVersion(parent context.Context, bin string) string {
+	out, err := runCSCli(parent, bin, "version")
+	if err != nil {
+		return ""
+	}
+	return parseVersionLine(out)
+}
+
+// crowdSecServiceActive reports whether the crowdsec systemd unit is
+// active. When it isn't, it returns a short `systemctl status` tail so
+// the dashboard can show *why* (failed unit, broken config) instead of a
+// bare "not detected". `is-active` and `status` are reads — no elevated
+// capabilities needed — so they run directly (unlike the install path,
+// which needs systemd-run to escape the agent's capability bounding set).
+func crowdSecServiceActive(parent context.Context) (bool, string) {
+	sysctl := resolveBin("systemctl", "/usr/bin/systemctl", "/bin/systemctl")
+
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	c := exec.CommandContext(ctx, sysctl, "is-active", "crowdsec")
+	c.Env = csCmdEnv()
+	out, _ := c.CombinedOutput()
+	state := strings.TrimSpace(string(out))
+	if state == "active" {
+		return true, ""
+	}
+
+	sctx, scancel := context.WithTimeout(parent, 10*time.Second)
+	defer scancel()
+	sc := exec.CommandContext(sctx, sysctl, "status", "--no-pager", "-n", "12", "crowdsec")
+	sc.Env = csCmdEnv()
+	status, _ := sc.CombinedOutput()
+
+	msg := "crowdsec service " + state
+	if state == "" {
+		msg = "crowdsec service state unknown"
+	}
+	if t := strings.TrimSpace(tail(status, 12)); t != "" {
+		msg += ":\n" + t
+	}
+	return false, msg
+}
+
+// runCSCli executes `<bin> <args>` with a hard timeout and an explicit
+// environment, returning combined output. cscli prints errors on stdout
+// in JSON mode anyway, so we don't try to separate streams here.
+func runCSCli(parent context.Context, bin string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, crowdSecCmdTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "cscli", args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = csCmdEnv()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("cscli %s: %w — %s", strings.Join(args, " "), err, out)
 	}

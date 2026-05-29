@@ -14,6 +14,7 @@ class CrowdSecTopIp(BaseModel):
 
 
 class CrowdSecSnapshotRead(BaseModel):
+    installed: bool = False
     running: bool
     version: str | None = None
     total_decisions: int = 0

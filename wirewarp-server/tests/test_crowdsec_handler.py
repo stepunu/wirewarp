@@ -47,9 +47,41 @@ async def test_crowdsec_status_insert(db) -> None:
         )
     ).scalar_one()
     assert snap.running is True
+    # running implies installed even when the agent omits the field.
+    assert snap.installed is True
     assert snap.version == "1.6.4"
     assert snap.total_decisions == 42
     assert snap.top_scenarios == [{"name": "ssh-bf", "count": 12}]
+
+
+@pytest.mark.asyncio
+async def test_crowdsec_status_installed_but_stopped(db) -> None:
+    """A host where cscli is present but the service is down reports
+    installed=True, running=False, with the service error preserved."""
+    agent = _agent()
+    db.add(agent)
+    await db.commit()
+
+    await handle_crowdsec_status(
+        str(agent.id),
+        {
+            "type": "crowdsec_status",
+            "installed": True,
+            "running": False,
+            "version": "1.6.4",
+            "error": "crowdsec service failed:\nUnit crowdsec.service entered failed state.",
+        },
+        db,
+    )
+
+    snap = (
+        await db.execute(
+            select(CrowdSecSnapshot).where(CrowdSecSnapshot.agent_id == agent.id)
+        )
+    ).scalar_one()
+    assert snap.installed is True
+    assert snap.running is False
+    assert "failed state" in (snap.error or "")
 
 
 @pytest.mark.asyncio
@@ -136,6 +168,7 @@ async def test_crowdsec_endpoint_returns_sentinel_when_missing(client, session_m
     resp = await client.get(f"/api/tunnel-servers/{server_id}/crowdsec")
     assert resp.status_code == 200
     body = resp.json()
+    assert body["installed"] is False
     assert body["running"] is False
     assert body["total_decisions"] == 0
 

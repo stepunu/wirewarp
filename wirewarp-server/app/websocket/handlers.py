@@ -482,6 +482,9 @@ async def handle_crowdsec_status(agent_id: str, msg: dict, db: AsyncSession) -> 
     if "running" not in msg:
         return
     running = bool(msg.get("running"))
+    # `installed` is newer than `running`; an older agent that doesn't
+    # send it but reports running=True is, by definition, installed.
+    installed = bool(msg.get("installed", running))
     version = msg.get("version") if isinstance(msg.get("version"), str) else None
     try:
         total_decisions = int(msg.get("total_decisions") or 0)
@@ -500,6 +503,7 @@ async def handle_crowdsec_status(agent_id: str, msg: dict, db: AsyncSession) -> 
     )
     now = datetime.now(timezone.utc)
     if existing is not None:
+        existing.installed = installed
         existing.running = running
         existing.version = version
         existing.total_decisions = total_decisions
@@ -511,6 +515,7 @@ async def handle_crowdsec_status(agent_id: str, msg: dict, db: AsyncSession) -> 
         db.add(
             CrowdSecSnapshot(
                 agent_id=agent_id,
+                installed=installed,
                 running=running,
                 version=version,
                 total_decisions=total_decisions,

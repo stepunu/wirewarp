@@ -154,6 +154,7 @@ export interface CrowdSecTopIp {
 }
 
 export interface CrowdSecStatus {
+  installed: boolean
   running: boolean
   version: string | null
   total_decisions: number

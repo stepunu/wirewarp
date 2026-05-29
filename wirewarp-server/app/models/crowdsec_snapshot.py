@@ -37,6 +37,12 @@ class CrowdSecSnapshot(Base):
         nullable=False,
         unique=True,
     )
+    # `installed` = the cscli binary is present on the host; `running` =
+    # the crowdsec systemd service is active. Splitting them lets the UI
+    # distinguish "never installed" (offer install) from "installed but
+    # the service failed to start" (show the error) instead of collapsing
+    # both into a single "not detected" state.
+    installed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     running: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     version: Mapped[str | None] = mapped_column(String, nullable=True)
     total_decisions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

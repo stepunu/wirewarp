@@ -165,7 +165,7 @@ async def get_tunnel_server_crowdsec(
         select(CrowdSecSnapshot).where(CrowdSecSnapshot.agent_id == server.agent_id)
     )
     if snap is None:
-        return CrowdSecSnapshotRead(running=False)
+        return CrowdSecSnapshotRead(installed=False, running=False)
     return snap
 
 
