@@ -95,6 +95,7 @@ func TeardownGatewayRouting(cfg GatewayConfig) error {
 	}
 	if cfg.LANIface != "" && cfg.TunnelIface != "" {
 		ipt(iptablesAction(gatewayLANMasqueradeRule(cfg), "-D")...)
+		ipt("-t", "nat", "-D", "POSTROUTING", "-i", cfg.TunnelIface, "-o", cfg.LANIface, "-j", "MASQUERADE")
 	}
 	// Legacy single-mark MASQUERADE from older agent versions; harmless if absent.
 	if cfg.LANIface != "" {
@@ -292,6 +293,9 @@ func applyAttachmentNAT(cfg GatewayConfig) error {
 		if cfg.WGSubnet != "" {
 			ipt("-t", "nat", "-D", "POSTROUTING", "-s", cfg.WGSubnet, "-o", cfg.LANIface, "-j", "MASQUERADE")
 		}
+		// Remove the first broad tunnel-ingress attempt. nat/POSTROUTING cannot
+		// reliably match the input interface, so current rules key off CONNMARK.
+		ipt("-t", "nat", "-D", "POSTROUTING", "-i", cfg.TunnelIface, "-o", cfg.LANIface, "-j", "MASQUERADE")
 		rule := gatewayLANMasqueradeRule(cfg)
 		if err := iptCheckOrInsert(
 			iptablesAction(rule, "-C"),
@@ -316,7 +320,7 @@ func applyAttachmentNAT(cfg GatewayConfig) error {
 func gatewayLANMasqueradeRule(cfg GatewayConfig) []string {
 	return []string{
 		"-t", "nat", "POSTROUTING",
-		"-i", cfg.TunnelIface,
+		"-m", "connmark", "--mark", cfg.Fwmark,
 		"-o", cfg.LANIface,
 		"-j", "MASQUERADE",
 	}

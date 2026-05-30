@@ -104,6 +104,10 @@ func HealAttachment(cfg GatewayConfig) (healed []string, firstErr error) {
 				"-s", cfg.WGSubnet, "-o", cfg.LANIface, "-j", "MASQUERADE",
 			).Run()
 		}
+		_ = exec.Command("iptables",
+			"-t", "nat", "-D", "POSTROUTING",
+			"-i", cfg.TunnelIface, "-o", cfg.LANIface, "-j", "MASQUERADE",
+		).Run()
 		rule := gatewayLANMasqueradeRule(cfg)
 		checkArgs := iptablesAction(rule, "-C")
 		insertArgs := iptablesAction(rule, "-A")
