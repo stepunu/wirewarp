@@ -49,6 +49,16 @@ class EdgeRouteConfig(Base):
     tls_source: Mapped[str] = mapped_column(
         String, nullable=False, default="letsencrypt"
     )
+    # Upstream scheme is part of the route source of truth. Older hand-built
+    # sites default to plain HTTP, imported Traefik routes may require HTTPS.
+    upstream_scheme: Mapped[str] = mapped_column(String, nullable=False, default="http")
+    upstream_insecure_skip_verify: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    imported_router_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    imported_service_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    imported_middlewares: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    import_warnings: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

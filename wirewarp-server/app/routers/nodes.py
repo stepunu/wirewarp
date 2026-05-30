@@ -20,7 +20,15 @@ from app.models.user import User
 from app.realtime.events import emit_edge_changed
 from app.schemas.crowdsec import CrowdSecSnapshotRead
 from app.schemas.nodes import NodeEdgeRead, NodeRead
-from app.schemas.security import EdgeRouteConfigRead, SiteRead, TraefikStatusRead
+from app.schemas.security import (
+    EdgeRouteConfigRead,
+    EffectiveRateLimit,
+    EffectiveRateLimitValue,
+    ServerEdgePolicyRead,
+    SiteEffectivePolicy,
+    SiteRead,
+    TraefikStatusRead,
+)
 from app.services.edge_ops import dispatch_edge_desired_state, edge_phase
 
 router = APIRouter()
@@ -77,6 +85,12 @@ def _site_read(
             ip_deny=ec.ip_deny,
             geo_block=ec.geo_block,
             tls_source=ec.tls_source,
+            upstream_scheme=ec.upstream_scheme,
+            upstream_insecure_skip_verify=ec.upstream_insecure_skip_verify,
+            imported_router_name=ec.imported_router_name,
+            imported_service_name=ec.imported_service_name,
+            imported_middlewares=ec.imported_middlewares,
+            import_warnings=ec.import_warnings,
             created_at=ec.created_at,
             updated_at=ec.updated_at,
         )
@@ -97,7 +111,57 @@ def _site_read(
         description=pf.description,
         service_kind=pf.service_kind,
         edge_config=ec_read,
+        effective_policy=_effective_site_policy(pf, server_id),
         created_at=pf.created_at,
+    )
+
+
+def _server_policy(server: TunnelServer) -> ServerEdgePolicyRead:
+    return ServerEdgePolicyRead(
+        server_id=server.id,
+        agent_id=server.agent_id,
+        rate_limit_rps=server.edge_rate_limit_rps,
+        rate_limit_burst=server.edge_rate_limit_burst,
+    )
+
+
+def _effective_site_policy(
+    pf: PortForward,
+    server_id: uuid.UUID | None,
+) -> SiteEffectivePolicy:
+    ec = pf.edge_route_config
+    safe_name = (pf.domain or str(pf.id)).replace(".", "-").replace(":", "-")
+    middleware_chain: list[str] = []
+    global_limit = None
+    # `_site_read` is only called from `_server_sites`, so server_id is set
+    # there. The actual rate-limit values are injected after the server rows
+    # are loaded below to avoid another query per row.
+    if getattr(pf, "_wirewarp_server_rate_limit_rps", None):
+        rps = getattr(pf, "_wirewarp_server_rate_limit_rps")
+        burst = getattr(pf, "_wirewarp_server_rate_limit_burst") or rps * 5
+        global_limit = EffectiveRateLimitValue(rps=rps, burst=burst)
+        middleware_chain.append("server-ratelimit")
+    site_limit = None
+    if ec and ec.rate_limit_rps:
+        burst = ec.rate_limit_burst or ec.rate_limit_rps * 5
+        site_limit = EffectiveRateLimitValue(rps=ec.rate_limit_rps, burst=burst)
+        middleware_chain.append(f"ratelimit-{safe_name}")
+    if ec and ec.ip_allow:
+        middleware_chain.append(f"ipallow-{safe_name}")
+    if ec and ec.ip_deny:
+        middleware_chain.append(f"ipdeny-{safe_name}")
+    if ec and ec.geo_block:
+        middleware_chain.append(f"geoblock-{safe_name}")
+    if ec and (ec.waf_mode != "off" or ec.antibot):
+        middleware_chain.append("crowdsec-bouncer")
+    if ec and ec.auth_mode == "basic" and ec.auth_config:
+        middleware_chain.append(f"basicauth-{safe_name}")
+    if ec and ec.auth_mode == "forward" and ec.auth_config:
+        middleware_chain.append(f"forwardauth-{safe_name}")
+    return SiteEffectivePolicy(
+        rate_limit=EffectiveRateLimit(global_=global_limit, site=site_limit),
+        middleware_chain=middleware_chain,
+        warnings=[str(v) for v in (ec.import_warnings or [])] if ec else [],
     )
 
 
@@ -122,10 +186,12 @@ async def _server_sites(server: TunnelServer, db: AsyncSession) -> list[SiteRead
             .order_by(PortForward.created_at.desc())
         )
     ).scalars().all()
-    return [
-        _site_read(pf, server_id=server.id, agent_id=server.agent_id)
-        for pf in rows
-    ]
+    out: list[SiteRead] = []
+    for pf in rows:
+        pf._wirewarp_server_rate_limit_rps = server.edge_rate_limit_rps  # type: ignore[attr-defined]
+        pf._wirewarp_server_rate_limit_burst = server.edge_rate_limit_burst  # type: ignore[attr-defined]
+        out.append(_site_read(pf, server_id=server.id, agent_id=server.agent_id))
+    return out
 
 
 @router.get("", response_model=list[NodeRead])
@@ -163,6 +229,7 @@ async def get_node_edge(
     return NodeEdgeRead(
         agent_id=agent_id,
         phase=edge_phase(cs, tk),
+        policy=_server_policy(server),
         crowdsec=(
             CrowdSecSnapshotRead.model_validate(cs)
             if cs

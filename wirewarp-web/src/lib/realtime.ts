@@ -22,7 +22,7 @@ type EventHandler = (payload: Record<string, unknown>) => void
 
 const eventToKeys: Record<string, string[][]> = {
   'agent.changed': [['agents'], ['nodes']],
-  'edge.changed': [['nodes'], ['node-edge'], ['security-overview'], ['sites']],
+  'edge.changed': [['nodes'], ['node-edge'], ['security-overview'], ['sites'], ['server-edge-policy']],
   'tunnel_server.changed': [['tunnel-servers'], ['tunnel-server-ips'], ['tunnel-server-summary'], ['nodes']],
   'tunnel_client.changed': [['tunnel-clients'], ['tunnel-client-attachments'], ['tunnel-client-summary'], ['nodes']],
   'port_forward.changed': [['port-forwards']],
@@ -31,7 +31,7 @@ const eventToKeys: Record<string, string[][]> = {
   'heal_event.changed': [['heal-events'], ['tunnel-server-summary'], ['tunnel-client-summary']],
   'wg_peer.changed': [['wg-peers'], ['tunnel-server-summary'], ['tunnel-client-summary']],
   'crowdsec.changed': [['crowdsec'], ['node-edge'], ['nodes']],
-  'security.changed': [['security-overview'], ['security-events'], ['sites'], ['node-edge']],
+  'security.changed': [['security-overview'], ['security-events'], ['security-event-groups'], ['sites'], ['node-edge'], ['server-edge-policy']],
   'traefik.changed': [['traefik'], ['node-edge'], ['nodes']],
 }
 

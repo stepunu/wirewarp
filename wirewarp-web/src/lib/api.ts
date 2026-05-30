@@ -473,6 +473,34 @@ export const security = {
     const qs = q.toString()
     return request<import('./types').SecurityEvent[]>(`/security/events${qs ? `?${qs}` : ''}`)
   },
+  eventGroups: (params: { limit?: number; agent_id?: string; source?: string } = {}) => {
+    const q = new URLSearchParams()
+    if (params.limit != null) q.set('limit', String(params.limit))
+    if (params.agent_id) q.set('agent_id', params.agent_id)
+    if (params.source) q.set('source', params.source)
+    const qs = q.toString()
+    return request<import('./types').SecurityEventGroup[]>(`/security/events/groups${qs ? `?${qs}` : ''}`)
+  },
+  serverEdgePolicy: (serverId: string) =>
+    request<import('./types').ServerEdgePolicy>(`/security/servers/${serverId}/edge-policy`),
+  updateServerEdgePolicy: (
+    serverId: string,
+    data: { rate_limit_rps?: number | null; rate_limit_burst?: number | null },
+  ) =>
+    request<import('./types').ServerEdgePolicy>(`/security/servers/${serverId}/edge-policy`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  previewTraefikImport: (data: import('./types').TraefikImportRequest) =>
+    request<import('./types').TraefikImportPreview>('/security/traefik/import/preview', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  importTraefik: (data: import('./types').TraefikImportRequest) =>
+    request<import('./types').TraefikImportResult>('/security/traefik/import', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   sites: (params: { server_id?: string; agent_id?: string } = {}) => {
     const q = new URLSearchParams()
     if (params.server_id) q.set('server_id', params.server_id)

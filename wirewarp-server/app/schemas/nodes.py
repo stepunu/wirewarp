@@ -6,7 +6,7 @@ from datetime import datetime
 from pydantic import BaseModel
 
 from app.schemas.crowdsec import CrowdSecSnapshotRead
-from app.schemas.security import SiteRead, TraefikStatusRead
+from app.schemas.security import ServerEdgePolicyRead, SiteRead, TraefikStatusRead
 
 
 class NodeRead(BaseModel):
@@ -27,6 +27,7 @@ class NodeRead(BaseModel):
 class NodeEdgeRead(BaseModel):
     agent_id: uuid.UUID
     phase: str
+    policy: ServerEdgePolicyRead
     crowdsec: CrowdSecSnapshotRead
     traefik: TraefikStatusRead
     sites: list[SiteRead] = []

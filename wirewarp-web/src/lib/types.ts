@@ -401,8 +401,30 @@ export interface EdgeRouteConfig {
   ip_deny: string[] | null
   geo_block: string[] | null
   tls_source: TlsSource
+  upstream_scheme: 'http' | 'https'
+  upstream_insecure_skip_verify: boolean
+  imported_router_name: string | null
+  imported_service_name: string | null
+  imported_middlewares: string[] | null
+  import_warnings: string[] | null
   created_at: string
   updated_at: string
+}
+
+export interface ServerEdgePolicy {
+  server_id: string
+  agent_id: string
+  rate_limit_rps: number | null
+  rate_limit_burst: number | null
+}
+
+export interface SiteEffectivePolicy {
+  rate_limit: {
+    global: { rps: number | null; burst: number | null } | null
+    site: { rps: number | null; burst: number | null } | null
+  }
+  middleware_chain: string[]
+  warnings: string[]
 }
 
 export interface Site {
@@ -423,6 +445,7 @@ export interface Site {
   domain: string | null
   created_at: string
   edge_config: EdgeRouteConfig | null
+  effective_policy: SiteEffectivePolicy | null
 }
 
 export interface SiteCreate {
@@ -441,6 +464,8 @@ export interface SiteCreate {
   auth_mode?: AuthMode
   geo_block?: string[] | null
   tls_source?: TlsSource
+  upstream_scheme?: 'http' | 'https'
+  upstream_insecure_skip_verify?: boolean
 }
 
 export interface SiteUpdate {
@@ -457,6 +482,8 @@ export interface SiteUpdate {
   ip_deny?: string[] | null
   geo_block?: string[] | null
   tls_source?: TlsSource
+  upstream_scheme?: 'http' | 'https'
+  upstream_insecure_skip_verify?: boolean
 }
 
 export interface SecurityEvent {
@@ -469,6 +496,18 @@ export interface SecurityEvent {
   action: string | null
   raw: Record<string, unknown> | null
   occurred_at: string
+}
+
+export interface SecurityEventGroup {
+  agent_id: string
+  source: SecurityEventSource
+  kind: string
+  ip: string | null
+  value: string | null
+  action: string | null
+  count: number
+  first_seen_at: string
+  last_seen_at: string
 }
 
 export interface SecurityOverviewKpis {
@@ -522,9 +561,53 @@ export interface TraefikStatus {
 export interface NodeEdge {
   agent_id: string
   phase: 'healthy' | 'degraded' | 'pending' | 'unknown'
+  policy: ServerEdgePolicy
   crowdsec: CrowdSecStatus
   traefik: TraefikStatus
   sites: Site[]
+}
+
+export interface TraefikImportRoutePreview {
+  router_name: string
+  domain: string | null
+  service_name: string | null
+  upstream_url: string | null
+  destination_ip: string | null
+  destination_port: number | null
+  upstream_scheme: 'http' | 'https'
+  upstream_insecure_skip_verify: boolean
+  tls_source: TlsSource
+  middlewares: string[]
+  mapped_policy: Record<string, unknown>
+  warnings: string[]
+  importable: boolean
+  existing_site_id: string | null
+}
+
+export interface TraefikImportPreview {
+  summary: {
+    routers: number
+    importable: number
+    skipped: number
+    existing: number
+  }
+  routes: TraefikImportRoutePreview[]
+}
+
+export interface TraefikImportRequest {
+  server_id: string
+  attachment_id: string
+  content: string
+  content_format?: 'auto' | 'yaml' | 'yml' | 'toml'
+  domain_suffix?: string | null
+  activate?: boolean
+  overwrite?: boolean
+}
+
+export interface TraefikImportResult extends TraefikImportPreview {
+  created: number
+  updated: number
+  skipped: number
 }
 
 export interface BanEntry {

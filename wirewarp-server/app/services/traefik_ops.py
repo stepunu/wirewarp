@@ -232,7 +232,16 @@ async def build_traefik_dynamic_config(
     routers: dict = {}
     services: dict = {}
     middlewares: dict = {}
+    servers_transports: dict = {}
     acme_ready = await letsencrypt_resolver_ready(db)
+    server_rate_limit = None
+    if server.edge_rate_limit_rps:
+        server_burst = server.edge_rate_limit_burst or server.edge_rate_limit_rps * 5
+        server_rate_limit = {
+            "average": server.edge_rate_limit_rps,
+            "burst": server_burst,
+        }
+        middlewares["server-ratelimit"] = {"rateLimit": server_rate_limit}
 
     captcha: dict = {}
     if has_antibot:
@@ -275,6 +284,8 @@ async def build_traefik_dynamic_config(
         ec = edge_configs.get(pf_id)
 
         router_middlewares: list[str] = []
+        if server_rate_limit:
+            router_middlewares.append("server-ratelimit")
 
         # Rate limiting middleware
         if ec and ec.rate_limit_rps:
@@ -356,19 +367,31 @@ async def build_traefik_dynamic_config(
             **({"middlewares": router_middlewares} if router_middlewares else {}),
         }
 
-        services[f"svc-{safe_name}"] = {
-            "loadBalancer": {
-                "servers": [
-                    {"url": f"http://{pf.destination_ip}:{pf.destination_port}"}
-                ]
-            }
+        upstream_scheme = ec.upstream_scheme if ec else "http"
+        lb: dict = {
+            "servers": [
+                {"url": f"{upstream_scheme}://{pf.destination_ip}:{pf.destination_port}"}
+            ]
         }
+        if ec and ec.upstream_insecure_skip_verify:
+            servers_transports["wirewarp-insecure-skip-verify"] = {
+                "insecureSkipVerify": True
+            }
+            lb["serversTransport"] = "wirewarp-insecure-skip-verify"
 
-    return _build_http_config(routers, services, middlewares)
+        services[f"svc-{safe_name}"] = {"loadBalancer": lb}
+
+    return _build_http_config(routers, services, middlewares, servers_transports)
 
 
-def _build_http_config(routers: dict, services: dict, middlewares: dict) -> dict:
-    if not routers and not services and not middlewares:
+def _build_http_config(
+    routers: dict,
+    services: dict,
+    middlewares: dict,
+    servers_transports: dict | None = None,
+) -> dict:
+    servers_transports = servers_transports or {}
+    if not routers and not services and not middlewares and not servers_transports:
         return {}
     http = {}
     if routers:
@@ -377,6 +400,8 @@ def _build_http_config(routers: dict, services: dict, middlewares: dict) -> dict
         http["services"] = services
     if middlewares:
         http["middlewares"] = middlewares
+    if servers_transports:
+        http["serversTransports"] = servers_transports
     return {"http": http}
 
 

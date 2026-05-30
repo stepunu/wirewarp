@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
@@ -24,6 +24,18 @@ class SecurityEventRead(BaseModel):
     occurred_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class SecurityEventGroupRead(BaseModel):
+    agent_id: uuid.UUID
+    source: str
+    kind: str
+    ip: str | None = None
+    value: str | None = None
+    action: str | None = None
+    count: int
+    first_seen_at: datetime
+    last_seen_at: datetime
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +100,12 @@ class EdgeRouteConfigRead(BaseModel):
     ip_deny: list | None = None
     geo_block: list | None = None
     tls_source: str
+    upstream_scheme: str = "http"
+    upstream_insecure_skip_verify: bool = False
+    imported_router_name: str | None = None
+    imported_service_name: str | None = None
+    imported_middlewares: list | None = None
+    import_warnings: list | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -105,6 +123,37 @@ class EdgeRouteConfigUpdate(BaseModel):
     ip_deny: list | None = None
     geo_block: list | None = None
     tls_source: str | None = None
+    upstream_scheme: str | None = None
+    upstream_insecure_skip_verify: bool | None = None
+
+
+class EffectiveRateLimitValue(BaseModel):
+    rps: int | None = None
+    burst: int | None = None
+
+
+class EffectiveRateLimit(BaseModel):
+    global_: EffectiveRateLimitValue | None = Field(default=None, alias="global")
+    site: EffectiveRateLimitValue | None = None
+    model_config = {"populate_by_name": True}
+
+
+class SiteEffectivePolicy(BaseModel):
+    rate_limit: EffectiveRateLimit
+    middleware_chain: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ServerEdgePolicyRead(BaseModel):
+    server_id: uuid.UUID
+    agent_id: uuid.UUID
+    rate_limit_rps: int | None = None
+    rate_limit_burst: int | None = None
+
+
+class ServerEdgePolicyUpdate(BaseModel):
+    rate_limit_rps: int | None = None
+    rate_limit_burst: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +177,7 @@ class SiteRead(BaseModel):
     description: str | None = None
     service_kind: str = "http"
     edge_config: EdgeRouteConfigRead | None = None
+    effective_policy: SiteEffectivePolicy | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -151,6 +201,8 @@ class SiteCreate(BaseModel):
     ip_deny: list | None = None
     geo_block: list | None = None
     tls_source: str = "letsencrypt"
+    upstream_scheme: str = "http"
+    upstream_insecure_skip_verify: bool = False
 
 
 class SiteUpdate(BaseModel):
@@ -169,6 +221,57 @@ class SiteUpdate(BaseModel):
     ip_deny: list | None = None
     geo_block: list | None = None
     tls_source: str | None = None
+    upstream_scheme: str | None = None
+    upstream_insecure_skip_verify: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# Traefik Import
+# ---------------------------------------------------------------------------
+
+class TraefikImportRequest(BaseModel):
+    server_id: uuid.UUID
+    attachment_id: uuid.UUID
+    content: str
+    content_format: str = "auto"
+    domain_suffix: str | None = None
+    activate: bool = False
+    overwrite: bool = False
+
+
+class TraefikImportRoutePreview(BaseModel):
+    router_name: str
+    domain: str | None = None
+    service_name: str | None = None
+    upstream_url: str | None = None
+    destination_ip: str | None = None
+    destination_port: int | None = None
+    upstream_scheme: str = "http"
+    upstream_insecure_skip_verify: bool = False
+    tls_source: str = "letsencrypt"
+    middlewares: list[str] = Field(default_factory=list)
+    mapped_policy: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    importable: bool = False
+    existing_site_id: uuid.UUID | None = None
+
+
+class TraefikImportSummary(BaseModel):
+    routers: int
+    importable: int
+    skipped: int
+    existing: int
+
+
+class TraefikImportPreview(BaseModel):
+    summary: TraefikImportSummary
+    routes: list[TraefikImportRoutePreview]
+
+
+class TraefikImportResult(TraefikImportPreview):
+    created: int
+    updated: int
+    skipped: int
 
 
 # ---------------------------------------------------------------------------

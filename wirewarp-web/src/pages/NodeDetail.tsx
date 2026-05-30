@@ -6,10 +6,12 @@ import {
   audit as auditApi,
   nodes as nodesApi,
   portForwards as pfApi,
+  security as secApi,
+  tunnelClientAttachments as attachApi,
   tunnelClients as tcApi,
   tunnelServers as tsApi,
 } from '../lib/api'
-import { Badge, Button, KV, Stat, StatusDot, Tabs, relTime } from '../components/ui'
+import { Badge, Button, Dialog, Field, Input, KV, Select, Stat, StatusDot, Tabs, Toggle, relTime } from '../components/ui'
 import { Ic } from '../components/icons'
 import { WgPeerTable } from '../components/WgPeerTable'
 import { HealEventList } from './TunnelServerDetail'
@@ -17,7 +19,14 @@ import { CreateSiteDialog } from './SecuritySites'
 import { EditProtectionDialog } from './SecurityProtections'
 import { useRole } from '../hooks/useRole'
 import { useToast } from '../components/Toasts'
-import type { Node, NodeEdge, Site } from '../lib/types'
+import type {
+  Node,
+  NodeEdge,
+  SecurityEventGroup,
+  Site,
+  TraefikImportPreview,
+  TraefikImportRequest,
+} from '../lib/types'
 
 type Tab = 'edge' | 'forwards' | 'peers' | 'lan' | 'egress' | 'attachment' | 'activity' | 'audit'
 
@@ -166,7 +175,17 @@ function SecurityEdgePanel({ node, edge, loading }: { node: Node; edge?: NodeEdg
   const push = useToast()
   const { canMutate } = useRole()
   const [showCreate, setShowCreate] = useState(false)
+  const [showImport, setShowImport] = useState(false)
   const [editing, setEditing] = useState<Site | null>(null)
+  const eventsQ = useQuery({
+    queryKey: ['security-event-groups', node.agent_id],
+    queryFn: () => secApi.eventGroups({ agent_id: node.agent_id, limit: 8 }),
+  })
+  const attachmentsQ = useQuery({
+    queryKey: ['tunnel-client-attachments', 'server', node.tunnel_server_id],
+    queryFn: () => attachApi.list({ tunnel_server_id: node.tunnel_server_id! }),
+    enabled: !!node.tunnel_server_id && canMutate,
+  })
   const reconcile = useMutation({
     mutationFn: () => nodesApi.reconcileEdge(node.agent_id),
     onSuccess: () => {
@@ -187,11 +206,15 @@ function SecurityEdgePanel({ node, edge, loading }: { node: Node; edge?: NodeEdg
         <Stat label="traefik" value={edge.traefik.running ? 'running' : edge.traefik.phase} />
         <Stat label="sites" value={String(edge.sites.length)} />
       </div>
+      <ServerEdgeDefaults node={node} policy={edge.policy} canMutate={canMutate} />
       <div className="card">
         <div className="card-head">
           <div className="title">HTTP Sites</div>
           {canMutate && (
             <div className="row" style={{ gap: 8 }}>
+              <Button size="sm" variant="ghost" leading={<Ic.download />} onClick={() => setShowImport(true)}>
+                import
+              </Button>
               <Button size="sm" variant="ghost" leading={<Ic.plus />} onClick={() => setShowCreate(true)}>
                 add site
               </Button>
@@ -203,10 +226,22 @@ function SecurityEdgePanel({ node, edge, loading }: { node: Node; edge?: NodeEdg
         </div>
         <SitesTable sites={edge.sites} canMutate={canMutate} onEdit={setEditing} />
       </div>
+      <EdgeEventGroups rows={eventsQ.data ?? []} loading={eventsQ.isLoading} />
       {showCreate && (
         <CreateSiteDialog
           onClose={() => setShowCreate(false)}
           onSaved={() => qc.invalidateQueries({ queryKey: ['node-edge', node.agent_id] })}
+        />
+      )}
+      {showImport && node.tunnel_server_id && (
+        <TraefikImportDialog
+          serverId={node.tunnel_server_id}
+          attachments={attachmentsQ.data ?? []}
+          onClose={() => setShowImport(false)}
+          onImported={() => {
+            qc.invalidateQueries({ queryKey: ['node-edge', node.agent_id] })
+            qc.invalidateQueries({ queryKey: ['sites'] })
+          }}
         />
       )}
       {editing && (
@@ -217,6 +252,299 @@ function SecurityEdgePanel({ node, edge, loading }: { node: Node; edge?: NodeEdg
         />
       )}
     </>
+  )
+}
+
+function ServerEdgeDefaults({
+  node,
+  policy,
+  canMutate,
+}: {
+  node: Node
+  policy: NodeEdge['policy']
+  canMutate: boolean
+}) {
+  const qc = useQueryClient()
+  const push = useToast()
+  const [rps, setRps] = useState(policy.rate_limit_rps ? String(policy.rate_limit_rps) : '')
+  const [burst, setBurst] = useState(policy.rate_limit_burst ? String(policy.rate_limit_burst) : '')
+  const update = useMutation({
+    mutationFn: () =>
+      secApi.updateServerEdgePolicy(policy.server_id, {
+        rate_limit_rps: rps ? Number(rps) : null,
+        rate_limit_burst: burst ? Number(burst) : null,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['node-edge', node.agent_id] })
+      qc.invalidateQueries({ queryKey: ['server-edge-policy', policy.server_id] })
+      push('edge defaults updated', 'ok', 'edge://')
+    },
+    onError: (e: Error) => push(e.message, 'err', 'edge://'),
+  })
+
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card-head">
+        <div>
+          <div className="title">VPS Edge Defaults</div>
+          <div className="scheme">applied before each site policy</div>
+        </div>
+        {canMutate && (
+          <Button size="sm" variant="ghost" onClick={() => update.mutate()} disabled={update.isPending}>
+            save
+          </Button>
+        )}
+      </div>
+      <div className="card-body">
+        <div className="pf-attach-grid">
+          <Field label="Global rate limit" hint="Requests per second across every router on this VPS">
+            <Input
+              type="number"
+              value={rps}
+              onChange={(e) => setRps(e.target.value)}
+              placeholder="disabled"
+              disabled={!canMutate}
+              mono
+            />
+          </Field>
+          <Field label="Global burst" hint="Blank defaults to five times the rate">
+            <Input
+              type="number"
+              value={burst}
+              onChange={(e) => setBurst(e.target.value)}
+              placeholder={rps ? String(Number(rps) * 5) : 'disabled'}
+              disabled={!canMutate}
+              mono
+            />
+          </Field>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function EdgeEventGroups({ rows, loading }: { rows: SecurityEventGroup[]; loading: boolean }) {
+  return (
+    <div className="card" style={{ marginTop: 14 }}>
+      <div className="card-head">
+        <div className="title">Grouped Edge Events</div>
+        <span className="scheme">recent security signals</span>
+      </div>
+      <div className="tbl-wrap" style={{ border: 0, borderRadius: 0 }}>
+        <table className="tbl">
+          <thead>
+            <tr>
+              <th>Signal</th>
+              <th>IP</th>
+              <th>Route</th>
+              <th style={{ width: 80 }}>Count</th>
+              <th style={{ width: 120 }}>Last</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={5}>
+                  <div className="tbl-empty">
+                    <h3>{loading ? 'Loading...' : 'No grouped events'}</h3>
+                  </div>
+                </td>
+              </tr>
+            )}
+            {rows.map((row) => (
+              <tr key={`${row.source}-${row.kind}-${row.ip}-${row.value}-${row.action}`}>
+                <td>
+                  <div className="row" style={{ gap: 6 }}>
+                    <Badge tone={row.source === 'traefik' ? 'info' : row.source === 'appsec' ? 'warn' : 'err'}>
+                      {row.source}
+                    </Badge>
+                    <span className="mono">{row.kind}</span>
+                  </div>
+                </td>
+                <td className="mono">{row.ip || '—'}</td>
+                <td className="mono">{row.value || '—'}</td>
+                <td className="mono">{row.count}</td>
+                <td className="mono" style={{ color: 'var(--fg-2)' }}>{relTime(row.last_seen_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function TraefikImportDialog({
+  serverId,
+  attachments,
+  onClose,
+  onImported,
+}: {
+  serverId: string
+  attachments: import('../lib/types').TunnelClientAttachment[]
+  onClose: () => void
+  onImported: () => void
+}) {
+  const push = useToast()
+  const [attachmentId, setAttachmentId] = useState('')
+  const [domainSuffix, setDomainSuffix] = useState('ww.step1.ro')
+  const [content, setContent] = useState('')
+  const [activate, setActivate] = useState(false)
+  const [overwrite, setOverwrite] = useState(false)
+  const [preview, setPreview] = useState<TraefikImportPreview | null>(null)
+  const activeAttachment = attachmentId || attachments[0]?.id || ''
+
+  const requestBody = (): TraefikImportRequest => ({
+    server_id: serverId,
+    attachment_id: activeAttachment,
+    content,
+    content_format: 'auto',
+    domain_suffix: domainSuffix || null,
+    activate,
+    overwrite,
+  })
+
+  const previewImport = useMutation({
+    mutationFn: () => secApi.previewTraefikImport(requestBody()),
+    onSuccess: setPreview,
+    onError: (e: Error) => push(e.message, 'err', 'import://'),
+  })
+  const applyImport = useMutation({
+    mutationFn: () => secApi.importTraefik(requestBody()),
+    onSuccess: (result) => {
+      push(`imported ${result.created} new, updated ${result.updated}, skipped ${result.skipped}`, 'ok', 'import://')
+      onImported()
+      onClose()
+    },
+    onError: (e: Error) => push(e.message, 'err', 'import://'),
+  })
+
+  return (
+    <Dialog
+      title="Import Traefik config"
+      scheme="WireWarp becomes source of truth"
+      onClose={onClose}
+      width={900}
+      footer={
+        <>
+          <span className="left">
+            {preview ? `${preview.summary.importable}/${preview.summary.routers} importable` : 'paste dynamic YAML or TOML'}
+          </span>
+          <div className="right">
+            <Button variant="ghost" onClick={onClose}>Cancel</Button>
+            <Button
+              variant="ghost"
+              onClick={() => previewImport.mutate()}
+              disabled={previewImport.isPending || !content || !activeAttachment}
+            >
+              {previewImport.isPending ? 'previewing...' : 'Preview'}
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => applyImport.mutate()}
+              disabled={applyImport.isPending || !preview?.summary.importable || !activeAttachment}
+            >
+              {applyImport.isPending ? 'importing...' : 'Import'}
+            </Button>
+          </div>
+        </>
+      }
+    >
+      <div className="col" style={{ gap: 14 }}>
+        <div className="pf-attach-grid">
+          <Field label="Attachment" hint="Gateway path these imported upstreams use">
+            <Select value={activeAttachment} onChange={(e) => setAttachmentId(e.target.value)}>
+              {attachments.length === 0 && <option value="">No attachments</option>}
+              {attachments.map((a) => (
+                <option key={a.id} value={a.id}>{a.wg_interface} ({a.tunnel_ip})</option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Template domain" hint="Replaces {{ domain }} in Ansible/Jinja templates">
+            <Input value={domainSuffix} onChange={(e) => setDomainSuffix(e.target.value)} placeholder="ww.step1.ro" mono />
+          </Field>
+        </div>
+        <div className="row" style={{ gap: 18, flexWrap: 'wrap' }}>
+          <label className="row" style={{ gap: 8, fontSize: 13 }}>
+            <Toggle on={activate} onChange={setActivate} />
+            activate imported routes
+          </label>
+          <label className="row" style={{ gap: 8, fontSize: 13 }}>
+            <Toggle on={overwrite} onChange={setOverwrite} />
+            update existing domains
+          </label>
+        </div>
+        <Field label="Dynamic config" hint="Paste Traefik dynamic config. You can paste external.yml and middlewares.yml together.">
+          <textarea
+            className="textarea input-mono"
+            style={{ minHeight: 220 }}
+            value={content}
+            onChange={(e) => {
+              setContent(e.target.value)
+              setPreview(null)
+            }}
+            placeholder={'http:\\n  routers:\\n    jellyfin:\\n      rule: "Host(`media.{{ domain }}`)"\\n      service: jellyfin'}
+          />
+        </Field>
+        {preview && <TraefikImportPreviewTable preview={preview} />}
+      </div>
+    </Dialog>
+  )
+}
+
+function TraefikImportPreviewTable({ preview }: { preview: TraefikImportPreview }) {
+  return (
+    <div className="tbl-wrap" style={{ maxHeight: 260, overflow: 'auto' }}>
+      <table className="tbl">
+        <thead>
+          <tr>
+            <th>Router</th>
+            <th>Domain</th>
+            <th>Upstream</th>
+            <th>Mapped</th>
+            <th>Warnings</th>
+          </tr>
+        </thead>
+        <tbody>
+          {preview.routes.map((route) => {
+            const policy = route.mapped_policy as {
+              ip_allow?: unknown
+              auth_mode?: unknown
+              rate_limit_rps?: unknown
+            }
+            const mapped = [
+              Array.isArray(policy.ip_allow) && policy.ip_allow.length ? 'allow' : null,
+              typeof policy.auth_mode === 'string' && policy.auth_mode !== 'none' ? 'auth' : null,
+              policy.rate_limit_rps ? 'rate' : null,
+              route.upstream_insecure_skip_verify ? 'insecure tls' : null,
+            ].filter((item): item is string => Boolean(item))
+            return (
+              <tr key={route.router_name} style={{ opacity: route.importable ? 1 : 0.55 }}>
+                <td className="mono">{route.router_name}</td>
+                <td className="mono">{route.domain || '—'}</td>
+                <td className="mono">
+                  {route.destination_ip ? `${route.upstream_scheme}://${route.destination_ip}:${route.destination_port}` : '—'}
+                </td>
+                <td>
+                  <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
+                    {mapped.length === 0 && <span className="scheme">none</span>}
+                    {mapped.map((item) => <Badge key={item} tone="info">{item}</Badge>)}
+                  </div>
+                </td>
+                <td>
+                  <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
+                    {route.importable && route.warnings.length === 0 && <Badge tone="ok">ready</Badge>}
+                    {!route.importable && <Badge tone="err">blocked</Badge>}
+                    {route.warnings.slice(0, 2).map((warning) => <Badge key={warning} tone="warn">{warning}</Badge>)}
+                    {route.warnings.length > 2 && <Badge tone="neutral">+{route.warnings.length - 2}</Badge>}
+                  </div>
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
   )
 }
 
@@ -249,22 +577,25 @@ function SitesTable({
           {sites.map((s) => {
             const cfg = s.edge_config
             const protections = [
+              s.effective_policy?.rate_limit.global ? 'global rate' : null,
               cfg?.rate_limit_rps ? 'rate' : null,
               cfg?.auth_mode && cfg.auth_mode !== 'none' ? 'auth' : null,
               cfg?.ip_allow?.length ? 'allow' : null,
               cfg?.ip_deny?.length ? 'deny' : null,
               cfg?.geo_block?.length ? 'geo' : null,
               cfg?.antibot ? 'bot' : null,
-            ].filter(Boolean)
+              cfg?.upstream_scheme === 'https' ? 'https upstream' : null,
+            ].filter((item): item is string => Boolean(item))
             return (
               <tr key={s.id}>
                 <td className="mono">{s.domain || '—'}</td>
-                <td className="mono">{s.destination_ip}:{s.destination_port}</td>
+                <td className="mono">{cfg?.upstream_scheme || 'http'}://{s.destination_ip}:{s.destination_port}</td>
                 <td><Badge tone={cfg?.waf_mode === 'block' ? 'ok' : cfg?.waf_mode === 'observe' ? 'warn' : 'neutral'}>{cfg?.waf_mode || 'off'}</Badge></td>
                 <td>
                   <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
                     {protections.length === 0 && <span className="scheme">none</span>}
                     {protections.map((p) => <Badge key={p} tone="info">{p}</Badge>)}
+                    {!!s.effective_policy?.warnings.length && <Badge tone="warn">import warnings</Badge>}
                   </div>
                 </td>
                 <td><Badge tone={s.active ? 'ok' : 'neutral'}>{s.active ? 'active' : 'off'}</Badge></td>

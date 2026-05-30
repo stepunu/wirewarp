@@ -18,6 +18,8 @@ class TunnelServer(Base):
     public_iface: Mapped[str] = mapped_column(String, default="eth0")
     wg_public_key: Mapped[str | None] = mapped_column(String)
     tunnel_network: Mapped[str] = mapped_column(String, default="10.0.0.0/24")
+    edge_rate_limit_rps: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    edge_rate_limit_burst: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     agent: Mapped["Agent"] = relationship("Agent", back_populates="tunnel_server")  # noqa: F821
