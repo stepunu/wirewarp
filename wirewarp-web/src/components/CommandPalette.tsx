@@ -32,20 +32,18 @@ export function CommandPalette({
   const items = useMemo<Item[]>(() => {
     const all: Item[] = [
       { section: 'Navigate', icon: Ic.dashboard, label: 'Dashboard', hint: 'g d', action: () => navigate('/') },
-      { section: 'Navigate', icon: Ic.agent, label: 'Agents', hint: 'g a', action: () => navigate('/agents') },
-      { section: 'Navigate', icon: Ic.server, label: 'Tunnel servers', hint: 'g s', action: () => navigate('/tunnel-servers') },
-      { section: 'Navigate', icon: Ic.client, label: 'Tunnel clients', hint: 'g c', action: () => navigate('/tunnel-clients') },
+      { section: 'Navigate', icon: Ic.agent, label: 'Nodes', hint: 'g n', action: () => navigate('/nodes') },
       { section: 'Navigate', icon: Ic.host, label: 'LAN clients', hint: 'g l', action: () => navigate('/lan-clients') },
       { section: 'Navigate', icon: Ic.forward, label: 'Port forwards', hint: 'g p', action: () => navigate('/port-forwards') },
       { section: 'Navigate', icon: Ic.settings, label: 'Settings', hint: '', action: () => navigate('/settings') },
       { section: 'Actions', icon: Ic.plus, label: 'New port forward', hint: 'N', action: () => navigate('/port-forwards?new=1') },
-      { section: 'Actions', icon: Ic.plus, label: 'Issue agent token', hint: '', action: () => navigate('/agents?new=1') },
+      { section: 'Actions', icon: Ic.plus, label: 'Issue agent token', hint: '', action: () => navigate('/nodes?new=1') },
       ...agents.slice(0, 8).map<Item>((a) => ({
-        section: 'Agents',
+        section: 'Nodes',
         icon: a.type === 'server' ? Ic.server : Ic.client,
         label: a.name,
         hint: a.id,
-        action: () => navigate(`/agents/${a.id}`),
+        action: () => navigate(`/nodes/${a.id}`),
       })),
     ]
     if (!q) return all

@@ -22,6 +22,10 @@ class SystemSettingsRead(BaseModel):
     ldap_config: dict[str, Any] | None = None
     oidc_secret_set: bool = False
     ldap_secret_set: bool = False
+    captcha_provider: str | None = None
+    captcha_site_key: str | None = None
+    captcha_site_key_set: bool = False
+    captcha_secret_key_set: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -58,6 +62,10 @@ class SystemSettingsRead(BaseModel):
             "ldap_config": ldap_view,
             "oidc_secret_set": oidc_secret_set,
             "ldap_secret_set": ldap_secret_set,
+            "captcha_provider": getattr(data, "captcha_provider", None),
+            "captcha_site_key": getattr(data, "captcha_site_key", None),
+            "captcha_site_key_set": bool(getattr(data, "captcha_site_key", None)),
+            "captcha_secret_key_set": bool(getattr(data, "captcha_secret_key", None)),
         }
 
 
@@ -75,6 +83,9 @@ class SystemSettingsUpdate(BaseModel):
     # to keep the existing encrypted value.
     oidc_config: dict[str, Any] | None = None
     ldap_config: dict[str, Any] | None = None
+    captcha_provider: str | None = None
+    captcha_site_key: str | None = None
+    captcha_secret_key: str | None = None
 
 
 class AuthTestRequest(BaseModel):

@@ -22,6 +22,7 @@ from app.models.crowdsec_snapshot import CrowdSecSnapshot
 from app.models.edge_route_config import EdgeRouteConfig
 from app.models.port_forward import PortForward
 from app.models.security_event import SecurityEvent
+from app.models.system_settings import SystemSettings
 from app.models.traefik_snapshot import TraefikSnapshot
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
@@ -42,7 +43,8 @@ from app.schemas.security import (
     TopItem,
     TraefikStatusRead,
 )
-from app.services.traefik_ops import dispatch_traefik_sync
+from app.services.edge_ops import dispatch_edge_desired_state, dispatch_edge_for_attachment, site_server_context
+from app.services.secrets import get_captcha_secret_key
 
 router = APIRouter()
 
@@ -141,6 +143,7 @@ async def security_overview(
         servers.append(
             ServerStatus(
                 server_id=ts.id,
+                agent_id=agent.id,
                 name=agent.name or agent.hostname or str(ts.id),
                 crowdsec_running=bool(cs and cs.running),
                 traefik_running=bool(tk and tk.running),
@@ -191,7 +194,20 @@ async def list_security_events(
 # Sites (HTTP port_forwards)
 # ---------------------------------------------------------------------------
 
-def _site_read(pf: PortForward) -> SiteRead:
+async def _captcha_configured(db: AsyncSession) -> bool:
+    row = await db.get(SystemSettings, 1)
+    if not row:
+        return False
+    secret = await get_captcha_secret_key(db)
+    return bool(row.captcha_provider and row.captcha_site_key and secret)
+
+
+def _site_read(
+    pf: PortForward,
+    *,
+    server_id: uuid.UUID | None = None,
+    agent_id: uuid.UUID | None = None,
+) -> SiteRead:
     from app.schemas.security import EdgeRouteConfigRead
 
     ec_read = None
@@ -215,11 +231,20 @@ def _site_read(pf: PortForward) -> SiteRead:
         )
     return SiteRead(
         id=pf.id,
+        attachment_id=pf.attachment_id,
+        tunnel_server_ip_id=pf.tunnel_server_ip_id,
+        server_id=server_id,
+        agent_id=agent_id,
+        protocol=pf.protocol,
+        public_port=pf.public_port,
+        public_port_end=pf.public_port_end,
         domain=pf.domain,
         destination_ip=pf.destination_ip,
         destination_port=pf.destination_port,
+        destination_port_end=pf.destination_port_end,
         active=pf.active,
         description=pf.description,
+        service_kind=pf.service_kind,
         edge_config=ec_read,
         created_at=pf.created_at,
     )
@@ -244,19 +269,49 @@ async def _get_server_agent_for_pf(pf: PortForward, db: AsyncSession) -> str | N
 
 @router.get("/sites", response_model=list[SiteRead])
 async def list_sites(
+    server_id: uuid.UUID | None = None,
+    agent_id: uuid.UUID | None = None,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_ops_role),
 ):
     """All HTTP port_forwards joined with their edge_route_config."""
-    rows = (
-        await db.execute(
-            select(PortForward)
-            .options(selectinload(PortForward.edge_route_config))
-            .where(PortForward.service_kind == "http")
-            .order_by(PortForward.created_at.desc())
+    q = (
+        select(PortForward)
+        .options(selectinload(PortForward.edge_route_config))
+        .where(PortForward.service_kind == "http")
+        .order_by(PortForward.created_at.desc())
+    )
+    scope_server: TunnelServer | None = None
+    if agent_id is not None:
+        scope_server = await db.scalar(
+            select(TunnelServer).where(TunnelServer.agent_id == agent_id)
         )
-    ).scalars().all()
-    return [_site_read(pf) for pf in rows]
+        if scope_server is None:
+            return []
+    elif server_id is not None:
+        scope_server = await db.scalar(
+            select(TunnelServer).where(TunnelServer.id == server_id)
+        )
+        if scope_server is None:
+            return []
+    if scope_server is not None:
+        att_ids = (
+            await db.execute(
+                select(TunnelClientAttachment.id).where(
+                    TunnelClientAttachment.tunnel_server_id == scope_server.id
+                )
+            )
+        ).scalars().all()
+        if not att_ids:
+            return []
+        q = q.where(PortForward.attachment_id.in_(att_ids))
+
+    rows = (await db.execute(q)).scalars().all()
+    out: list[SiteRead] = []
+    for pf in rows:
+        sid, aid = await site_server_context(pf, db)
+        out.append(_site_read(pf, server_id=sid, agent_id=aid))
+    return out
 
 
 @router.post("/sites", response_model=SiteRead, status_code=201)
@@ -266,6 +321,9 @@ async def create_site(
     user: User = Depends(require_role("admin")),
 ):
     """Create an HTTP port_forward + edge_route_config, then sync Traefik."""
+    if body.antibot and not await _captcha_configured(db):
+        raise HTTPException(status_code=400, detail="CAPTCHA provider keys must be configured before enabling anti-bot")
+
     pf = PortForward(
         id=uuid.uuid4(),
         attachment_id=body.attachment_id,
@@ -290,6 +348,10 @@ async def create_site(
         rate_limit_burst=body.rate_limit_burst,
         antibot=body.antibot,
         auth_mode=body.auth_mode,
+        auth_config=body.auth_config,
+        ip_allow=body.ip_allow,
+        ip_deny=body.ip_deny,
+        geo_block=body.geo_block,
         tls_source=body.tls_source,
     )
     db.add(ec)
@@ -301,10 +363,11 @@ async def create_site(
 
     agent_id = await _get_server_agent_for_pf(pf, db)
     if agent_id:
-        await dispatch_traefik_sync(agent_id, db, actor_user_id=user.id)
+        await dispatch_edge_desired_state(agent_id, db, actor_user_id=user.id)
 
     emit_security_changed()
-    return _site_read(pf)
+    sid, aid = await site_server_context(pf, db)
+    return _site_read(pf, server_id=sid, agent_id=aid)
 
 
 @router.patch("/sites/{port_forward_id}", response_model=SiteRead)
@@ -321,11 +384,19 @@ async def update_site(
     )
     if pf is None:
         raise HTTPException(status_code=404, detail="Site not found")
+    if body.antibot is True and not await _captcha_configured(db):
+        raise HTTPException(status_code=400, detail="CAPTCHA provider keys must be configured before enabling anti-bot")
 
-    # Update port_forward fields
-    for field in ("domain", "destination_ip", "destination_port", "description", "active"):
+    body_fields = body.model_fields_set
+
+    # Update port_forward fields. Nullable fields may be explicitly cleared;
+    # non-null transport fields only update when a concrete value is supplied.
+    for field in ("domain", "description"):
+        if field in body_fields:
+            setattr(pf, field, getattr(body, field))
+    for field in ("destination_ip", "destination_port", "active"):
         val = getattr(body, field, None)
-        if val is not None:
+        if field in body_fields and val is not None:
             setattr(pf, field, val)
 
     # Update or create edge_route_config
@@ -334,11 +405,14 @@ async def update_site(
         ec = EdgeRouteConfig(id=uuid.uuid4(), port_forward_id=pf.id)
         db.add(ec)
     for field in (
-        "waf_mode", "rate_limit_rps", "rate_limit_burst", "antibot",
-        "auth_mode", "auth_config", "ip_allow", "ip_deny", "geo_block", "tls_source",
+        "rate_limit_rps", "rate_limit_burst", "auth_config",
+        "ip_allow", "ip_deny", "geo_block",
     ):
+        if field in body_fields:
+            setattr(ec, field, getattr(body, field))
+    for field in ("waf_mode", "antibot", "auth_mode", "tls_source"):
         val = getattr(body, field, None)
-        if val is not None:
+        if field in body_fields and val is not None:
             setattr(ec, field, val)
 
     await db.commit()
@@ -348,10 +422,11 @@ async def update_site(
 
     agent_id = await _get_server_agent_for_pf(pf, db)
     if agent_id:
-        await dispatch_traefik_sync(agent_id, db, actor_user_id=user.id)
+        await dispatch_edge_desired_state(agent_id, db, actor_user_id=user.id)
 
     emit_security_changed()
-    return _site_read(pf)
+    sid, aid = await site_server_context(pf, db)
+    return _site_read(pf, server_id=sid, agent_id=aid)
 
 
 @router.delete("/sites/{port_forward_id}", status_code=204)
@@ -368,10 +443,11 @@ async def delete_site(
     if pf is None:
         raise HTTPException(status_code=404, detail="Site not found")
     agent_id = await _get_server_agent_for_pf(pf, db)
+    attachment_id = pf.attachment_id
     await db.delete(pf)
     await db.commit()
     if agent_id:
-        await dispatch_traefik_sync(agent_id, db, actor_user_id=user.id)
+        await dispatch_edge_for_attachment(attachment_id, db, actor_user_id=user.id)
     emit_security_changed()
 
 

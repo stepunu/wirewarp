@@ -85,6 +85,20 @@ async def get_cloudflare_api_token(db: AsyncSession) -> str | None:
         return raw
 
 
+async def get_captcha_secret_key(db: AsyncSession) -> str | None:
+    """Load and decrypt the global anti-bot CAPTCHA secret key."""
+    from app.models.system_settings import SystemSettings
+
+    row = await db.get(SystemSettings, 1)
+    if row is None or not row.captcha_secret_key:
+        return None
+    raw = row.captcha_secret_key
+    try:
+        return decrypt_secret(raw)
+    except InvalidToken:
+        return raw
+
+
 # Keys inside the OIDC / LDAP JSONB blobs that hold secrets and must be
 # encrypted on save / decrypted on read. Anything not listed is stored as
 # plaintext (issuer URL, group mappings, etc).

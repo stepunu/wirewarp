@@ -49,6 +49,12 @@ class CrowdSecSnapshot(Base):
     top_scenarios: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     top_ips: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     error: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Phase 13 component rollup. `error` is kept for wire/API
+    # compatibility; newer callers should prefer `last_error`.
+    phase: Mapped[str] = mapped_column(String, nullable=False, default="unknown")
+    last_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    appsec_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    bouncer_registered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # SHA-256 hex of the JSON-encoded `{ips, cidrs}` payload the agent
     # last applied. NULL means the agent has never been told to apply a
     # whitelist (either freshly installed or pre-feature). The control

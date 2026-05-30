@@ -49,6 +49,8 @@ class PortForwardRead(BaseModel):
     destination_port_end: int | None
     description: str | None
     active: bool
+    service_kind: str = "raw"
+    domain: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

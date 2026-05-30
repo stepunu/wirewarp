@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { isAuthenticated, setToken } from './lib/api'
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useParams } from 'react-router-dom'
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
+import { isAuthenticated, setToken, tunnelClients as tcApi, tunnelServers as tsApi } from './lib/api'
 import { mountRealtime } from './lib/realtime'
 import { ToastProvider, useToast } from './components/Toasts'
 import { useRole } from './hooks/useRole'
@@ -9,12 +9,8 @@ import type { Role } from './lib/types'
 import Login from './pages/Login'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
-import Agents from './pages/Agents'
-import AgentDetail from './pages/AgentDetail'
-import TunnelServers from './pages/TunnelServers'
-import TunnelServerDetail from './pages/TunnelServerDetail'
-import TunnelClients from './pages/TunnelClients'
-import TunnelClientDetail from './pages/TunnelClientDetail'
+import Nodes from './pages/Nodes'
+import NodeDetail from './pages/NodeDetail'
 import LanClients from './pages/LanClients'
 import PortForwards from './pages/PortForwards'
 import Settings from './pages/Settings'
@@ -23,8 +19,6 @@ import VpnEndpoints from './pages/VpnEndpoints'
 import MyVpn from './pages/MyVpn'
 import SecurityOverview from './pages/SecurityOverview'
 import SecurityEvents from './pages/SecurityEvents'
-import SecuritySites from './pages/SecuritySites'
-import SecurityProtections from './pages/SecurityProtections'
 import SecurityBans from './pages/SecurityBans'
 import SecurityCerts from './pages/SecurityCerts'
 
@@ -100,6 +94,22 @@ function RoleGuard({ allow, children }: { allow: Role[]; children: React.ReactNo
   return <>{children}</>
 }
 
+function ServerNodeRedirect() {
+  const { id } = useParams<{ id: string }>()
+  const q = useQuery({ queryKey: ['tunnel-server', id], queryFn: () => tsApi.get(id!), enabled: !!id })
+  if (!id) return <Navigate to="/nodes" replace />
+  if (q.data) return <Navigate to={`/nodes/${q.data.agent_id}`} replace />
+  return null
+}
+
+function ClientNodeRedirect() {
+  const { id } = useParams<{ id: string }>()
+  const q = useQuery({ queryKey: ['tunnel-client', id], queryFn: () => tcApi.get(id!), enabled: !!id })
+  if (!id) return <Navigate to="/nodes" replace />
+  if (q.data) return <Navigate to={`/nodes/${q.data.agent_id}`} replace />
+  return null
+}
+
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -117,50 +127,44 @@ export default function App() {
             >
               <Route index element={<Dashboard />} />
               <Route
-                path="agents"
+                path="nodes"
                 element={
                   <RoleGuard allow={['admin', 'operator', 'viewer']}>
-                    <Agents />
+                    <Nodes />
                   </RoleGuard>
                 }
               />
               <Route
-                path="agents/:id"
+                path="nodes/:id"
                 element={
                   <RoleGuard allow={['admin', 'operator', 'viewer']}>
-                    <AgentDetail />
+                    <NodeDetail />
                   </RoleGuard>
                 }
               />
+              <Route path="agents" element={<Navigate to="/nodes" replace />} />
+              <Route path="agents/:id" element={<NavigateToNodeParam />} />
               <Route
                 path="tunnel-servers"
-                element={
-                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
-                    <TunnelServers />
-                  </RoleGuard>
-                }
+                element={<Navigate to="/nodes" replace />}
               />
               <Route
                 path="tunnel-servers/:id"
                 element={
                   <RoleGuard allow={['admin', 'operator', 'viewer']}>
-                    <TunnelServerDetail />
+                    <ServerNodeRedirect />
                   </RoleGuard>
                 }
               />
               <Route
                 path="tunnel-clients"
-                element={
-                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
-                    <TunnelClients />
-                  </RoleGuard>
-                }
+                element={<Navigate to="/nodes" replace />}
               />
               <Route
                 path="tunnel-clients/:id"
                 element={
                   <RoleGuard allow={['admin', 'operator', 'viewer']}>
-                    <TunnelClientDetail />
+                    <ClientNodeRedirect />
                   </RoleGuard>
                 }
               />
@@ -223,19 +227,11 @@ export default function App() {
               />
               <Route
                 path="security/sites"
-                element={
-                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
-                    <SecuritySites />
-                  </RoleGuard>
-                }
+                element={<Navigate to="/nodes" replace />}
               />
               <Route
                 path="security/protections"
-                element={
-                  <RoleGuard allow={['admin', 'operator', 'viewer']}>
-                    <SecurityProtections />
-                  </RoleGuard>
-                }
+                element={<Navigate to="/nodes" replace />}
               />
               <Route
                 path="security/bans"
@@ -259,4 +255,9 @@ export default function App() {
       </ToastProvider>
     </QueryClientProvider>
   )
+}
+
+function NavigateToNodeParam() {
+  const { id } = useParams<{ id: string }>()
+  return <Navigate to={id ? `/nodes/${id}` : '/nodes'} replace />
 }

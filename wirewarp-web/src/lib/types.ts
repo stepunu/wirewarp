@@ -161,6 +161,10 @@ export interface CrowdSecStatus {
   top_scenarios: CrowdSecScenario[]
   top_ips: CrowdSecTopIp[]
   error: string | null
+  phase: 'healthy' | 'degraded' | 'pending' | 'unknown'
+  last_error: string | null
+  appsec_enabled: boolean
+  bouncer_registered: boolean
   updated_at: string | null
 }
 
@@ -192,6 +196,8 @@ export interface PortForward {
   destination_port_end: number | null
   description: string | null
   active: boolean
+  service_kind: ServiceKind
+  domain: string | null
   created_at: string
   sensitive_service: SensitiveServiceTip | null
 }
@@ -244,6 +250,10 @@ export interface SystemSettings {
   ldap_config: Omit<LdapConfig, 'bind_password'> | null
   oidc_secret_set: boolean
   ldap_secret_set: boolean
+  captcha_provider: string | null
+  captcha_site_key: string | null
+  captcha_site_key_set: boolean
+  captcha_secret_key_set: boolean
 }
 
 export interface SystemSettingsUpdate {
@@ -256,6 +266,26 @@ export interface SystemSettingsUpdate {
   auth_provider?: AuthProvider
   oidc_config?: OidcConfig | null
   ldap_config?: LdapConfig | null
+  captcha_provider?: string | null
+  captcha_site_key?: string | null
+  captcha_secret_key?: string | null
+}
+
+export type NodeRole = 'server' | 'gateway' | 'client'
+
+export interface Node {
+  agent_id: string
+  name: string
+  role: NodeRole
+  status: 'connected' | 'disconnected' | 'pending'
+  hostname: string | null
+  public_ip: string | null
+  version: string | null
+  last_seen: string | null
+  tunnel_server_id: string | null
+  tunnel_client_id: string | null
+  is_gateway: boolean
+  edge_phase: 'healthy' | 'degraded' | 'pending' | 'unknown' | null
 }
 
 export type VpnProtocol = 'tcp' | 'udp' | 'icmp' | 'any'
@@ -340,7 +370,7 @@ export interface AuditEntry {
 
 export type WafMode = 'off' | 'observe' | 'block'
 export type AuthMode = 'none' | 'basic' | 'forward'
-export type TlsSource = 'letsencrypt' | 'manual' | 'self_signed'
+export type TlsSource = 'letsencrypt' | 'selfsigned' | 'none'
 export type ServiceKind = 'raw' | 'http'
 export type SecurityEventSource = 'crowdsec' | 'appsec' | 'traefik'
 
@@ -365,6 +395,8 @@ export interface Site {
   id: string
   attachment_id: string
   tunnel_server_ip_id: string | null
+  server_id: string | null
+  agent_id: string | null
   protocol: 'tcp' | 'udp'
   public_port: number
   public_port_end: number | null
@@ -447,6 +479,7 @@ export interface SecurityTopEntry {
 
 export interface SecurityServerStatus {
   server_id: string
+  agent_id: string | null
   name: string | null
   crowdsec_running: boolean
   traefik_running: boolean
@@ -467,7 +500,17 @@ export interface TraefikStatus {
   version: string | null
   routes_count: number
   error: string | null
+  phase: 'healthy' | 'degraded' | 'pending' | 'unknown'
+  last_error: string | null
   updated_at: string | null
+}
+
+export interface NodeEdge {
+  agent_id: string
+  phase: 'healthy' | 'degraded' | 'pending' | 'unknown'
+  crowdsec: CrowdSecStatus
+  traefik: TraefikStatus
+  sites: Site[]
 }
 
 export interface BanEntry {

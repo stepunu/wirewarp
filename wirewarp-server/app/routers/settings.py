@@ -85,6 +85,13 @@ async def update_settings(
                 row.cloudflare_api_token = val
             else:
                 row.cloudflare_api_token = encrypt_secret(val)
+        elif field == "captcha_secret_key":
+            if val is None or val == "":
+                row.captcha_secret_key = None
+            elif looks_like_fernet(val):
+                row.captcha_secret_key = val
+            else:
+                row.captcha_secret_key = encrypt_secret(val)
         elif field == "oidc_config":
             merged = _merge_provider_config(row.oidc_config, val, ("client_secret",))
             row.oidc_config = encrypt_oidc_config(merged)

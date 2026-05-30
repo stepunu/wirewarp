@@ -4,7 +4,7 @@ Self-hosted WireGuard tunnel management. Replace ad-hoc bash scripts with a sing
 
 ## Why
 
-Managing WireGuard across a homelab — multiple VPS exit nodes, gateway LXCs, port forwards, per-user VPN profiles — usually means SSH'ing around editing `wg0.conf`, `iptables -t nat`, and `ip rule`. WireWarp pushes everything from one control server over WebSocket: agents phone home, take whitelisted commands, and apply WireGuard + iptables changes locally. Private keys never leave the agent, and tunnels stay up if the control server goes down.
+Managing WireGuard across a homelab — multiple VPS exit nodes, gateway LXCs, port forwards, per-user VPN profiles — usually means SSH'ing around editing `wg0.conf`, `iptables -t nat`, and `ip rule`. WireWarp pushes everything from one control server over WebSocket: agents phone home, take whitelisted commands, and apply WireGuard + iptables changes locally. Mesh private keys stay on the agent; VPN profile private keys are returned once and not stored. Tunnels stay up if the control server goes down.
 
 ## Features
 
@@ -14,7 +14,7 @@ Managing WireGuard across a homelab — multiple VPS exit nodes, gateway LXCs, p
 - **Multi-server gateways** — one gateway client can peer with N tunnel servers simultaneously; each attachment gets its own `wgN` interface, fwmark, and routing table.
 - **Multi-IP per tunnel server** — bind port forwards to a specific public IP; DNAT rules disambiguate by destination IP.
 - **Port forwarding** — TCP/UDP DNAT with templates (DayZ, Minecraft, Web, RDP). Live iptables preview.
-- **VPN endpoints + per-user permissions** — admins configure a VPN endpoint per gateway; users get device profiles + QR code at `/vpn`. Per-(user, endpoint) firewall rules.
+- **VPN endpoints + per-user permissions** — admins configure a VPN endpoint on a gateway client; users get device profiles + QR code at `/vpn`. Per-(user, endpoint) firewall rules.
 - **LAN client discovery + DNS sync** — gateway agents scrape conntrack for LAN hosts; DNS records sync to Cloudflare automatically when egress IP changes (or surface a manual-update notice).
 
 ### Observability
@@ -23,7 +23,7 @@ Managing WireGuard across a homelab — multiple VPS exit nodes, gateway LXCs, p
 - **wg-easy-style peer tables** — every WireGuard interface (mesh `wg0/wgN` + road-warrior `wg-vpnN`) ships per-peer RX/TX, endpoint, allowed IPs, persistent-keepalive, and a handshake-recency status dot. Same component on tunnel-server detail, tunnel-client detail, and `VPN endpoints`.
 - **Heal events feed** — when the agent's 60s self-healer re-installs missing routing state, the event lands in `agent_heal_events`; the agent detail page grows a warn badge with the count of last-24h drift incidents.
 - **CrowdSec status card** — tunnel-server detail surfaces `cscli` version, active decisions, top scenarios, top banned IPs. Polled every 5 min by the agent.
-- **Real-time updates** — single WebSocket hub fan-out; no polling. Dashboard reacts within ~50 ms of a server-side change.
+- **Real-time updates** — dashboard state is primarily invalidated through `/ws/dashboard`; selected security/status views keep short scoped polling or a fallback poll for offline WebSocket recovery.
 
 ### Resilience
 
@@ -39,13 +39,13 @@ Managing WireGuard across a homelab — multiple VPS exit nodes, gateway LXCs, p
 - **Sensitive-port advisory** — the "New port forward" dialog runs the chosen (protocol, port) through a server-side classifier and renders a tip card before submit. Catalogue covers SSH, Telnet, MySQL, Postgres, MongoDB, Redis, Memcached, Elasticsearch, CouchDB, RDP, VNC, Webmin, mail submission, admin HTTP. Tip copy stays narrow on purpose — recommends host-local mitigations (CrowdSec, fail2ban, hide behind WireWarp), no third-party CDN / edge service.
 - **Auth** — local users (bcrypt), OIDC (Google/GitHub/generic), and LDAP. Roles: `admin`, `operator`, `viewer`, plus a `vpn_user` role whose only access is `/vpn`.
 - **Audit log** — every dispatched command logged with actor, type, and details. Visible in dashboard.
-- **No arbitrary shell execution** — agents execute whitelisted command types only. No `eval`, no `bash -c`. Privileged installer subcommands (apt, cscli) escape the agent's restricted `CapabilityBoundingSet` via `systemd-run` transient units, not by relaxing the agent itself.
+- **No arbitrary remote shell execution** — agents execute whitelisted command types only. No `eval` or user-supplied shell snippets. Privileged installer subcommands (apt, cscli) escape the agent's restricted `CapabilityBoundingSet` via `systemd-run` transient units, not by relaxing the agent itself.
 
 ### Operator UX
 
 - **Mobile-responsive dashboard** — phone-first layout with bottom-tab nav, full-screen sheets for dialogs, table-as-card lists. Viewer role lands on `/vpn` directly.
 - **One-command install** — `curl … | bash -s -- --mode <s|c>`. Idempotent. Supports Debian/Ubuntu, RHEL/Fedora, Alpine.
-- **In-place agent update** — dashboard "Update Agent" button. SHA256-verified, restart via systemd.
+- **In-place agent update** — dashboard "Update Agent" button downloads the checked-in agent binary from GitHub and restarts via systemd. Hash verification is still a hardening task.
 
 ## Architecture
 
@@ -138,14 +138,14 @@ Once **Connected**, open **Tunnel Servers → Edit** to set Public IP / WG port 
 
 ### 5. Deploy a Tunnel Client agent
 
-**Add Agent → Tunnel Client → Generate Token**, run on the gateway LXC/VM. Then **Tunnel Clients → Edit**:
+**Add Agent → Tunnel Client → Generate Token**, run on the gateway LXC/VM. Then open **Tunnel Clients → [client]**:
 
-- Connect to the tunnel server from step 4
-- Tunnel IP (e.g. `10.21.0.3`)
-- Is Gateway (enable to route LAN traffic via the VPS)
-- LAN Network + LAN IP
+- Enable **Is Gateway** if this client forwards inbound traffic to LAN services.
+- Set LAN Network + LAN IP when gateway mode is enabled.
+- Add an attachment to the tunnel server from step 4.
+- Leave Tunnel IP blank to auto-allocate, or set one manually inside the server network.
 
-Save → control server orchestrates the handshake automatically:
+Save/create the attachment → control server orchestrates the handshake automatically:
 
 1. Client agent applies WireGuard + gateway routing
 2. Client reports its public key
@@ -170,17 +170,17 @@ Walks through the 7-step policy-routing assertion and prints what's missing.
 
 ## LAN device setup (gateway mode)
 
-When a tunnel client is configured as a gateway, other LAN devices route through the VPS by setting their default gateway to the tunnel client's LAN IP.
+When a tunnel client is configured as a gateway, inbound port forwards can reach LAN devices behind it. LAN-originated outbound traffic is not sent through a VPS by default; pin a discovered LAN client in the dashboard when that host should egress through a specific tunnel server/public IP.
 
-On each LAN device:
-- **Default Gateway** — the tunnel client's LAN IP (e.g. `192.168.1.10`)
-- **DNS** — a public resolver (`1.1.1.1` or `8.8.8.8`); the tunnel doesn't carry DNS
+For LAN egress pinning, the LAN host must send traffic through the gateway client, usually by setting:
+- **Default Gateway** — the tunnel client's LAN IP (e.g. `192.168.1.10`) or equivalent split-default routes.
+- **DNS** — whatever resolver your LAN policy requires.
 
 Proxmox LXC example: edit `/etc/network/interfaces`, set `gateway 192.168.1.10`.
 
 ## Updating agents
 
-**From the dashboard** (recommended): **Agents → [name] → Update Agent**. Downloads the latest binary from GitHub, verifies SHA256, restarts via systemd. No SSH.
+**From the dashboard** (recommended): **Agents → [name] → Update Agent**. Downloads the latest checked-in binary from GitHub and restarts via systemd. No SSH. SHA256 verification is not implemented yet.
 
 **Manually**:
 
@@ -200,7 +200,7 @@ CI rebuilds the binary on every push to `main` and commits it back. Agents repor
 
 **Agent can't reach the internet after stopping:** older agents left routing rules behind. `wg-quick down wg0` and delete ip rules at priorities 99, 100, 200, 5000, 5100, 30000.
 
-**Tunnel handshake but no internet on LAN devices:** the tunnel server is missing IP forwarding or MASQUERADE. Re-save the tunnel server config to re-fire `wg_init`.
+**LAN egress pin active but no internet on that LAN device:** confirm the LAN host routes through the gateway client, then check the gateway attachment and server-side forwarding state. Re-save the relevant tunnel server config to re-fire `wg_init` if server IP forwarding or MASQUERADE drifted.
 
 **`wg show` shows 0 B received:** the tunnel server doesn't have the client as a peer. Check the tunnel server agent logs for `wg_add_peer` errors; re-save the tunnel client config.
 
@@ -242,19 +242,19 @@ make build    # → dist/wirewarp-agent (linux/amd64, static)
 |-----------|-------|
 | Control server | Python 3.11+, FastAPI, SQLAlchemy 2.0 async, asyncpg, Alembic, Pydantic v2, python-jose, passlib+bcrypt, authlib (OIDC), ldap3 (LDAP) |
 | Web dashboard | React 19, TypeScript 5.9, Vite 7, plain CSS (OKLCH tokens), TanStack Query v5, Zustand, React Router v7 |
-| Go agent | Go 1.22+, `nhooyr.io/websocket`, `gopkg.in/yaml.v3` — single static binary |
+| Go agent | Go toolchain must match `wirewarp-agent/go.mod`; CI currently pins Go 1.22 and should be reconciled with the module directive. Uses `nhooyr.io/websocket`, `gopkg.in/yaml.v3` — single static binary |
 | Database | PostgreSQL 16 |
 | Deployment | Docker Compose (server), systemd (agents) |
 
 ## Key design decisions
 
 - **Agents phone home** — outbound WebSocket only. The control server never connects to agents.
-- **Private keys never leave the agent** — WireGuard keypairs are generated on-host; only public keys hit the control server.
+- **Mesh private keys never leave the agent** — site-to-site WireGuard keypairs are generated on-host; only public keys hit the control server. VPN profile private keys are returned once in generated configs and not stored.
 - **Offline resilience** — agents read disk config and bring up tunnels before the WS connection completes. Tunnels survive control-server outages.
 - **Clean shutdown** — agents tear down WireGuard + routing on stop. No leftover rules.
-- **No arbitrary shell execution** — agents execute whitelisted command types only. No `eval`, no `bash -c`.
+- **No arbitrary remote shell execution** — agents expose whitelisted command types only. No `eval` or user-supplied shell snippets.
 - **Single binary** — `--mode server|client` selects behavior. Same binary either way.
-- **Gateways are inbound-only** — gateway clients DNAT inbound traffic to LAN hosts. They do not route LAN-originated outbound traffic through any tunnel; the LAN's normal default router does.
+- **Gateways are inbound-only by default** — gateway clients DNAT inbound traffic to LAN hosts. LAN-originated outbound through a VPS is opt-in per LAN client/attachment.
 - **Each tunnel server gets a unique `/24`** — auto-allocated from `10.21.0.0/24`, `10.22.0.0/24`, … on registration. Cross-server routing and rebase rely on it.
 
 ## Project structure
@@ -265,9 +265,12 @@ wirewarp/
 │   ├── app/
 │   │   ├── main.py           # App entrypoint, WebSocket handler, SPA serving
 │   │   ├── models/           # SQLAlchemy ORM. Notable tables:
-│   │   │                     #   agent_heal_events     (drift audit, 0020)
-│   │   │                     #   wg_peer_snapshots     (unified mesh+VPN, 0021)
-│   │   │                     #   crowdsec_snapshots    (per-agent, 0022/0023)
+│   │   │                     #   agent_heal_events     (drift audit)
+│   │   │                     #   wg_peer_snapshots     (unified mesh+VPN)
+│   │   │                     #   wg_traffic_samples    (traffic charts)
+│   │   │                     #   crowdsec_snapshots    (per-agent)
+│   │   │                     #   traefik_snapshots     (edge proxy status)
+│   │   │                     #   security_events       (edge/security feed)
 │   │   ├── schemas/          # Pydantic request/response schemas
 │   │   ├── routers/          # REST API. Per-entity dashboards live at
 │   │   │                     #   /tunnel-servers/{id}/{summary,wg-peers,crowdsec,crowdsec/install}
@@ -275,13 +278,15 @@ wirewarp/
 │   │   │                     #   /vpn-endpoints/{id}/wg-peers
 │   │   │                     #   /agents/{id}/heal-events
 │   │   │                     #   /port-forwards/classify  (sensitive-service)
+│   │   │                     #   /security/*              (overview, events, sites)
 │   │   ├── websocket/        # WS hub + dispatch (heartbeat, command_result,
-│   │   │                     #   metrics, heal_event, crowdsec_status)
+│   │   │                     #   metrics, heal_event, crowdsec_status,
+│   │   │                     #   traefik_status, security_events)
 │   │   ├── realtime/         # Event bus + typed dashboard emitters
 │   │   └── services/         # Command dispatch, network alloc, dns_sync,
-│   │                         #   port_security (catalogue), crowdsec_ops
-│   │                         #   (auto-whitelist builder), secrets
-│   ├── alembic/              # Migrations 0001 … current head
+│   │                         #   port_security, crowdsec_ops, traefik_ops,
+│   │                         #   vpn_ops, traffic_sampler, secrets
+│   ├── alembic/              # Migrations 0001 ... 0030_security_events
 │   ├── Dockerfile            # Multi-stage build (frontend + backend)
 │   └── docker-compose.yml
 ├── wirewarp-web/             # React dashboard

@@ -19,8 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.edge_route_config import EdgeRouteConfig
 from app.models.port_forward import PortForward
+from app.models.system_settings import SystemSettings
 from app.models.tunnel_server import TunnelServer
-from app.models.traefik_snapshot import TraefikSnapshot
+from app.services.secrets import get_captcha_secret_key
 
 
 def build_traefik_static_config(
@@ -64,10 +65,18 @@ def build_traefik_static_config(
         # by the agent via 'traefik install --plugin'.
         "experimental": {
             "plugins": {
-                "crowdsec-bouncer-traefik-plugin": {
+                "bouncer": {
                     "moduleName": "github.com/maxlerebourg/crowdsec-bouncer-traefik-plugin",
-                    "version": "v1.3.5",
-                }
+                    "version": "v1.4.5",
+                },
+                "denyip": {
+                    "moduleName": "github.com/kvncrw/denyip",
+                    "version": "v2.0.0",
+                },
+                "geoblock": {
+                    "moduleName": "github.com/nscuro/traefik-plugin-geoblock",
+                    "version": "v0.14.0",
+                },
             }
         },
     }
@@ -130,8 +139,10 @@ async def build_traefik_dynamic_config(
         )
         http_forwards = list(pf_result.scalars().all())
 
-    # Check if any route has WAF enabled (crowdsec plugin middleware needed)
+    # Check global middleware needs up front.
     has_waf = False
+    has_waf_block = False
+    has_antibot = False
     edge_configs: dict[str, EdgeRouteConfig] = {}
     for pf in http_forwards:
         ec = await db.scalar(
@@ -141,25 +152,46 @@ async def build_traefik_dynamic_config(
             edge_configs[str(pf.id)] = ec
             if ec.waf_mode != "off":
                 has_waf = True
+            if ec.waf_mode == "block":
+                has_waf_block = True
+            if ec.antibot:
+                has_antibot = True
 
     routers: dict = {}
     services: dict = {}
     middlewares: dict = {}
 
-    # Build the CrowdSec bouncer middleware if any route has WAF active.
-    # The bouncer key is stored per-snapshot after crowdsec_appsec_enable;
-    # we include the middleware definition here so it's available for
-    # routers that reference it — the agent applies the file; CrowdSec
-    # validates the key.
-    if has_waf:
+    captcha: dict = {}
+    if has_antibot:
+        settings = await db.get(SystemSettings, 1)
+        secret = await get_captcha_secret_key(db)
+        if settings and settings.captcha_provider and settings.captcha_site_key and secret:
+            captcha = {
+                "captchaProvider": settings.captcha_provider,
+                "captchaSiteKey": settings.captcha_site_key,
+                "captchaSecretKey": secret,
+                "captchaGracePeriodSeconds": 1800,
+                "captchaHTMLFilePath": "/etc/traefik/captcha.html",
+            }
+
+    # The agent injects the local bouncer key before writing this file.
+    if has_waf or has_antibot:
+        bouncer_cfg = {
+            "enabled": True,
+            "crowdsecMode": "stream",
+            "crowdsecLapiScheme": "http",
+            "crowdsecLapiHost": "localhost:8080",
+            "crowdsecLapiKey": "${WIREWARP_CROWDSEC_BOUNCER_KEY}",
+            "httpTimeoutSeconds": 60,
+            "crowdsecAppsecEnabled": has_waf,
+            "crowdsecAppsecHost": "127.0.0.1:7422",
+            "crowdsecAppsecFailureBlock": has_waf_block,
+            "crowdsecAppsecUnreachableBlock": False,
+        }
+        bouncer_cfg.update(captcha)
         middlewares["crowdsec-bouncer"] = {
             "plugin": {
-                "crowdsec-bouncer-traefik-plugin": {
-                    "enabled": True,
-                    "crowdsecLapiScheme": "http",
-                    "crowdsecLapiHost": "localhost:8080",
-                    "crowdsecMode": "live",
-                }
+                "bouncer": bouncer_cfg,
             }
         }
 
@@ -191,8 +223,30 @@ async def build_traefik_dynamic_config(
             }
             router_middlewares.append(mw_name)
 
+        if ec and ec.ip_deny:
+            mw_name = f"ipdeny-{safe_name}"
+            middlewares[mw_name] = {
+                "plugin": {"ipDenyList": ec.ip_deny}
+            }
+            router_middlewares.append(mw_name)
+
+        if ec and ec.geo_block:
+            mw_name = f"geoblock-{safe_name}"
+            middlewares[mw_name] = {
+                "plugin": {
+                    "geoblock": {
+                        "enabled": True,
+                        "blockedCountries": ec.geo_block,
+                        "defaultAllow": True,
+                        "allowPrivate": True,
+                        "disallowedStatusCode": 403,
+                    }
+                }
+            }
+            router_middlewares.append(mw_name)
+
         # WAF / CrowdSec bouncer
-        if ec and ec.waf_mode != "off":
+        if ec and (ec.waf_mode != "off" or ec.antibot):
             router_middlewares.append("crowdsec-bouncer")
 
         # Basic auth

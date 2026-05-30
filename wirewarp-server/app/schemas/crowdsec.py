@@ -21,6 +21,10 @@ class CrowdSecSnapshotRead(BaseModel):
     top_scenarios: list[CrowdSecScenarioCount] = []
     top_ips: list[CrowdSecTopIp] = []
     error: str | None = None
+    phase: str = "unknown"
+    last_error: str | None = None
+    appsec_enabled: bool = False
+    bouncer_registered: bool = False
     updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}

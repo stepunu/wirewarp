@@ -33,3 +33,6 @@ __pycache__
 /HOMELAB_INTEGRATION.md
 /docs
 /legacy
+
+/SafeLine-main/*
+/bunkerweb-master/*

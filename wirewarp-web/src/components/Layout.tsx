@@ -8,7 +8,7 @@ import { HelpOverlay } from './HelpOverlay'
 import { BottomNav } from './BottomNav'
 import { useGlobalHotkeys } from '../hooks/useHotkeys'
 import { useRole } from '../hooks/useRole'
-import { agents as agentsApi, auth as authApi, portForwards as pfApi, clearToken } from '../lib/api'
+import { agents as agentsApi, auth as authApi, nodes as nodesApi, portForwards as pfApi, clearToken } from '../lib/api'
 
 import type { Role } from '../lib/types'
 
@@ -24,9 +24,7 @@ type NavEntry = {
 }
 const NAV: NavEntry[] = [
   { path: '/', label: 'Dashboard', icon: Ic.dashboard, exact: true },
-  { path: '/agents', label: 'Agents', icon: Ic.agent, roles: ['admin', 'operator', 'viewer'] },
-  { path: '/tunnel-servers', label: 'Tunnel servers', icon: Ic.server, roles: ['admin', 'operator', 'viewer'] },
-  { path: '/tunnel-clients', label: 'Tunnel clients', icon: Ic.client, roles: ['admin', 'operator', 'viewer'] },
+  { path: '/nodes', label: 'Nodes', icon: Ic.agent, roles: ['admin', 'operator', 'viewer'] },
   { path: '/lan-clients', label: 'LAN clients', icon: Ic.host, roles: ['admin', 'operator', 'viewer'] },
   { path: '/port-forwards', label: 'Port forwards', icon: Ic.forward, roles: ['admin', 'operator', 'viewer'] },
   { path: '/vpn-endpoints', label: 'VPN endpoints', icon: Ic.client, roles: ['admin', 'operator'] },
@@ -38,8 +36,6 @@ const NAV: NavEntry[] = [
 const SECURITY_NAV: NavEntry[] = [
   { path: '/security', label: 'Overview', icon: Ic.chart, exact: true, roles: ['admin', 'operator', 'viewer'] },
   { path: '/security/events', label: 'Events', icon: Ic.alert, roles: ['admin', 'operator', 'viewer'] },
-  { path: '/security/sites', label: 'Sites', icon: Ic.globe, roles: ['admin', 'operator', 'viewer'] },
-  { path: '/security/protections', label: 'Protections', icon: Ic.shield, roles: ['admin', 'operator', 'viewer'] },
   { path: '/security/bans', label: 'Bans', icon: Ic.ban, roles: ['admin', 'operator', 'viewer'] },
   { path: '/security/certs', label: 'Certs', icon: Ic.cert, roles: ['admin', 'operator', 'viewer'] },
 ]
@@ -98,6 +94,11 @@ export default function Layout() {
 
     staleTime: 4000,
   })
+  const nodesQ = useQuery({
+    queryKey: ['nodes'],
+    queryFn: nodesApi.list,
+    staleTime: 4000,
+  })
   const pfQ = useQuery({
     queryKey: ['port-forwards'],
     queryFn: () => pfApi.list(),
@@ -122,6 +123,7 @@ export default function Layout() {
   })
 
   const agents = agentsQ.data ?? []
+  const nodes = nodesQ.data ?? []
   const pfCount = pfQ.data?.length ?? 0
   const crumb = pathToCrumb(location.pathname)
 
@@ -155,7 +157,7 @@ export default function Layout() {
             >
               <p.icon s={14} />
               <span>{p.label}</span>
-              {p.path === '/agents' && <span className="badge">{agents.length}</span>}
+              {p.path === '/nodes' && <span className="badge">{nodes.length}</span>}
               {p.path === '/port-forwards' && <span className="badge">{pfCount}</span>}
             </NavLink>
           ))}

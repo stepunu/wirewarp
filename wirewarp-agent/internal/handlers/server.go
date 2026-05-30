@@ -121,6 +121,7 @@ func (h *ServerHandlers) Register(exec *executor.Executor) {
 	exec.Register("traefik_install", h.handleTraefikInstall)
 	exec.Register("traefik_sync_config", h.handleTraefikSyncConfig)
 	exec.Register("crowdsec_appsec_enable", h.handleCrowdSecAppSecEnable)
+	exec.Register("edge_desired_state", h.handleEdgeDesiredState)
 }
 
 // --- command handlers ---
@@ -285,7 +286,7 @@ func (h *ServerHandlers) handleRemovePeer(raw json.RawMessage) (string, error) {
 type addForwardParams struct {
 	Protocol      string `json:"protocol"`
 	PublicPort    int    `json:"public_port"`
-	PublicPortEnd int    `json:"public_port_end"`   // 0 = single port
+	PublicPortEnd int    `json:"public_port_end"` // 0 = single port
 	DestIP        string `json:"destination_ip"`
 	DestPort      int    `json:"destination_port"`
 	DestPortEnd   int    `json:"destination_port_end"` // 0 = single port

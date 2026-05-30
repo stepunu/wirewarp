@@ -68,7 +68,7 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
 
 ## Phase 5: React Dashboard
 
-- [x] 5.1 Project scaffolding (Vite + React 18 + TypeScript + Tailwind CSS)
+- [x] 5.1 Project scaffolding (Vite + React 19 + TypeScript + plain CSS)
 - [x] 5.2 Authentication UI (login, JWT, protected routes)
 - [x] 5.3 Dashboard overview (summary cards, live agent status)
 - [x] 5.4 Agent management (list, add, detail, delete)
@@ -89,7 +89,7 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
 
 ### 6.2 Command dispatch from dashboard
 - [x] Tunnel server save → sends `wg_init` to agent
-- [x] Tunnel client save → sends `wg_configure` to client + `wg_add_peer` to server
+- [x] Tunnel client attachment create → sends `wg_attach` to client + `wg_add_peer` to server after public key return
 - [x] Public key extraction from command results, auto peer addition
 - [x] Server-side ip_forward + MASQUERADE on `wg_init`
 
@@ -112,11 +112,12 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
 - [x] Gateway verification script (`verify-gateway.sh`)
 
 ### 6.5 Remaining
-- [ ] Agent update mechanism (download new binary, verify hash, restart)
-- [ ] Dashboard "Update Agent" button
-- [ ] Command history view in dashboard (per agent)
-- [ ] API endpoint tests (pytest + httpx)
-- [ ] Go agent unit tests
+- [x] Agent update mechanism (downloads checked-in binary, replaces executable, restarts)
+- [x] Dashboard "Update Agent" button and bulk update action
+- [x] Command history view in dashboard (dashboard activity + per-agent audit tab)
+- [x] API endpoint tests (pytest + httpx coverage across core routers)
+- [ ] Agent update hardening: SHA256 verification + rollback
+- [ ] Go agent unit tests beyond current validation/CrowdSec parsing coverage
 
 ---
 
@@ -129,78 +130,79 @@ Status key: `[ ]` pending | `[~]` in progress | `[x]` done | `[-]` skipped
 
 ### 7.2 DNS configuration for tunnel clients
 - [ ] Add DNS field to tunnel client model + migration
-- [ ] Pass DNS to agent in `wg_configure` params
+- [ ] Pass DNS to agent in attachment params if tunnel-client DNS config returns
 - [ ] Agent writes `DNS =` line into `wg0.conf`
 - [ ] Dashboard DNS field in tunnel client edit form
 
 ### 7.3 Agent update mechanism
-- [ ] Agent `self_update` command: download new binary from URL, verify SHA256, replace, restart via systemd
+- [x] Agent `agent_update` command: download checked-in binary, replace, restart via systemd
+- [ ] Verify SHA256 before replace and keep rollback backup
 - [ ] Server endpoint to serve latest binary + hash
-- [ ] Dashboard "Update Agent" button per agent
+- [x] Dashboard "Update Agent" button per agent
 
 ---
 
 ## Phase 8: OAuth & Multi-User
 
 ### 8.1 OAuth / SSO login
-- [ ] Add OAuth2 provider config (Google, GitHub, generic OIDC) to server settings
-- [ ] OAuth login flow — exchange code for token, map to local user, issue JWT
-- [ ] Login page: show OAuth buttons alongside username/password form
-- [ ] Settings page for admin to configure OAuth providers
+- [x] Add OIDC provider config (Google/GitHub/generic style) to server settings
+- [x] OIDC login flow — exchange code for token, map to local user, issue JWT
+- [x] Login page: show configured OIDC/LDAP options alongside username/password form
+- [x] Settings page for admin to configure OIDC and LDAP providers
 
 ### 8.2 Multi-user with granular permissions
-- [ ] Roles model: admin, operator, viewer
-- [ ] Per-resource ownership (which user owns which agents/tunnels/forwards)
-- [ ] Permission checks on all API endpoints
-- [ ] Dashboard UI: show/hide actions based on role
-- [ ] User management page (admin only): list, invite, change role, delete
+- [x] Roles model: admin, operator, viewer, vpn_user
+- [-] Per-resource ownership (not implemented; current model is role-based access)
+- [x] Permission checks on API endpoints
+- [x] Dashboard UI: show/hide actions based on role
+- [x] User management page (admin only): list, create, change role/access, delete
 
 ---
 
 ## Phase 9: Multi-IP & Port Forwarding Enhancements
 
 ### 9.1 Multi-IP support
-- [ ] IP pool model: assign multiple public IPs to a tunnel server
-- [ ] Migration + API endpoints for IP pool CRUD
-- [ ] Port forward rules can bind to a specific public IP (not just the primary)
-- [ ] Agent `iptables_add_forward` already accepts public IP — wire it through
-- [ ] Dashboard: IP pool management, IP selector in port forward form
+- [x] IP pool model: assign multiple public IPs to a tunnel server
+- [x] Migration + API endpoints for IP pool CRUD
+- [x] Port forward rules can bind to a specific public IP (not just the primary)
+- [x] Agent `iptables_add_forward` accepts public IP and DNAT scopes by destination IP
+- [x] Dashboard: IP pool management, IP selector in port forward form
 
 ---
 
 ## Phase 10: Monitoring & Security
 
 ### 10.1 Metrics collection
-- [ ] Agent periodically sends metrics via WebSocket (CPU, memory, bandwidth, peer stats from `wg show`)
-- [ ] `metrics` table in DB with timestamps + agent FK
-- [ ] API endpoints to query metric ranges per agent
+- [~] Agent periodically sends heartbeat/peer state via WebSocket; raw metrics handler exists, CPU/memory coverage is not complete
+- [x] `metrics`, `wg_peer_snapshots`, and `wg_traffic_samples` tables exist
+- [~] API endpoints expose peer snapshots and security traffic aggregates; general per-agent metric ranges are still incomplete
 
 ### 10.2 Metrics dashboard
-- [ ] Dashboard metrics page with charts (Recharts or similar)
-- [ ] Per-agent: bandwidth over time, peer count, CPU/memory
-- [ ] Overview: total bandwidth, connected agents, active tunnels
+- [~] Dashboard has operational summaries and uPlot-backed security charts, not a complete standalone metrics page
+- [~] Per-agent/detail pages show peer status and traffic counters; CPU/memory charts are not implemented
+- [x] Overview shows connected agents, tunnel servers, clients, and active forwards
 
 ### 10.3 CrowdSec integration
-- [ ] Agent command `crowdsec_install`: install CrowdSec + firewall bouncer on tunnel server
-- [ ] Agent command `crowdsec_configure`: set ban lists, scenarios
-- [ ] Dashboard toggle per tunnel server: enable/disable CrowdSec
+- [x] Agent command `crowdsec_install`: install CrowdSec + firewall bouncer on tunnel server
+- [~] Agent command `crowdsec_sync_whitelist`: desired whitelist sync exists; full ban/scenario configuration is not complete
+- [x] Dashboard install/status card per tunnel server
 
 ---
 
 ## Phase 11: Testing & Polish
 
 ### 11.1 Command history
-- [ ] Dashboard command history view per agent (query `command_log` table)
-- [ ] Filter by status, command type, date range
+- [x] Dashboard command history view per agent (query `command_log` table)
+- [~] Filtering exists at API level for agent/event type; richer dashboard filtering still pending
 
 ### 11.2 API tests
-- [ ] pytest + httpx test suite for all REST endpoints
-- [ ] Auth tests (login, JWT, protected routes)
-- [ ] WebSocket connection tests
+- [x] pytest + httpx test suite for core REST endpoints
+- [x] Auth tests (login, JWT, protected routes, OIDC/LDAP support)
+- [~] WebSocket handler tests exist; full connection-level coverage remains limited
 
 ### 11.3 Go agent unit tests
-- [ ] Unit tests for config, executor, handlers
-- [ ] Mock wireguard/iptables for testability
+- [~] Unit tests for validation and CrowdSec parsing exist
+- [ ] Mock wireguard/iptables for broader handler testability
 
 ---
 
@@ -218,35 +220,35 @@ applied, tests green, `/rebuild`, manual gate verified, commit.
 - [x] Split `installed` vs `running`; PATH-independent cscli/systemctl detection; surface service errors (commit `212eb1b`)
 
 ### 12.1 Security Overview + charting layer
-- [ ] `wg_traffic_samples` append-only table sampled from `wg_peer_snapshots` + retention/downsampling
-- [ ] Aggregate endpoints (per-server + global) over CrowdSec snapshots + traffic samples
-- [ ] `/security` Overview page; add uPlot; KPI tiles + access/block time-series + top attackers; Security sidebar section
+- [x] `wg_traffic_samples` append-only table sampled from `wg_peer_snapshots` + retention
+- [~] Aggregate endpoints over CrowdSec snapshots + traffic samples exist, but several access/visitor/HTTP series are placeholders
+- [~] `/security` Overview page, uPlot layer, KPI tiles, top attackers, and Security sidebar exist; real aggregate completeness still pending
 - [ ] Gate: Overview renders real aggregates with a working time-range toggle
 
 ### 12.2 Events / Reports
-- [ ] Normalize CrowdSec decisions/alerts into a filterable feed + drill-down endpoint
-- [ ] `/security/events` table → request drill-down (payload, matched rule, attack type, action, attacker IP + geo)
+- [~] `security_events` table/API/feed exists; CrowdSec/Traefik normalization and drill-down payloads are still partial
+- [x] `/security/events` page exists
 - [ ] Gate: a triggered detection appears with full drill-down
 
 ### 12.3 Traefik edge + Sites
-- [ ] Agent: `traefik_install` + `traefik_sync_config` commands; file-provider config under `/etc/traefik/dynamic/`; offline-resilient
-- [ ] `port_forwards.service_kind` (http|raw) + `domain`; new `edge_route_config` table
-- [ ] HTTP-service CRUD → Traefik routers (Host rule → upstream over tunnel); raw stays DNAT
-- [ ] `/security/sites` page with run-mode + feature-toggle chips
+- [x] Agent: `traefik_install` + `traefik_sync_config` commands; file-provider config under `/etc/traefik/dynamic/`; offline-resilient
+- [x] `port_forwards.service_kind` (http|raw) + `domain`; new `edge_route_config` table
+- [x] HTTP-service CRUD → Traefik routers (Host rule → upstream over tunnel); raw stays DNAT
+- [x] `/security/sites` page with run-mode + feature-toggle chips
 - [ ] Gate: an HTTP service is reachable through Traefik+TLS; raw forward still works; Traefik survives agent restart from disk
 
 ### 12.4 WAF (CrowdSec AppSec via Traefik plugin)
-- [ ] Agent: AppSec collections (`appsec-virtual-patching`, appsec-config `crowdsecurity/crs`); `cscli bouncers add`; render bouncer+AppSec into Traefik config
-- [ ] Per-route WAF mode (off/observe/block) on `edge_route_config` + Sites run-mode
+- [~] Agent: AppSec enable command and Traefik middleware rendering exist; collection/bouncer lifecycle needs more hardening
+- [x] Per-route WAF mode (off/observe/block) on `edge_route_config` + Sites run-mode
 - [ ] Gate: simulated SQLi/XSS blocked (block) or logged (observe) → appears in Events
 
 ### 12.5 Protections (edge rules)
-- [ ] Per-route middlewares + CrowdSec config: rate-limit, antibot (captcha), auth, ACL (IPAllowList + CrowdSec blacklist/whitelist), geo-block, dnsbl
-- [ ] `/security/protections` editor; presets via `service_templates`
+- [~] Per-route middlewares exist for rate limit, IP allowlist, auth, WAF/bouncer paths; antibot/geo/dnsbl are not complete
+- [x] `/security/protections` page exists
 - [ ] Gate: each toggle visibly takes effect on a test request
 
 ### 12.6 Bans + Certs + polish + alerts
-- [ ] `/security/bans` (CrowdSec decisions; manual add/remove); `/security/certs` (Traefik Let's Encrypt status); alert hooks
+- [~] `/security/bans` and `/security/certs` pages/API placeholders exist; manual mutation and alert hooks remain pending
 - [ ] Gate: manual ban blocks an IP; cert status shown; threshold alert fires
 
 ---

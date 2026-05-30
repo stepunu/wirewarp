@@ -201,10 +201,15 @@ async def classify_port_forward(
 async def list_port_forwards(
     attachment_id: uuid.UUID | None = None,
     tunnel_server_id: uuid.UUID | None = None,
+    service_kind: str | None = None,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_ops_role),
 ):
     q = select(PortForward).order_by(PortForward.created_at.desc())
+    if service_kind is not None:
+        if service_kind not in ("raw", "http"):
+            raise HTTPException(status_code=400, detail="service_kind must be raw or http")
+        q = q.where(PortForward.service_kind == service_kind)
     if attachment_id is not None:
         q = q.where(PortForward.attachment_id == attachment_id)
     if tunnel_server_id is not None:

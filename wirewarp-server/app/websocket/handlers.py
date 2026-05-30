@@ -25,6 +25,7 @@ from app.realtime.events import (
     emit_agent_changed,
     emit_audit_changed,
     emit_crowdsec_changed,
+    emit_edge_changed,
     emit_heal_event_changed,
     emit_lan_client_changed,
     emit_security_changed,
@@ -33,8 +34,8 @@ from app.realtime.events import (
     emit_tunnel_server_changed,
     emit_wg_peer_changed,
 )
-from app.services.agent_commands import send_command
 from app.services.crowdsec_ops import build_whitelist, whitelist_hash
+from app.services.edge_ops import component_phase, dispatch_edge_desired_state
 from app.services.tunnel_server_ops import dispatch_add_peer_for_attachment, dispatch_wg_init
 
 logger = logging.getLogger(__name__)
@@ -501,6 +502,9 @@ async def handle_crowdsec_status(agent_id: str, msg: dict, db: AsyncSession) -> 
     if not isinstance(top_ips, list):
         top_ips = None
     err = msg.get("error") if isinstance(msg.get("error"), str) else None
+    phase = msg.get("phase") if isinstance(msg.get("phase"), str) else component_phase(installed, running, err)
+    appsec_enabled = bool(msg.get("appsec_enabled", False))
+    bouncer_registered = bool(msg.get("bouncer_registered", False))
 
     existing = await db.scalar(
         select(CrowdSecSnapshot).where(CrowdSecSnapshot.agent_id == agent_id)
@@ -514,21 +518,29 @@ async def handle_crowdsec_status(agent_id: str, msg: dict, db: AsyncSession) -> 
         existing.top_scenarios = top_scenarios
         existing.top_ips = top_ips
         existing.error = err
+        existing.phase = phase
+        existing.last_error = err
+        existing.appsec_enabled = appsec_enabled
+        existing.bouncer_registered = bouncer_registered
         existing.updated_at = now
+        snapshot = existing
     else:
-        db.add(
-            CrowdSecSnapshot(
-                agent_id=agent_id,
-                installed=installed,
-                running=running,
-                version=version,
-                total_decisions=total_decisions,
-                top_scenarios=top_scenarios,
-                top_ips=top_ips,
-                error=err,
-                updated_at=now,
-            )
+        snapshot = CrowdSecSnapshot(
+            agent_id=agent_id,
+            installed=installed,
+            running=running,
+            version=version,
+            total_decisions=total_decisions,
+            top_scenarios=top_scenarios,
+            top_ips=top_ips,
+            error=err,
+            phase=phase,
+            last_error=err,
+            appsec_enabled=appsec_enabled,
+            bouncer_registered=bouncer_registered,
+            updated_at=now,
         )
+        db.add(snapshot)
 
     result = await db.execute(select(Agent).where(Agent.id == agent_id))
     agent = result.scalar_one_or_none()
@@ -541,25 +553,18 @@ async def handle_crowdsec_status(agent_id: str, msg: dict, db: AsyncSession) -> 
     # side scheduler — see crowdsec_ops.build_whitelist for what's in
     # scope (other agents' public IPs, mesh + VPN subnets, gateway LAN
     # subnets + discovered LAN clients).
-    snapshot = await db.scalar(
-        select(CrowdSecSnapshot).where(CrowdSecSnapshot.agent_id == agent_id)
-    )
     if snapshot and snapshot.running:
         payload = await build_whitelist(agent_id, db)
         h = whitelist_hash(payload)
         if snapshot.whitelist_hash != h:
-            sent, _ = await send_command(
-                agent_id=str(agent_id),
-                command_type="crowdsec_sync_whitelist",
-                params=payload,
-                db=db,
-            )
+            sent, _ = await dispatch_edge_desired_state(agent_id, db)
             if sent:
                 snapshot.whitelist_hash = h
                 await db.commit()
 
     await db.commit()
     emit_crowdsec_changed()
+    emit_edge_changed()
 
 
 async def handle_traefik_status(agent_id: str, msg: dict, db: AsyncSession) -> None:
@@ -579,6 +584,7 @@ async def handle_traefik_status(agent_id: str, msg: dict, db: AsyncSession) -> N
     except (TypeError, ValueError):
         routes_count = 0
     err = msg.get("error") if isinstance(msg.get("error"), str) else None
+    phase = msg.get("phase") if isinstance(msg.get("phase"), str) else component_phase(installed, running, err)
 
     existing = await db.scalar(
         select(TraefikSnapshot).where(TraefikSnapshot.agent_id == agent_id)
@@ -590,6 +596,8 @@ async def handle_traefik_status(agent_id: str, msg: dict, db: AsyncSession) -> N
         existing.version = version
         existing.routes_count = routes_count
         existing.error = err
+        existing.phase = phase
+        existing.last_error = err
         existing.updated_at = now
     else:
         db.add(
@@ -600,6 +608,8 @@ async def handle_traefik_status(agent_id: str, msg: dict, db: AsyncSession) -> N
                 version=version,
                 routes_count=routes_count,
                 error=err,
+                phase=phase,
+                last_error=err,
                 updated_at=now,
             )
         )
@@ -611,6 +621,7 @@ async def handle_traefik_status(agent_id: str, msg: dict, db: AsyncSession) -> N
 
     await db.commit()
     emit_traefik_changed()
+    emit_edge_changed()
 
 
 async def handle_security_events(agent_id: str, msg: dict, db: AsyncSession) -> None:

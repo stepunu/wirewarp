@@ -8,13 +8,9 @@ export function BottomNav({ onMore }: { onMore: () => void }) {
         <Ic.dashboard s={20} />
         <span>Dash</span>
       </NavLink>
-      <NavLink to="/agents" className={({ isActive }) => `bn-item ${isActive ? 'active' : ''}`}>
+      <NavLink to="/nodes" className={({ isActive }) => `bn-item ${isActive ? 'active' : ''}`}>
         <Ic.agent s={20} />
-        <span>Agents</span>
-      </NavLink>
-      <NavLink to="/tunnel-servers" className={({ isActive }) => `bn-item ${isActive ? 'active' : ''}`}>
-        <Ic.server s={20} />
-        <span>Servers</span>
+        <span>Nodes</span>
       </NavLink>
       <NavLink to="/port-forwards" className={({ isActive }) => `bn-item ${isActive ? 'active' : ''}`}>
         <Ic.forward s={20} />

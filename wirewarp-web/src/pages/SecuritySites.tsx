@@ -38,7 +38,7 @@ export default function SecuritySites() {
 
   const q = useQuery({
     queryKey: ['sites'],
-    queryFn: secApi.sites,
+    queryFn: () => secApi.sites(),
     refetchInterval: 10_000,
   })
 
@@ -195,13 +195,13 @@ function SiteRow({ site, canMutate }: { site: Site; canMutate: boolean }) {
   )
 }
 
-function CreateSiteDialog({ onClose }: { onClose: () => void }) {
+export function CreateSiteDialog({ onClose, onSaved }: { onClose: () => void; onSaved?: () => void }) {
   const qc = useQueryClient()
   const push = useToast()
   const [domain, setDomain] = useState('')
   const [destIp, setDestIp] = useState('')
   const [destPort, setDestPort] = useState('80')
-  const [wafMode, setWafMode] = useState<WafMode>('off')
+  const [wafMode, setWafMode] = useState<WafMode>('observe')
   const [attachmentId, setAttachmentId] = useState('')
 
   const attachQ = useQuery({
@@ -224,6 +224,7 @@ function CreateSiteDialog({ onClose }: { onClose: () => void }) {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sites'] })
+      onSaved?.()
       push('site created', 'ok', 'security://')
       onClose()
     },

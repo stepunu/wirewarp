@@ -12,7 +12,7 @@ export default function SecurityProtections() {
 
   const q = useQuery({
     queryKey: ['sites'],
-    queryFn: secApi.sites,
+    queryFn: () => secApi.sites(),
     refetchInterval: 10_000,
   })
 
@@ -120,7 +120,15 @@ function ProtectionChip({
   )
 }
 
-function EditProtectionDialog({ site, onClose }: { site: Site; onClose: () => void }) {
+export function EditProtectionDialog({
+  site,
+  onClose,
+  onSaved,
+}: {
+  site: Site
+  onClose: () => void
+  onSaved?: () => void
+}) {
   const qc = useQueryClient()
   const push = useToast()
   const cfg = site.edge_config
@@ -144,6 +152,7 @@ function EditProtectionDialog({ site, onClose }: { site: Site; onClose: () => vo
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sites'] })
+      onSaved?.()
       push('protections updated', 'ok', 'security://')
       onClose()
     },

@@ -103,6 +103,17 @@ export const agents = {
     request<import('./types').HealEvent[]>(`/agents/${id}/heal-events?limit=${limit}`),
 }
 
+// Unified Nodes
+export const nodes = {
+  list: () => request<import('./types').Node[]>('/nodes'),
+  get: (id: string) => request<import('./types').Node>(`/nodes/${id}`),
+  edge: (id: string) => request<import('./types').NodeEdge>(`/nodes/${id}/edge`),
+  reconcileEdge: (id: string) =>
+    request<{ command_id: string; sent: boolean }>(`/nodes/${id}/edge/reconcile`, {
+      method: 'POST',
+    }),
+}
+
 // Tunnel Servers
 export const tunnelServers = {
   list: () => request<import('./types').TunnelServer[]>('/tunnel-servers'),
@@ -282,10 +293,16 @@ export const dns = {
 
 // Port Forwards
 export const portForwards = {
-  list: (params: { attachment_id?: string; tunnel_server_id?: string } = {}) => {
+  list: (params: {
+    attachment_id?: string
+    tunnel_server_id?: string
+    service_kind?: import('./types').ServiceKind | 'all' | null
+  } = {}) => {
     const q = new URLSearchParams()
     if (params.attachment_id) q.set('attachment_id', params.attachment_id)
     if (params.tunnel_server_id) q.set('tunnel_server_id', params.tunnel_server_id)
+    const serviceKind = params.service_kind ?? 'raw'
+    if (serviceKind !== 'all') q.set('service_kind', serviceKind)
     const qs = q.toString()
     return request<import('./types').PortForward[]>(
       `/port-forwards${qs ? `?${qs}` : ''}`
@@ -456,7 +473,13 @@ export const security = {
     const qs = q.toString()
     return request<import('./types').SecurityEvent[]>(`/security/events${qs ? `?${qs}` : ''}`)
   },
-  sites: () => request<import('./types').Site[]>('/security/sites'),
+  sites: (params: { server_id?: string; agent_id?: string } = {}) => {
+    const q = new URLSearchParams()
+    if (params.server_id) q.set('server_id', params.server_id)
+    if (params.agent_id) q.set('agent_id', params.agent_id)
+    const qs = q.toString()
+    return request<import('./types').Site[]>(`/security/sites${qs ? `?${qs}` : ''}`)
+  },
   createSite: (data: import('./types').SiteCreate) =>
     request<import('./types').Site>('/security/sites', {
       method: 'POST',

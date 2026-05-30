@@ -47,6 +47,7 @@ class TopAttacker(BaseModel):
 
 class ServerStatus(BaseModel):
     server_id: uuid.UUID
+    agent_id: uuid.UUID | None = None
     name: str
     crowdsec_running: bool
     traefik_running: bool
@@ -112,11 +113,20 @@ class EdgeRouteConfigUpdate(BaseModel):
 
 class SiteRead(BaseModel):
     id: uuid.UUID
+    attachment_id: uuid.UUID
+    tunnel_server_ip_id: uuid.UUID | None = None
+    server_id: uuid.UUID | None = None
+    agent_id: uuid.UUID | None = None
+    protocol: str = "tcp"
+    public_port: int = 443
+    public_port_end: int | None = None
     domain: str | None
     destination_ip: str
     destination_port: int
+    destination_port_end: int | None = None
     active: bool
     description: str | None = None
+    service_kind: str = "http"
     edge_config: EdgeRouteConfigRead | None = None
     created_at: datetime
 
@@ -131,11 +141,15 @@ class SiteCreate(BaseModel):
     description: str | None = None
     tunnel_server_ip_id: uuid.UUID | None = None
     # Initial edge config values (optional)
-    waf_mode: str = "off"
+    waf_mode: str = "observe"
     rate_limit_rps: int | None = None
     rate_limit_burst: int | None = None
     antibot: bool = False
     auth_mode: str = "none"
+    auth_config: dict | None = None
+    ip_allow: list | None = None
+    ip_deny: list | None = None
+    geo_block: list | None = None
     tls_source: str = "letsencrypt"
 
 
@@ -167,6 +181,8 @@ class TraefikStatusRead(BaseModel):
     version: str | None = None
     routes_count: int = 0
     error: str | None = None
+    phase: str = "unknown"
+    last_error: str | None = None
     updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}

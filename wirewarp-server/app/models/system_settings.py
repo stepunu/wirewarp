@@ -29,3 +29,9 @@ class SystemSettings(Base):
     )
     oidc_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     ldap_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+    # Anti-bot CAPTCHA provider used by the CrowdSec Traefik plugin.
+    # The secret key is Fernet-encrypted by app.services.secrets.
+    captcha_provider: Mapped[str | None] = mapped_column(String, nullable=True)
+    captcha_site_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    captcha_secret_key: Mapped[str | None] = mapped_column(String, nullable=True)

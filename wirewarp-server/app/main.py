@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from app.database import engine, Base, SessionLocal
 from app.realtime.bus import bus
 from app.realtime.events import emit_agent_changed
-from app.routers import auth, agents, tunnel_servers, tunnel_clients, tunnel_client_attachments, lan_clients, port_forwards, service_templates, settings, tunnel_server_ips, audit, users, oidc, ldap as ldap_router, vpn_endpoints, vpn_profiles, security
+from app.routers import auth, agents, tunnel_servers, tunnel_clients, tunnel_client_attachments, lan_clients, port_forwards, service_templates, settings, tunnel_server_ips, audit, users, oidc, ldap as ldap_router, vpn_endpoints, vpn_profiles, security, nodes
 from app.websocket.hub import manager
 from app.websocket.handlers import dispatch
 from app.services.agent_commands import send_command
@@ -55,6 +55,7 @@ app.include_router(oidc.router, prefix="/api/auth/oidc", tags=["auth"])
 app.include_router(ldap_router.router, prefix="/api/auth/ldap", tags=["auth"])
 app.include_router(users.router, prefix="/api/users", tags=["users"])
 app.include_router(agents.router, prefix="/api/agents", tags=["agents"])
+app.include_router(nodes.router, prefix="/api/nodes", tags=["nodes"])
 app.include_router(tunnel_servers.router, prefix="/api/tunnel-servers", tags=["tunnel-servers"])
 app.include_router(tunnel_server_ips.router, prefix="/api/tunnel-server-ips", tags=["tunnel-server-ips"])
 app.include_router(tunnel_clients.router, prefix="/api/tunnel-clients", tags=["tunnel-clients"])
@@ -220,6 +221,7 @@ async def agent_websocket(websocket: WebSocket):
                     pf_result = await db.execute(
                         select(PortForward).where(
                             PortForward.attachment_id.in_(attachment_ids),
+                            PortForward.service_kind == "raw",
                             PortForward.active == True,  # noqa: E712
                         )
                     )
@@ -289,6 +291,10 @@ async def agent_websocket(websocket: WebSocket):
                     "Replayed %d peer(s) to server agent %s",
                     replayed_peers, agent_id,
                 )
+
+                from app.services.edge_ops import dispatch_edge_desired_state
+
+                await dispatch_edge_desired_state(agent_id, db)
 
             # Client-side replay: on (re)connect, dispatch wg_attach for every
             # attachment of this client. Overwrites stale on-disk values from

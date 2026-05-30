@@ -95,6 +95,9 @@ function GeneralTab() {
   const [tokenExpiry, setTokenExpiry] = useState(24)
   const [dnsProvider, setDnsProvider] = useState<string>('')
   const [cfToken, setCfToken] = useState('')
+  const [captchaProvider, setCaptchaProvider] = useState('')
+  const [captchaSiteKey, setCaptchaSiteKey] = useState('')
+  const [captchaSecretKey, setCaptchaSecretKey] = useState('')
 
   useEffect(() => {
     if (!dataQ.data) return
@@ -108,6 +111,10 @@ function GeneralTab() {
     setTokenExpiry(dataQ.data.agent_token_expiry_hours)
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setDnsProvider(dataQ.data.dns_provider ?? '')
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCaptchaProvider(dataQ.data.captcha_provider ?? '')
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCaptchaSiteKey(dataQ.data.captcha_site_key ?? '')
     // Token field stays empty on load — only writes when the operator
     // types something. We never round-trip the actual token value.
   }, [dataQ.data])
@@ -120,15 +127,19 @@ function GeneralTab() {
         instance_name: instanceName.trim() || undefined,
         agent_token_expiry_hours: tokenExpiry,
         dns_provider: dnsProvider || null,
+        captcha_provider: captchaProvider || null,
+        captcha_site_key: captchaProvider ? captchaSiteKey.trim() || null : null,
       }
       // Only send cloudflare_api_token if the operator typed a new one.
       // Empty string means "keep existing".
       if (cfToken.trim()) payload.cloudflare_api_token = cfToken.trim()
+      if (captchaSecretKey.trim()) payload.captcha_secret_key = captchaSecretKey.trim()
       return settingsApi.update(payload)
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['settings'] })
       setCfToken('')
+      setCaptchaSecretKey('')
       push('settings saved', 'ok', 'settings://')
     },
     onError: (e: Error) => push(e.message, 'err', 'settings://'),
@@ -164,6 +175,52 @@ function GeneralTab() {
                 placeholder="http://192.168.1.100:8100"
               />
             </Field>
+          </div>
+        </div>
+        <div className="hr" />
+        <div className="settings-row" style={{ padding: '8px 0' }}>
+          <div>
+            <div style={{ fontWeight: 500 }}>Anti-bot CAPTCHA</div>
+            <div style={{ color: 'var(--fg-2)', fontSize: 12 }}>
+              Provider keys used when a Security Edge site enables CrowdSec CAPTCHA remediation.
+            </div>
+          </div>
+          <div className="col" style={{ gap: 12, maxWidth: 480 }}>
+            <Field label="Provider">
+              <Select value={captchaProvider} onChange={(e) => setCaptchaProvider(e.target.value)}>
+                <option value="">disabled</option>
+                <option value="hcaptcha">hCaptcha</option>
+                <option value="recaptcha">reCAPTCHA</option>
+                <option value="turnstile">Turnstile</option>
+              </Select>
+            </Field>
+            {captchaProvider && (
+              <>
+                <Field label="Site key">
+                  <Input
+                    mono
+                    value={captchaSiteKey}
+                    onChange={(e) => setCaptchaSiteKey(e.target.value)}
+                    placeholder="site key"
+                  />
+                </Field>
+                <Field
+                  label={
+                    dataQ.data?.captcha_secret_key_set
+                      ? 'Secret key (saved — leave blank to keep, type to replace)'
+                      : 'Secret key'
+                  }
+                >
+                  <Input
+                    mono
+                    type="password"
+                    value={captchaSecretKey}
+                    onChange={(e) => setCaptchaSecretKey(e.target.value)}
+                    placeholder={dataQ.data?.captcha_secret_key_set ? '••••••••' : 'secret key'}
+                  />
+                </Field>
+              </>
+            )}
           </div>
         </div>
         <div className="hr" />

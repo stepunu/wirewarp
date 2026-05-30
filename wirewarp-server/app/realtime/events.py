@@ -61,3 +61,7 @@ def emit_security_changed() -> None:
 
 def emit_traefik_changed() -> None:
     bus.publish_nowait("traefik.changed")
+
+
+def emit_edge_changed() -> None:
+    bus.publish_nowait("edge.changed")

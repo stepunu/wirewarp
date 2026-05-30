@@ -1,7 +1,11 @@
 # WireWarp — System Architecture & Project Structure
 
-**Version:** 0.2 (Planning)
-**Date:** 2026-02-16
+**Version:** 0.3 (Implementation snapshot)
+**Date:** 2026-05-30
+
+> This began as a planning document. It has been updated for the current
+> implementation where practical, but the concise source-of-truth snapshot
+> is now `CODEBASE_GUIDE.md`, `MODULE_MAP.md`, and `DOMAIN_MODEL.md`.
 
 ---
 
@@ -20,8 +24,8 @@ Agents connect **outbound** to the control server via persistent WebSocket conne
 ## High-Level Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  HOME SERVER                                                │
+┌────────────────────────────────────────────────────────────┐
+│  HOME SERVER                                               │
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │  WireWarp Control Server                             │  │
 │  │  - Web Dashboard (React)                             │  │
@@ -41,8 +45,8 @@ Agents connect **outbound** to the control server via persistent WebSocket conne
 │  Agent              │     Tunnel           │  Agent               │
 │                     │                      │                      │
 │  - WireGuard server │                      │  - WireGuard client  │
-│  - iptables / DNAT  │                      │  - Routes LAN →      │
-│  - Public IP mgmt   │                      │    tunnel            │
+│  - iptables / DNAT  │                      │  - LAN forwarding    │
+│  - Public IP mgmt   │                      │  - Egress pins       │
 │  - Peer management  │                      │  - Reports status    │
 └─────────────────────┘                      └──────────────────────┘
 ```
@@ -67,11 +71,12 @@ The brain of the operation. Runs on any always-on machine (home server, Proxmox 
 - Python 3.11+ / FastAPI
 - PostgreSQL (via SQLAlchemy ORM)
 - WebSocket hub (FastAPI native WebSockets)
-- React 18 + TypeScript + Tailwind CSS (served as static files by FastAPI or Nginx)
+- React 19 + TypeScript + plain CSS (built into `wirewarp-server/static`
+  and served by FastAPI)
 
 ---
 
-### 2. Tunnel Server Agent (`wirewarp-agent-server/`)
+### 2. Tunnel Server Agent (`wirewarp-agent/ --mode server`)
 
 Runs on each VPS that acts as a WireGuard endpoint. Single Go binary managed by systemd.
 
@@ -89,11 +94,11 @@ Runs on each VPS that acts as a WireGuard endpoint. Single Go binary managed by 
 **Stack:**
 - Go (single binary, ~10MB, <30MB RAM idle)
 - systemd service
-- Requires: `NET_ADMIN` capability, root or sudo for `wg` and `iptables`
+- Requires root/systemd service privileges with `CAP_NET_ADMIN` and `CAP_NET_RAW`.
 
 ---
 
-### 3. Tunnel Client Agent (`wirewarp-agent-client/`)
+### 3. Tunnel Client Agent (`wirewarp-agent/ --mode client`)
 
 Runs on each gateway LXC or VM that needs to connect through a VPS tunnel. Single Go binary managed by systemd.
 
@@ -101,7 +106,7 @@ Runs on each gateway LXC or VM that needs to connect through a VPS tunnel. Singl
 - Register with control server on first run using a token
 - Maintain persistent WebSocket connection to control server
 - Execute commands received from control server:
-  - Configure WireGuard client (`/etc/wireguard/wg0.conf`)
+  - Configure one WireGuard client interface per attachment (`wg0`, `wg1`, ...)
   - Bring interface up/down
   - Update peer endpoint if tunnel server changes
   - Apply policy-based routing for gateway mode (see [Gateway Routing](#gateway-routing-policy-based-routing))
@@ -110,7 +115,7 @@ Runs on each gateway LXC or VM that needs to connect through a VPS tunnel. Singl
 **Stack:**
 - Go (same binary as server agent, different mode flag)
 - systemd service
-- Requires: `NET_ADMIN` capability, root or sudo for `wg`, `ip`, `iptables`
+- Requires root/systemd service privileges with `CAP_NET_ADMIN` and `CAP_NET_RAW`.
 
 **Note on shared binary:** The server agent and client agent share a binary but have substantially different codepaths — the server agent manages iptables DNAT rules and peer lists, while the client agent manages policy routing, fwmark/CONNMARK rules, and MSS clamping. The `--mode` flag selects which executor modules are loaded at startup. Shared code is limited to WebSocket connection management, registration, config persistence, and metrics collection.
 
@@ -120,21 +125,21 @@ Runs on each gateway LXC or VM that needs to connect through a VPS tunnel. Singl
 
 ```
 1. Admin generates a registration token in the dashboard
-   (token is single-use, expires in 24h)
+   (token is single-use; expiry is configurable)
 
 2. Dashboard shows a single copy-paste command with everything baked in:
-   curl -fsSL https://wirewarp.example.com/install/server | bash -s -- \
-     --url https://wirewarp.example.com \
+   curl -fsSL https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agent/scripts/install.sh | bash -s -- \
+     --mode server --url https://wirewarp.example.com \
      --token ABRM-7XK2-9QLP
    # or for clients:
-   curl -fsSL https://wirewarp.example.com/install/client | bash -s -- \
-     --url https://wirewarp.example.com \
+   curl -fsSL https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agent/scripts/install.sh | bash -s -- \
+     --mode client --url https://wirewarp.example.com \
      --token CXNP-3YT8-1MWZ
 
    No prompts, no manual input. One command, paste and go.
 
 3. Install script:
-   - Detects OS (Debian/Ubuntu/Alpine)
+   - Detects OS (Debian/Ubuntu, RHEL/Fedora, Alpine)
    - Installs WireGuard if missing
    - Downloads the agent binary
    - Creates systemd service with the provided URL + token
@@ -227,6 +232,14 @@ All control server ↔ agent communication happens over WebSocket using JSON mes
 
 ## Database Schema
 
+The current schema source of truth is the SQLAlchemy model set in
+`wirewarp-server/app/models/` plus Alembic migrations through
+`0030_security_events`. The SQL below is the original planning sketch and
+is kept only as historical context; it omits later tables such as
+attachments, tunnel server IPs, users/roles, VPN endpoints/profiles,
+LAN clients, WireGuard peer snapshots, traffic samples, CrowdSec/Traefik
+snapshots, security events, and edge route config.
+
 ```sql
 -- Agents (tunnel servers and clients)
 CREATE TABLE agents (
@@ -271,7 +284,7 @@ CREATE TABLE tunnel_clients (
     tunnel_ip       TEXT,                    -- e.g. 10.0.0.2
     vm_network      TEXT,                    -- e.g. 192.168.1.0/24
     lan_ip          TEXT,                    -- e.g. 192.168.1.10 (this machine's LAN IP)
-    is_gateway      BOOLEAN DEFAULT FALSE,   -- true = routes traffic for other LAN devices
+    is_gateway      BOOLEAN DEFAULT FALSE,   -- true = accepts inbound forwarding to LAN devices
     wg_public_key   TEXT,
     status          TEXT DEFAULT 'disconnected',
     created_at      TIMESTAMP DEFAULT NOW()
@@ -343,39 +356,47 @@ wirewarp/
 │   │   ├── main.py               # FastAPI app entrypoint
 │   │   ├── config.py             # Settings (env vars)
 │   │   ├── database.py           # SQLAlchemy setup
-│   │   ├── models/               # ORM models (agents, peers, etc.)
+│   │   ├── models/               # ORM models, split per table/domain
 │   │   ├── schemas/              # Pydantic request/response schemas
 │   │   ├── routers/
 │   │   │   ├── auth.py           # Login, token endpoints
+│   │   │   ├── users.py          # Admin user management
 │   │   │   ├── agents.py         # Agent registration + management
 │   │   │   ├── tunnel_servers.py # VPS tunnel server endpoints
+│   │   │   ├── tunnel_server_ips.py
 │   │   │   ├── tunnel_clients.py # Client endpoints
-│   │   │   └── port_forwards.py  # Port forwarding CRUD
+│   │   │   ├── tunnel_client_attachments.py
+│   │   │   ├── port_forwards.py  # Port forwarding CRUD
+│   │   │   ├── vpn_endpoints.py
+│   │   │   ├── vpn_profiles.py
+│   │   │   ├── security.py
+│   │   │   ├── settings.py
+│   │   │   └── audit.py
 │   │   ├── websocket/
 │   │   │   ├── hub.py            # WebSocket connection manager
 │   │   │   └── handlers.py       # Message type handlers
+│   │   ├── realtime/             # Dashboard event bus
 │   │   └── services/
 │   │       ├── agent_commands.py # Build + send commands to agents
-│   │       └── metrics.py        # Metrics ingestion
-│   ├── alembic/                  # DB migrations
+│   │       ├── tunnel_server_ops.py
+│   │       ├── vpn_ops.py
+│   │       ├── traefik_ops.py
+│   │       ├── crowdsec_ops.py
+│   │       └── traffic_sampler.py
+│   ├── alembic/                  # DB migrations through 0030
 │   ├── requirements.txt
 │   ├── Dockerfile
 │   └── docker-compose.yml        # Full stack (api + postgres + web)
 │
 ├── wirewarp-web/                 # Dashboard (React/TypeScript)
 │   ├── src/
-│   │   ├── components/
-│   │   │   ├── dashboard/        # Overview page widgets
-│   │   │   ├── agents/           # Agent list + detail views
-│   │   │   ├── tunnel-servers/   # VPS management
-│   │   │   ├── tunnel-clients/   # Client management
-│   │   │   └── port-forwards/    # Port forwarding UI
-│   │   ├── pages/
-│   │   ├── hooks/                # React Query hooks for API
-│   │   ├── stores/               # Zustand state
+│   │   ├── pages/                # Dashboard, Agents, Tunnels, LAN,
+│   │   │                         # PortForwards, VPN, Users, Security
+│   │   ├── components/           # Layout, UI primitives, tables, cards
 │   │   └── lib/
 │   │       ├── api.ts            # API client
-│   │       └── websocket.ts      # WS client (for live updates)
+│   │       ├── realtime.ts       # Active dashboard WS invalidation
+│   │       └── types.ts
 │   ├── package.json
 │   └── Dockerfile
 │
@@ -385,15 +406,17 @@ wirewarp/
 │   │       └── main.go           # Entrypoint, reads --mode flag
 │   ├── internal/
 │   │   ├── config/               # YAML config + env
-│   │   ├── registration/         # First-run token exchange
 │   │   ├── websocket/            # Persistent WS connection + reconnect
 │   │   ├── executor/             # Command dispatcher
+│   │   ├── handlers/             # Server/client/VPN/edge/heal commands
 │   │   ├── wireguard/            # wg / wg-quick wrappers
 │   │   ├── iptables/             # iptables wrappers
-│   │   └── metrics/              # Collect + report metrics
+│   │   ├── lanscan/              # LAN client discovery
+│   │   └── validate/             # Payload validation
 │   ├── scripts/
-│   │   ├── install-server.sh     # curl | bash for tunnel servers
-│   │   └── install-client.sh     # curl | bash for tunnel clients
+│   │   ├── install.sh            # curl | bash installer
+│   │   ├── verify-gateway.sh
+│   │   └── wirewarp-agent.service
 │   ├── go.mod
 │   └── Makefile
 │
@@ -414,18 +437,18 @@ wirewarp/
 # wirewarp-server/docker-compose.yml
 services:
   api:
-    build: .
+    build:
+      context: ..
+      dockerfile: wirewarp-server/Dockerfile
     ports:
-      - "8000:8000"
+      - "8100:8000"
     environment:
-      - DATABASE_URL=postgresql://wirewarp:secret@db:5432/wirewarp
+      - DATABASE_URL=postgresql+asyncpg://wirewarp:secret@db:5432/wirewarp
       - SECRET_KEY=${SECRET_KEY}
       - AGENT_TOKEN_EXPIRY_HOURS=24
     depends_on:
       db:
         condition: service_healthy
-    volumes:
-      - ./static:/app/static   # Built React files
 
   db:
     image: postgres:16-alpine
@@ -456,8 +479,8 @@ Admin in Dashboard:
   4. Click "Copy" to copy it to clipboard
 
 On VPS (single command, no prompts):
-  curl -fsSL https://wirewarp.example.com/install/server | bash -s -- \
-    --url https://wirewarp.example.com --token ABRM-7XK2-9QLP
+  curl -fsSL https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agent/scripts/install.sh | bash -s -- \
+    --mode server --url https://wirewarp.example.com --token ABRM-7XK2-9QLP
   > Detecting OS... Ubuntu 22.04
   > Installing WireGuard...
   > Downloading WireWarp agent...
@@ -466,16 +489,16 @@ On VPS (single command, no prompts):
   > ✅ Connected! Agent appears in your dashboard.
 
 On Gateway LXC (same idea):
-  curl -fsSL https://wirewarp.example.com/install/client | bash -s -- \
-    --url https://wirewarp.example.com --token CXNP-3YT8-1MWZ
+  curl -fsSL https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agent/scripts/install.sh | bash -s -- \
+    --mode client --url https://wirewarp.example.com --token CXNP-3YT8-1MWZ
   > ...
   > ✅ Connected!
 
 Back in Dashboard:
   - Both agents appear as "Connected"
-  - Click "Configure" on tunnel server → enter public interface
-  - Click tunnel client → "Connect to" → select tunnel server
-    → check "Is Gateway" if this client routes traffic for other LAN devices
+  - Configure the tunnel server public interface/IPs
+  - Mark the tunnel client as a gateway if it forwards inbound traffic to LAN devices
+  - Add an attachment between the client and server
   - Add port forwards from the port forwarding tab
   - Everything is applied live via WebSocket commands
 ```
@@ -495,23 +518,22 @@ Back in Dashboard:
 
 ## Security Considerations
 
-- All agent ↔ control server communication over WSS (TLS)
-- Registration tokens are single-use and expire in 24h
-- Agents authenticate subsequent connections with a JWT issued at registration
-- JWT refresh on every connection
-- Agent binary verifies control server certificate (pin or standard CA)
-- Agent command whitelist — only specific operations allowed, no arbitrary shell
-- iptables and wg commands run via `sudo` with a scoped sudoers entry, not full root
+- Production agents should use WSS/TLS; HTTP requires explicit `--insecure`.
+- Registration tokens are single-use, expiry is configurable, and tokens are stored hashed.
+- Agents authenticate subsequent connections with a long-lived JWT issued at registration or manually reissued by an admin.
+- TLS verification uses the standard Go verifier unless `--insecure` is enabled.
+- Agent command whitelist — only specific operations allowed, no arbitrary remote shell.
+- The systemd service runs the agent with `CAP_NET_ADMIN` and `CAP_NET_RAW`; package install flows that need broader privileges escape through controlled `systemd-run` units.
 - Control server behind Traefik with rate limiting on the WebSocket endpoint
 
 ### Key Generation & Privacy Constraint
 
-WireGuard private keys are **generated on the agent and never transmitted**. The flow is:
+Mesh WireGuard private keys are **generated on the agent and never transmitted**. Road-warrior VPN profile private keys are generated server-side, returned once in the rendered client config, and not stored. For mesh interfaces, the flow is:
 
-1. On first run, agent executes `wg genkey` locally
-2. Private key is stored in `/etc/wireguard/` with `600` permissions, owned by root
-3. Agent derives the public key (`wg pubkey`) and sends **only the public key** during registration
-4. Control server stores the public key in `tunnel_servers.wg_public_key` / `tunnel_clients.wg_public_key`
+1. On `wg_init` or `wg_attach`, the agent creates or reuses a local key for that interface.
+2. Private key files are stored under `/etc/wireguard/` with restrictive permissions.
+3. Agent derives the public key (`wg pubkey`) and returns **only the public key** in the command result.
+4. Control server stores the public key in `tunnel_servers.wg_public_key`, `tunnel_client_attachments.wg_public_key`, or `vpn_endpoints.wg_public_key` as appropriate.
 
 A compromised control server cannot decrypt tunnel traffic because it never holds any private key.
 
@@ -522,8 +544,8 @@ A compromised control server cannot decrypt tunnel traffic because it never hold
 Agents must remain functional if the control server is unreachable (outage, network partition, reboot order).
 
 **Rules:**
-- After every successful config push from the control server, the agent writes a complete `wg0.conf` to `/etc/wireguard/`
-- After every iptables change, the agent runs `netfilter-persistent save`
+- After successful WireGuard commands, the agent persists interface config and attachment state under `/etc/wireguard/` and `/etc/wirewarp/`.
+- After iptables/routing changes, the agent persists what it can through `netfilter-persistent` and the boot-time `wirewarp-routing.service`.
 - On agent startup:
   1. Apply the last known config from disk immediately (bring up the WireGuard interface)
   2. Attempt WebSocket connection to control server in the background
@@ -547,13 +569,13 @@ When the WebSocket connection drops (server restart, network blip, etc.), the ag
 
 ## Gateway Routing (Policy-Based Routing)
 
-Standard `wg-quick` is insufficient for the transparent gateway scenario (routing traffic from other VMs through the tunnel). The Tunnel Client Agent must apply policy-based routing rules after bringing up the interface.
+Standard `wg-quick` is insufficient for WireWarp's gateway scenario. The current implementation is inbound-only by default: a gateway handles reply routing for inbound DNAT'd flows and does not install the old blanket `ip rule from <LANNetwork> table <wg>` rule. Optional LAN-originated egress through a VPS is explicit per LAN client via `set_lan_egress`.
 
 This is the most complex part of the client agent. The legacy bash scripts solved this through trial and error — the Go agent must replicate this logic precisely.
 
 ### Why it's complex
 
-A gateway LXC sits between a LAN (e.g. `192.168.1.0/24`) and a WireGuard tunnel. Traffic from LAN devices must go through the tunnel, but:
+A gateway LXC sits between a LAN (e.g. `192.168.1.0/24`) and one or more WireGuard tunnel attachments. Inbound traffic arrives from a VPS through a `wgN` interface and is forwarded to a LAN host. Return traffic must go back through the same attachment, but:
 - Traffic **to the VPS endpoint itself** must use the normal route (not the tunnel), or the tunnel breaks
 - Traffic **to the local LAN** must stay local
 - **Return traffic** arriving from the tunnel must be routed back through the tunnel (not the default gateway)
@@ -614,8 +636,8 @@ ip rule add to <vps_endpoint_ip> table main priority 100
 # Priority 200: LAN traffic stays local
 ip rule add to <lan_network> table main priority 200
 
-# Priority 5000: Forward LAN devices through the tunnel (gateway mode only)
-ip rule add from <lan_network> table ${WG_TABLE_ID} priority 5000
+# Priority 5000: only for explicit LAN egress pins, not blanket gateway mode
+ip rule add from <lan_client_ip> table ${WG_TABLE_ID} priority 5000
 
 # Priority 5100: Forward traffic from this machine through the tunnel
 ip rule add from <gateway_tunnel_ip> table ${WG_TABLE_ID} priority 5100
@@ -669,7 +691,7 @@ iptables -C -t mangle POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o wg0 -j TCPMS
   - Delete mangle rules (`iptables -t mangle -D ...`) before re-adding
 - Persist iptables rules via `netfilter-persistent save` after every change
 - The `wireguard/` package in the Go agent is responsible for this logic — it must not rely on `PostUp`/`PostDown` wg-quick hooks since the agent manages config programmatically
-- Standard (non-gateway) clients skip steps 4's priority-5000 rule and the Docker compatibility rules
+- Standard gateway setup skips the priority-5000 rule. That rule is only added later for explicit per-LAN-client egress pins.
 
 ---
 
@@ -683,11 +705,7 @@ Since agents are compiled binaries (not scripts), updates require an explicit me
 {
   "id": "cmd-uuid-here",
   "type": "agent_update",
-  "params": {
-    "version": "0.3.1",
-    "download_url": "https://wirewarp.example.com/releases/wirewarp-agent-0.3.1-linux-amd64",
-    "sha256": "abc123def456..."
-  }
+  "params": {}
 }
 ```
 
@@ -695,22 +713,21 @@ Since agents are compiled binaries (not scripts), updates require an explicit me
 
 1. Agent receives `agent_update` command
 2. Downloads binary to a temp file (e.g. `/tmp/wirewarp-agent-new`)
-3. Verifies SHA256 hash — aborts if mismatch
-4. Backs up current binary: `cp /usr/local/bin/wirewarp-agent /usr/local/bin/wirewarp-agent.bak`
-5. `mv /tmp/wirewarp-agent-new /usr/local/bin/wirewarp-agent` (atomic on same filesystem)
-6. `chmod +x /usr/local/bin/wirewarp-agent`
-7. Sends `command_result` with `success: true` back to control server
-8. `systemctl restart wirewarp-agent` — systemd brings the new binary up; the old process exits cleanly
+3. Replaces `/usr/local/bin/wirewarp-agent` with the downloaded file
+4. Sends `command_result` with `success: true` back to control server
+5. Restarts `wirewarp-agent` through systemd after the result frame has a chance to flush
+
+SHA256 verification and automatic rollback are not implemented yet.
 
 ### Update Rollback
 
-If the new binary fails to start (crashes, panics, can't connect), the systemd service will fail. To handle this:
+If the new binary fails to start (crashes, panics, can't connect), the systemd service will fail. The desired hardening path is:
 
 - The systemd unit should set `RestartSec=5` and `Restart=on-failure` with `StartLimitBurst=3`
 - If the service fails 3 times in a row, systemd stops retrying
 - An `ExecStartPre` script checks: if the agent binary's version doesn't match what was last reported as healthy, and a `.bak` file exists, restore the backup automatically
 - Alternatively, the install script can set up a systemd `OnFailure=` unit that restores the `.bak` binary and restarts
 
-This prevents a bad update from permanently bricking a remote agent that you may not have easy SSH access to.
+This is not implemented in the current updater yet.
 
-The dashboard exposes a per-agent "Update" button that triggers this command. The control server also exposes the current latest version at `/api/version` so agents can self-report whether they are outdated.
+The dashboard exposes per-agent and bulk "Update" actions that trigger this command.

@@ -10,10 +10,10 @@ import (
 const DefaultPath = "/etc/wirewarp/agent.yaml"
 
 type Config struct {
-	Mode             string `yaml:"mode"`              // "server" | "client"
+	Mode             string `yaml:"mode"` // "server" | "client"
 	ControlServerURL string `yaml:"control_server_url"`
-	AgentToken       string `yaml:"agent_token"`        // registration token (cleared after use)
-	AgentJWT         string `yaml:"agent_jwt"`          // JWT issued after registration
+	AgentToken       string `yaml:"agent_token"` // registration token (cleared after use)
+	AgentJWT         string `yaml:"agent_jwt"`   // JWT issued after registration
 	AgentID          string `yaml:"agent_id"`
 
 	// Insecure opts the agent into accepting a plain http:// (and therefore
@@ -25,6 +25,12 @@ type Config struct {
 
 	// WireGuard server state (mode=server)
 	Server *ServerState `yaml:"server,omitempty"`
+
+	// Desired edge state is pushed by the control server and replayed by the
+	// server reconciler. It is persisted so edge protection keeps converging
+	// while the control plane is temporarily unreachable.
+	EdgeDesired    *EdgeDesiredState `yaml:"edge_desired,omitempty"`
+	EdgeBouncerKey string            `yaml:"edge_bouncer_key,omitempty"`
 
 	// Multi-attachment client state (mode=client). Replaces the legacy
 	// single-peer Client field; older configs are migrated transparently.
@@ -56,6 +62,17 @@ type ServerState struct {
 	Initialized   bool   `yaml:"initialized"`
 }
 
+type EdgeDesiredState struct {
+	Whitelist            EdgeWhitelist  `yaml:"whitelist,omitempty"`
+	TraefikStaticConfig  map[string]any `yaml:"traefik_static_config,omitempty"`
+	TraefikDynamicConfig map[string]any `yaml:"traefik_dynamic_config,omitempty"`
+}
+
+type EdgeWhitelist struct {
+	IPs   []string `yaml:"ips,omitempty"`
+	CIDRs []string `yaml:"cidrs,omitempty"`
+}
+
 // ClientState is the legacy single-peer client config. Kept here only so
 // we can parse pre-multi-server-gateway agent.yaml files and migrate them
 // in-place to the new Attachments slice.
@@ -77,12 +94,12 @@ type ClientState struct {
 // interface (offline-resilience). Peers are never persisted here — the
 // server replays vpn_peer_add for each profile on (re)connect.
 type VpnEndpointState struct {
-	EndpointID    string   `yaml:"endpoint_id"`
-	WGInterface   string   `yaml:"wg_interface"`
-	ListenPort    int      `yaml:"listen_port"`
-	VpnNetwork    string   `yaml:"vpn_network"`
-	VpnServerIP   string   `yaml:"vpn_server_ip"`
-	DNSServers    []string `yaml:"dns_servers,omitempty"`
+	EndpointID  string   `yaml:"endpoint_id"`
+	WGInterface string   `yaml:"wg_interface"`
+	ListenPort  int      `yaml:"listen_port"`
+	VpnNetwork  string   `yaml:"vpn_network"`
+	VpnServerIP string   `yaml:"vpn_server_ip"`
+	DNSServers  []string `yaml:"dns_servers,omitempty"`
 }
 
 // AttachmentState holds the agent-side state for one peering between this

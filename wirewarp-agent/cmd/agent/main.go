@@ -93,9 +93,7 @@ func main() {
 		}
 		srv.Register(client.Exec())
 		srv.SetEmit(client.Emit)
-		srv.StartHealer(ctx)
-		srv.StartCrowdSecPoller(ctx)
-		srv.StartTraefikPoller(ctx)
+		srv.StartEdgeReconciler(ctx)
 		wsclient.SetMeshInterfacesProvider(client, srv.MeshInterfaces)
 		shutdownFn = srv.Shutdown
 	case "client":

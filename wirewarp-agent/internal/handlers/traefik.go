@@ -255,24 +255,20 @@ func (h *ServerHandlers) handleCrowdSecAppSecEnable(raw json.RawMessage) (string
 		logBuf.WriteString(tail([]byte(out), 4))
 	}
 
-	// Install the AppSec virtual-patching collection.
-	logf("==> cscli appsec-configs install crowdsecurity/crs")
-	if out, err := runCSCli(ctx, bin, "appsec-configs", "install", "crowdsecurity/crs"); err != nil {
-		// Already installed is fine.
-		if !strings.Contains(err.Error(), "already install") {
-			logf("WARN: appsec-config install: %v\n%s", err, out)
+	// Install the AppSec collections that provide crowdsecurity/appsec-default
+	// and crowdsecurity/crs, which the generated acquisition file references.
+	for _, collection := range []string{
+		"crowdsecurity/appsec-virtual-patching",
+		"crowdsecurity/appsec-crs",
+	} {
+		logf("==> cscli collections install %s", collection)
+		if out, err := runCSCli(ctx, bin, "collections", "install", collection); err != nil {
+			if !strings.Contains(err.Error(), "already install") {
+				logf("WARN: collection install: %v\n%s", err, out)
+			}
+		} else {
+			logBuf.WriteString(tail([]byte(out), 4))
 		}
-	} else {
-		logBuf.WriteString(tail([]byte(out), 4))
-	}
-
-	logf("==> cscli appsec-rules install crowdsecurity/appsec-virtual-patching")
-	if out, err := runCSCli(ctx, bin, "appsec-rules", "install", "crowdsecurity/appsec-virtual-patching"); err != nil {
-		if !strings.Contains(err.Error(), "already install") {
-			logf("WARN: appsec-rules install: %v\n%s", err, out)
-		}
-	} else {
-		logBuf.WriteString(tail([]byte(out), 4))
 	}
 
 	logf("==> systemctl reload crowdsec")
@@ -374,9 +370,10 @@ func collectTraefik() map[string]any {
 
 	if _, err := os.Stat(traefikBinary); err != nil {
 		return map[string]any{
-			"installed":    false,
-			"running":      false,
-			"timestamp":    now,
+			"installed": false,
+			"running":   false,
+			"phase":     "pending",
+			"timestamp": now,
 		}
 	}
 
@@ -391,10 +388,12 @@ func collectTraefik() map[string]any {
 			"running":      false,
 			"version":      version,
 			"routes_count": 0,
+			"phase":        "degraded",
 			"timestamp":    now,
 		}
 		if statusMsg != "" {
 			result["error"] = statusMsg
+			result["last_error"] = statusMsg
 		}
 		return result
 	}
@@ -406,6 +405,7 @@ func collectTraefik() map[string]any {
 		"running":      true,
 		"version":      version,
 		"routes_count": routesCount,
+		"phase":        "healthy",
 		"timestamp":    now,
 	}
 }
@@ -531,8 +531,8 @@ func decisionsToSecurityEvents(raw string) []map[string]any {
 		ID       int    `json:"id"`
 		Value    string `json:"value"`
 		Scope    string `json:"scope"`
-		Type     string `json:"type"`    // "ban", "captcha", ...
-		Scenario string `json:"reason"`  // maps to kind
+		Type     string `json:"type"`     // "ban", "captcha", ...
+		Scenario string `json:"reason"`   // maps to kind
 		StartAt  string `json:"start_ip"` // not always present
 		Until    string `json:"until"`
 	}

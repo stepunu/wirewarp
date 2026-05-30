@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { security as secApi } from '../lib/api'
 import { Badge, Stat, Tabs } from '../components/ui'
@@ -154,7 +155,15 @@ export default function SecurityOverview() {
               )}
               {(data?.servers ?? []).map((s) => (
                 <tr key={s.server_id}>
-                  <td className="mono">{s.name ?? s.server_id.slice(0, 12)}</td>
+                  <td className="mono">
+                    {s.agent_id ? (
+                      <Link to={`/nodes/${s.agent_id}`} style={{ color: 'inherit' }}>
+                        {s.name ?? s.server_id.slice(0, 12)}
+                      </Link>
+                    ) : (
+                      s.name ?? s.server_id.slice(0, 12)
+                    )}
+                  </td>
                   <td>
                     <Badge tone={s.crowdsec_running ? 'ok' : 'neutral'}>
                       {s.crowdsec_running ? 'running' : 'off'}

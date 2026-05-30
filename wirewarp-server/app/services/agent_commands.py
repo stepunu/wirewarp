@@ -31,6 +31,7 @@ VALID_COMMAND_TYPES = {
     "traefik_install",
     "traefik_sync_config",
     "crowdsec_appsec_enable",
+    "edge_desired_state",
 }
 
 

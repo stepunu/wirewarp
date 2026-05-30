@@ -125,7 +125,7 @@ func collectCrowdSec(parent context.Context) map[string]any {
 	now := time.Now().UTC().Format(time.RFC3339)
 	bin := resolveCSCli()
 	if bin == "" {
-		return map[string]any{"installed": false, "running": false, "timestamp": now}
+		return map[string]any{"installed": false, "running": false, "phase": "pending", "timestamp": now}
 	}
 
 	// Binary present — is the daemon up? `cscli version` works without
@@ -134,11 +134,14 @@ func collectCrowdSec(parent context.Context) map[string]any {
 	active, statusMsg := crowdSecServiceActive(parent)
 	if !active {
 		return map[string]any{
-			"installed": true,
-			"running":   false,
-			"version":   csVersion(parent, bin),
-			"error":     statusMsg,
-			"timestamp": now,
+			"installed":      true,
+			"running":        false,
+			"version":        csVersion(parent, bin),
+			"error":          statusMsg,
+			"last_error":     statusMsg,
+			"phase":          "degraded",
+			"appsec_enabled": appSecAcquisitionPresent(),
+			"timestamp":      now,
 		}
 	}
 
@@ -147,11 +150,14 @@ func collectCrowdSec(parent context.Context) map[string]any {
 	decisions, dErr := runCSCli(parent, bin, "decisions", "list", "-o", "json")
 	if dErr != nil {
 		return map[string]any{
-			"installed": true,
-			"running":   true,
-			"version":   version,
-			"error":     "decisions list: " + dErr.Error(),
-			"timestamp": now,
+			"installed":      true,
+			"running":        true,
+			"version":        version,
+			"error":          "decisions list: " + dErr.Error(),
+			"last_error":     "decisions list: " + dErr.Error(),
+			"phase":          "degraded",
+			"appsec_enabled": appSecAcquisitionPresent(),
+			"timestamp":      now,
 		}
 	}
 	totalDecisions, topIPs := summariseDecisions(decisions)
@@ -173,8 +179,18 @@ func collectCrowdSec(parent context.Context) map[string]any {
 		"top_scenarios":   topScenarios,
 		"top_ips":         topIPs,
 		"error":           metricsErr, // non-fatal — we still have decisions
+		"last_error":      metricsErr,
+		"phase":           "healthy",
+		"appsec_enabled":  appSecAcquisitionPresent(),
 		"timestamp":       now,
 	}
+}
+
+func appSecAcquisitionPresent() bool {
+	if fi, err := os.Stat(appSecAcquisitionFile); err == nil && !fi.IsDir() {
+		return true
+	}
+	return false
 }
 
 // resolveCSCli returns the absolute path to cscli, or "" if it isn't
@@ -401,7 +417,6 @@ func summariseDecisions(raw string) (int, []map[string]any) {
 	}
 	return len(flat), top
 }
-
 
 // summariseScenarios extracts the top-N scenario names + bucket-pour
 // counts from `cscli metrics -o json`. The metrics JSON shape changes
