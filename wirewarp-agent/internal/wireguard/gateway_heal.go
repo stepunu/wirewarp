@@ -96,16 +96,19 @@ func HealAttachment(cfg GatewayConfig) (healed []string, firstErr error) {
 		))
 	}
 
-	// 8. NAT POSTROUTING MASQUERADE for intra-tunnel-subnet traffic toward LAN.
-	if cfg.LANIface != "" && cfg.WGSubnet != "" {
-		if exec.Command("iptables",
-			"-t", "nat", "-C", "POSTROUTING",
-			"-s", cfg.WGSubnet, "-o", cfg.LANIface, "-j", "MASQUERADE",
-		).Run() != nil {
-			record("nat-masquerade", iptE(
-				"-t", "nat", "-A", "POSTROUTING",
+	// 8. NAT POSTROUTING MASQUERADE for tunnel-ingress traffic toward LAN.
+	if cfg.LANIface != "" && cfg.TunnelIface != "" {
+		if cfg.WGSubnet != "" {
+			_ = exec.Command("iptables",
+				"-t", "nat", "-D", "POSTROUTING",
 				"-s", cfg.WGSubnet, "-o", cfg.LANIface, "-j", "MASQUERADE",
-			))
+			).Run()
+		}
+		rule := gatewayLANMasqueradeRule(cfg)
+		checkArgs := iptablesAction(rule, "-C")
+		insertArgs := iptablesAction(rule, "-A")
+		if exec.Command("iptables", checkArgs...).Run() != nil {
+			record("nat-masquerade", iptE(insertArgs...))
 		}
 	}
 

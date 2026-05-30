@@ -93,6 +93,9 @@ func TeardownGatewayRouting(cfg GatewayConfig) error {
 	if cfg.LANIface != "" && cfg.WGSubnet != "" {
 		ipt("-t", "nat", "-D", "POSTROUTING", "-s", cfg.WGSubnet, "-o", cfg.LANIface, "-j", "MASQUERADE")
 	}
+	if cfg.LANIface != "" && cfg.TunnelIface != "" {
+		ipt(iptablesAction(gatewayLANMasqueradeRule(cfg), "-D")...)
+	}
 	// Legacy single-mark MASQUERADE from older agent versions; harmless if absent.
 	if cfg.LANIface != "" {
 		ipt("-t", "nat", "-D", "POSTROUTING", "-m", "mark", "--mark", "0x1", "-o", cfg.LANIface, "-j", "MASQUERADE")
@@ -279,13 +282,20 @@ func applyAttachmentNAT(cfg GatewayConfig) error {
 	if err := iptE("-P", "FORWARD", "ACCEPT"); err != nil {
 		return err
 	}
-	// MASQUERADE only intra-tunnel-subnet traffic forwarded to LAN. DNAT'd
-	// external clients keep their real source IP (no masquerade) so LAN
-	// services can apply IP-based ACLs. See the design spec for context.
-	if cfg.LANIface != "" && cfg.WGSubnet != "" {
+	// MASQUERADE all tunnel-ingress traffic forwarded onto the LAN. Without
+	// this, LAN hosts whose default gateway is not the WireWarp gateway reply
+	// through the normal LAN router and public DNAT connections hang.
+	if cfg.LANIface != "" && cfg.TunnelIface != "" {
+		// Remove the older, too-narrow rule. It only matched source addresses
+		// inside the WireGuard subnet, so internet-sourced DNAT traffic kept
+		// its original source and could not reliably return.
+		if cfg.WGSubnet != "" {
+			ipt("-t", "nat", "-D", "POSTROUTING", "-s", cfg.WGSubnet, "-o", cfg.LANIface, "-j", "MASQUERADE")
+		}
+		rule := gatewayLANMasqueradeRule(cfg)
 		if err := iptCheckOrInsert(
-			[]string{"-t", "nat", "-C", "POSTROUTING", "-s", cfg.WGSubnet, "-o", cfg.LANIface, "-j", "MASQUERADE"},
-			[]string{"-t", "nat", "-A", "POSTROUTING", "-s", cfg.WGSubnet, "-o", cfg.LANIface, "-j", "MASQUERADE"},
+			iptablesAction(rule, "-C"),
+			iptablesAction(rule, "-A"),
 		); err != nil {
 			return err
 		}
@@ -301,6 +311,26 @@ func applyAttachmentNAT(cfg GatewayConfig) error {
 		)
 	}
 	return nil
+}
+
+func gatewayLANMasqueradeRule(cfg GatewayConfig) []string {
+	return []string{
+		"-t", "nat", "POSTROUTING",
+		"-i", cfg.TunnelIface,
+		"-o", cfg.LANIface,
+		"-j", "MASQUERADE",
+	}
+}
+
+func iptablesAction(rule []string, action string) []string {
+	if len(rule) >= 3 && rule[0] == "-t" {
+		out := append([]string{}, rule[:2]...)
+		out = append(out, action)
+		out = append(out, rule[2:]...)
+		return out
+	}
+	out := append([]string{action}, rule...)
+	return out
 }
 
 func applyMSSClamping(tunnelIface string) error {
