@@ -89,11 +89,13 @@ Existing server nodes derive their mode from observed state:
 - Existing Traefik or CrowdSec snapshots, HTTP routes, or edge policies:
   `security_edge`.
 
-Operators can enable Security Edge later from Node Settings. Disabling Security
-Edge is a separate destructive action because it may remove HTTP routes,
-generated configs, package-managed services, and access-log collection. The
-first implementation should support enable/install and component repair; full
-uninstall can remain a later guarded workflow.
+Operators can enable Security Edge later from Node Settings. They can also
+disable it later as a reversible stop-only action: WireWarp stops and disables
+the managed systemd services, marks edge components disabled, and leaves
+generated configs, secrets, certificates, route definitions, and package files on
+disk. Re-enabling starts the same services and reconciles the saved desired
+state. Deleting files or uninstalling packages is a separate destructive action
+and can remain a later guarded workflow.
 
 ## Node Edge Console IA
 
@@ -247,13 +249,19 @@ Server nodes store the operator-selected capability mode.
 Fields:
 
 - `edge_mode`: tcp_udp_only, security_edge
+- `edge_state`: disabled, enabled
 - `edge_enabled_at` nullable
 - `edge_enabled_by` nullable
+- `edge_disabled_at` nullable
+- `edge_disabled_by` nullable
 - `edge_install_phase`: disabled, pending, installing, healthy, degraded, failed
 - `edge_last_error` nullable
 
-`edge_mode` is desired state. Snapshot rows remain observed state. A node can be
-`security_edge` and temporarily `degraded` if one component is unhealthy.
+`edge_mode` records whether the node has the Security Edge capability. `edge_state`
+records whether that capability is currently active. Snapshot rows remain
+observed state. A node can be `security_edge` plus `disabled` when the operator
+has paused the edge services without deleting configuration, or `security_edge`
+plus `degraded` if one active component is unhealthy.
 
 ### `edge_component_states`
 
@@ -264,6 +272,7 @@ Fields:
 - `node_id`
 - `component`: traefik, crowdsec, appsec, nginx_cache, access_log
 - `desired`: disabled, enabled
+- `installed`
 - `phase`: disabled, pending, installing, healthy, degraded, failed
 - `version`
 - `last_error`
@@ -498,6 +507,8 @@ PATCH  /api/nodes/{agent_id}/edge/policy
 GET    /api/nodes/{agent_id}/edge/capabilities
 PUT    /api/nodes/{agent_id}/edge/capabilities
 POST   /api/nodes/{agent_id}/edge/install
+POST   /api/nodes/{agent_id}/edge/enable
+POST   /api/nodes/{agent_id}/edge/disable
 POST   /api/nodes/{agent_id}/edge/reconcile
 GET    /api/nodes/{agent_id}/edge/rendered
 POST   /api/nodes/{agent_id}/edge/validate
@@ -512,9 +523,14 @@ Capability behavior:
 - `PUT /edge/capabilities` is idempotent and accepts desired components such as
   `traefik`, `crowdsec`, `appsec`, `access_log`, and `nginx_cache`.
 - `POST /edge/install` starts or retries installation for enabled components.
+- `POST /edge/disable` is reversible and stop-only. It runs service stop/disable
+  operations but does not delete files, packages, ACME state, generated configs,
+  route rows, or secrets.
+- `POST /edge/enable` restarts the previously installed services and reconciles
+  saved desired state.
 - Route, policy, import, live-feed, and cache mutation endpoints return a
   machine-readable `edge_feature_disabled` error when called on a `tcp_udp_only`
-  server.
+  server or a disabled Security Edge.
 - Raw TCP/UDP forwarding APIs remain available in both modes.
 
 ### Profiles
@@ -690,6 +706,7 @@ Example desired-state shape:
 ```yaml
 node: vps-at-1
 mode: security_edge
+state: enabled
 components:
   traefik: enabled
   crowdsec: enabled
@@ -730,12 +747,14 @@ routes:
 
 The server renderer owns all Traefik/CrowdSec/AppSec/Nginx cache config. Agents
 should not invent config; they apply desired state and report observed state.
-For `tcp_udp_only` nodes, the renderer produces no edge config and sends no edge
-desired-state command.
+For `tcp_udp_only` nodes or disabled Security Edge, the renderer sends no active
+edge desired-state command. Saved route/config state remains in the database for
+later reactivation.
 
 Renderer responsibilities:
 
 - Refuse edge route rendering when the node's `edge_mode` is `tcp_udp_only`.
+- Skip active edge dispatch when `edge_state` is `disabled`.
 - Compute inheritance.
 - Render Traefik routers, services, middlewares, TLS, transports.
 - Render CrowdSec bouncer/AppSec middleware.
@@ -951,7 +970,7 @@ The full explorer is a tab or drill-down from the side panel. It supports:
   access-event, and config-version models.
 - Update add-server UI/API with `tcp_udp_only` versus `security_edge` mode.
 - Add Node Settings capability panel for enabling Security Edge after server
-  creation.
+  creation and reversibly disabling/reactivating it later.
 - Add REST endpoints for profiles, node policy, rendered config, desired-state
   dry-run, access-event query, and edge capabilities.
 - Preserve existing site APIs while adding route-shaped aliases.
@@ -1026,6 +1045,7 @@ Backend:
 
 - Server provisioning mode tests.
 - Edge capability idempotency and disabled-feature error tests.
+- Reversible disable/enable tests proving files and rows are preserved.
 - Inheritance resolver tests.
 - Renderer snapshot tests.
 - API idempotency tests.
@@ -1038,6 +1058,8 @@ Agent:
 - Component capability install/skip tests.
 - TCP/UDP-only server reconciler tests proving no edge package install is
   attempted.
+- Security Edge disable tests proving services are stopped/disabled but config,
+  ACME state, and route files are preserved.
 - Access-log tail parser tests.
 - Nginx cache-status parser tests.
 - Nginx cache config render/apply tests.
@@ -1058,6 +1080,8 @@ Integration/manual:
   or Nginx installed.
 - Enabling Security Edge later installs components and converges healthy without
   breaking existing raw forwards.
+- Disabling Security Edge stops HTTP edge services, preserves config files, and
+  re-enabling restores the same routes.
 - Imported routes stay reachable.
 - Cloudflare/mobile request shows correct TLS and access-feed identity.
 - WAF probe produces both live feed row and security event.
