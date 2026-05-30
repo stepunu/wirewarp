@@ -27,12 +27,17 @@ type EdgeDesiredStateParams struct {
 	Whitelist            CrowdSecInstallParams `json:"whitelist"`
 	TraefikStaticConfig  map[string]any        `json:"traefik_static_config"`
 	TraefikDynamicConfig map[string]any        `json:"traefik_dynamic_config"`
+	TraefikACME          TraefikACMEParams     `json:"traefik_acme"`
 }
 
 func (h *ServerHandlers) handleEdgeDesiredState(raw json.RawMessage) (string, error) {
 	var p EdgeDesiredStateParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
+	}
+	acmeChanged, err := applyTraefikACMESecrets(p.TraefikACME, traefikEnvPath, traefikCFTokenPath)
+	if err != nil {
+		return "", err
 	}
 	h.cfg.EdgeDesired = &config.EdgeDesiredState{
 		Whitelist: config.EdgeWhitelist{
@@ -57,6 +62,9 @@ func (h *ServerHandlers) handleEdgeDesiredState(raw json.RawMessage) (string, er
 	defer cancel()
 	if err := h.reconcileDesiredEdge(ctx); err != nil {
 		return "desired edge state saved; reconcile degraded", err
+	}
+	if acmeChanged {
+		restartTraefik()
 	}
 	return "desired edge state saved and reconciled", nil
 }

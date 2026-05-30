@@ -16,7 +16,12 @@ from app.services.crowdsec_ops import build_whitelist
 from app.services.traefik_ops import (
     build_traefik_dynamic_config,
     build_traefik_static_config,
+    load_letsencrypt_config,
 )
+from app.services.secrets import get_letsencrypt_cloudflare_api_token
+
+
+SECRET_KEYS = {"captchaSecretKey", "cloudflare_dns_api_token"}
 
 
 def component_phase(installed: bool, running: bool, last_error: str | None = None) -> str:
@@ -43,14 +48,32 @@ async def build_edge_desired_state(
     agent_id: uuid.UUID | str,
     db: AsyncSession,
 ) -> dict:
-    from app.config import settings as app_settings
+    letsencrypt = await load_letsencrypt_config(db)
+    le_token = await get_letsencrypt_cloudflare_api_token(db)
+    traefik_acme: dict[str, str] = {}
+    if letsencrypt.complete and letsencrypt.challenge == "dns-01" and le_token:
+        traefik_acme["cloudflare_dns_api_token"] = le_token
 
-    le_email = getattr(app_settings, "LE_EMAIL", None)
     return {
         "whitelist": await build_whitelist(agent_id, db),
-        "traefik_static_config": build_traefik_static_config(le_email=le_email),
+        "traefik_static_config": build_traefik_static_config(letsencrypt=letsencrypt),
         "traefik_dynamic_config": await build_traefik_dynamic_config(agent_id, db),
+        "traefik_acme": traefik_acme,
     }
+
+
+def redact_edge_desired_state(payload: dict) -> dict:
+    def scrub(value):
+        if isinstance(value, dict):
+            return {
+                k: ("[redacted]" if k in SECRET_KEYS and v else scrub(v))
+                for k, v in value.items()
+            }
+        if isinstance(value, list):
+            return [scrub(v) for v in value]
+        return value
+
+    return scrub(payload)
 
 
 async def dispatch_edge_desired_state(
@@ -67,6 +90,7 @@ async def dispatch_edge_desired_state(
         params=payload,
         db=db,
         actor_user_id=actor_user_id,
+        log_params=redact_edge_desired_state(payload),
     )
 
 

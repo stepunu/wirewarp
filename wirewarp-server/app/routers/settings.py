@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import log_auth_event, require_role
 from app.database import get_db
 from app.models.system_settings import SystemSettings
+from app.realtime.events import emit_edge_changed, emit_security_changed
 from app.models.user import User
 from app.schemas.system_settings import (
     AuthTestRequest,
@@ -24,6 +25,17 @@ from app.services.secrets import (
 
 
 router = APIRouter()
+
+
+LET_ENCRYPT_FIELDS = {
+    "letsencrypt_enabled",
+    "letsencrypt_email",
+    "letsencrypt_challenge",
+    "letsencrypt_dns_provider",
+    "letsencrypt_dns_resolvers",
+    "letsencrypt_use_staging",
+    "letsencrypt_cloudflare_api_token",
+}
 
 
 async def _get_or_create(db: AsyncSession) -> SystemSettings:
@@ -76,6 +88,7 @@ async def update_settings(
 
     auth_provider_changed = False
     config_changed = False
+    letsencrypt_changed = bool(LET_ENCRYPT_FIELDS.intersection(payload))
 
     for field, val in payload.items():
         if field == "cloudflare_api_token":
@@ -92,6 +105,13 @@ async def update_settings(
                 row.captcha_secret_key = val
             else:
                 row.captcha_secret_key = encrypt_secret(val)
+        elif field == "letsencrypt_cloudflare_api_token":
+            if val is None or val == "":
+                row.letsencrypt_cloudflare_api_token = None
+            elif looks_like_fernet(val):
+                row.letsencrypt_cloudflare_api_token = val
+            else:
+                row.letsencrypt_cloudflare_api_token = encrypt_secret(val)
         elif field == "oidc_config":
             merged = _merge_provider_config(row.oidc_config, val, ("client_secret",))
             row.oidc_config = encrypt_oidc_config(merged)
@@ -121,6 +141,13 @@ async def update_settings(
                 "ldap_set": bool(row.ldap_config),
             },
         )
+
+    if letsencrypt_changed:
+        from app.services.edge_ops import dispatch_all_server_edges
+
+        await dispatch_all_server_edges(db, actor_user_id=actor.id)
+        emit_edge_changed()
+        emit_security_changed()
 
     return row
 

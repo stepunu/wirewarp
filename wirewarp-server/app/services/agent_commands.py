@@ -41,6 +41,7 @@ async def send_command(
     params: dict[str, Any],
     db: AsyncSession,
     actor_user_id: uuid.UUID | None = None,
+    log_params: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """
     Build a command message, log it, and send it to the agent.
@@ -73,7 +74,7 @@ async def send_command(
         agent_id=agent_uuid,
         actor_user_id=actor_user_id,
         command_type=command_type,
-        params=params,
+        params=log_params if log_params is not None else params,
         success=None,
         output=None,
     )

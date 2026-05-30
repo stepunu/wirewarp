@@ -37,6 +37,7 @@ from app.services.traefik_ops import (
     build_traefik_dynamic_config,
     build_traefik_static_config,
     dispatch_traefik_sync,
+    load_letsencrypt_config,
 )
 from app.services.tunnel_server_ops import dispatch_wg_attach, dispatch_wg_init
 from app.websocket.hub import manager
@@ -189,19 +190,17 @@ async def install_traefik_on_tunnel_server(
     static config, followed immediately by a `traefik_sync_config` with
     the current dynamic config so Traefik has its routes on first start.
     """
-    from app.config import settings as app_settings
-
     server = await db.scalar(select(TunnelServer).where(TunnelServer.id == server_id))
     if not server:
         raise HTTPException(status_code=404, detail="Tunnel server not found")
 
-    le_email = getattr(app_settings, "LE_EMAIL", None)
-    static_cfg = build_traefik_static_config(le_email=le_email)
+    letsencrypt = await load_letsencrypt_config(db)
+    static_cfg = build_traefik_static_config(letsencrypt=letsencrypt)
 
     sent, command_id = await send_command(
         agent_id=str(server.agent_id),
         command_type="traefik_install",
-        params={"static_config": static_cfg, "le_email": le_email, "version": None},
+        params={"static_config": static_cfg, "le_email": letsencrypt.email, "version": None},
         db=db,
         actor_user_id=user.id,
     )

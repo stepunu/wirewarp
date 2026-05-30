@@ -1,8 +1,9 @@
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing import Any, Literal
 
 
 AuthProvider = Literal["local", "oidc", "ldap"]
+LetsEncryptChallenge = Literal["dns-01", "tls-alpn-01", "http-01"]
 
 
 class SystemSettingsRead(BaseModel):
@@ -26,6 +27,13 @@ class SystemSettingsRead(BaseModel):
     captcha_site_key: str | None = None
     captcha_site_key_set: bool = False
     captcha_secret_key_set: bool = False
+    letsencrypt_enabled: bool = False
+    letsencrypt_email: str | None = None
+    letsencrypt_challenge: LetsEncryptChallenge = "dns-01"
+    letsencrypt_dns_provider: str | None = "cloudflare"
+    letsencrypt_dns_resolvers: list[str] = Field(default_factory=lambda: ["1.1.1.1:53"])
+    letsencrypt_use_staging: bool = False
+    letsencrypt_cloudflare_token_set: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -66,6 +74,16 @@ class SystemSettingsRead(BaseModel):
             "captcha_site_key": getattr(data, "captcha_site_key", None),
             "captcha_site_key_set": bool(getattr(data, "captcha_site_key", None)),
             "captcha_secret_key_set": bool(getattr(data, "captcha_secret_key", None)),
+            "letsencrypt_enabled": bool(getattr(data, "letsencrypt_enabled", False)),
+            "letsencrypt_email": getattr(data, "letsencrypt_email", None),
+            "letsencrypt_challenge": getattr(data, "letsencrypt_challenge", None) or "dns-01",
+            "letsencrypt_dns_provider": getattr(data, "letsencrypt_dns_provider", None) or "cloudflare",
+            "letsencrypt_dns_resolvers": getattr(data, "letsencrypt_dns_resolvers", None)
+            or ["1.1.1.1:53"],
+            "letsencrypt_use_staging": bool(getattr(data, "letsencrypt_use_staging", False)),
+            "letsencrypt_cloudflare_token_set": bool(
+                getattr(data, "letsencrypt_cloudflare_api_token", None)
+            ),
         }
 
 
@@ -86,6 +104,13 @@ class SystemSettingsUpdate(BaseModel):
     captcha_provider: str | None = None
     captcha_site_key: str | None = None
     captcha_secret_key: str | None = None
+    letsencrypt_enabled: bool | None = None
+    letsencrypt_email: str | None = None
+    letsencrypt_challenge: LetsEncryptChallenge | None = None
+    letsencrypt_dns_provider: str | None = None
+    letsencrypt_dns_resolvers: list[str] | None = None
+    letsencrypt_use_staging: bool | None = None
+    letsencrypt_cloudflare_api_token: str | None = None
 
 
 class AuthTestRequest(BaseModel):

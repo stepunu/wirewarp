@@ -1,10 +1,14 @@
 """Settings PATCH for auth provider config + secrets-at-rest behavior."""
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from sqlalchemy import select
 
+from app.models.agent import Agent
 from app.models.system_settings import SystemSettings
+from app.models.tunnel_server import TunnelServer
 from app.services.secrets import (
     FERNET_PREFIX,
     decrypt_ldap_config,
@@ -22,6 +26,11 @@ async def test_get_settings_initial_shape(client):
     assert body["auth_provider"] == "local"
     assert body["oidc_secret_set"] is False
     assert body["ldap_secret_set"] is False
+    assert body["letsencrypt_enabled"] is False
+    assert body["letsencrypt_challenge"] == "dns-01"
+    assert body["letsencrypt_dns_provider"] == "cloudflare"
+    assert body["letsencrypt_dns_resolvers"] == ["1.1.1.1:53"]
+    assert body["letsencrypt_cloudflare_token_set"] is False
 
 
 @pytest.mark.asyncio
@@ -131,6 +140,63 @@ async def test_patch_cloudflare_token_idempotent_when_already_encrypted(client, 
     )
     row = await db.scalar(select(SystemSettings).where(SystemSettings.id == 1))
     assert decrypt_secret(row.cloudflare_api_token) == "raw"
+
+
+@pytest.mark.asyncio
+async def test_patch_letsencrypt_cloudflare_token_encrypts(client, db):
+    resp = await client.patch(
+        "/api/settings",
+        json={
+            "letsencrypt_enabled": True,
+            "letsencrypt_email": "admin@example.com",
+            "letsencrypt_challenge": "dns-01",
+            "letsencrypt_dns_provider": "cloudflare",
+            "letsencrypt_dns_resolvers": ["1.1.1.1:53", "1.0.0.1:53"],
+            "letsencrypt_cloudflare_api_token": "le-cf-token",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["letsencrypt_enabled"] is True
+    assert body["letsencrypt_email"] == "admin@example.com"
+    assert body["letsencrypt_cloudflare_token_set"] is True
+    assert body["letsencrypt_dns_resolvers"] == ["1.1.1.1:53", "1.0.0.1:53"]
+
+    row = await db.scalar(select(SystemSettings).where(SystemSettings.id == 1))
+    assert looks_like_fernet(row.letsencrypt_cloudflare_api_token)
+    assert decrypt_secret(row.letsencrypt_cloudflare_api_token) == "le-cf-token"
+
+
+@pytest.mark.asyncio
+async def test_patch_letsencrypt_settings_dispatches_server_edge(client, session_maker, fake_manager):
+    agent = Agent(
+        id=uuid.uuid4(),
+        name="edge-1",
+        type="server",
+        hostname="edge-1.example",
+        status="connected",
+    )
+    async with session_maker() as s:
+        s.add(agent)
+        await s.commit()
+        s.add(TunnelServer(id=uuid.uuid4(), agent_id=agent.id, tunnel_network="10.21.0.0/24"))
+        await s.commit()
+
+    fake_manager.online.add(str(agent.id))
+    resp = await client.patch(
+        "/api/settings",
+        json={
+            "letsencrypt_enabled": True,
+            "letsencrypt_email": "admin@example.com",
+            "letsencrypt_cloudflare_api_token": "le-cf-token",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert fake_manager.sent
+    msg = fake_manager.sent[-1]["message"]
+    assert msg["type"] == "edge_desired_state"
+    assert msg["params"]["traefik_acme"]["cloudflare_dns_api_token"] == "le-cf-token"
 
 
 @pytest.mark.asyncio

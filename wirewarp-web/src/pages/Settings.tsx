@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { settings as settingsApi } from '../lib/api'
-import { Button, Field, Input, Select, Tabs } from '../components/ui'
+import { Button, Field, Input, Select, Tabs, Toggle } from '../components/ui'
 import { Ic } from '../components/icons'
 import { useToast } from '../components/Toasts'
 import type {
@@ -11,7 +11,8 @@ import type {
   Role,
 } from '../lib/types'
 
-type Tab = 'general' | 'auth' | 'appearance'
+type Tab = 'general' | 'letsencrypt' | 'auth' | 'appearance'
+type LetsEncryptChallenge = 'dns-01' | 'tls-alpn-01' | 'http-01'
 
 export default function Settings() {
   const [tab, setTab] = useState<Tab>('general')
@@ -43,12 +44,14 @@ export default function Settings() {
         onChange={setTab}
         tabs={[
           { value: 'general', label: 'General' },
+          { value: 'letsencrypt', label: "Let's Encrypt" },
           { value: 'auth', label: 'Authentication' },
           { value: 'appearance', label: 'Appearance' },
         ]}
       />
 
       {tab === 'general' && <GeneralTab />}
+      {tab === 'letsencrypt' && <LetsEncryptTab />}
       {tab === 'auth' && <AuthTab />}
 
       {tab === 'appearance' && (
@@ -81,6 +84,161 @@ export default function Settings() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+function LetsEncryptTab() {
+  const qc = useQueryClient()
+  const push = useToast()
+  const dataQ = useQuery({ queryKey: ['settings'], queryFn: settingsApi.get })
+  const [enabled, setEnabled] = useState(false)
+  const [email, setEmail] = useState('')
+  const [challenge, setChallenge] = useState<LetsEncryptChallenge>('dns-01')
+  const [dnsProvider, setDnsProvider] = useState('cloudflare')
+  const [dnsResolvers, setDnsResolvers] = useState('1.1.1.1:53')
+  const [useStaging, setUseStaging] = useState(false)
+  const [cfToken, setCfToken] = useState('')
+
+  useEffect(() => {
+    if (!dataQ.data) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setEnabled(dataQ.data.letsencrypt_enabled)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setEmail(dataQ.data.letsencrypt_email ?? '')
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setChallenge(dataQ.data.letsencrypt_challenge)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDnsProvider(dataQ.data.letsencrypt_dns_provider ?? 'cloudflare')
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDnsResolvers((dataQ.data.letsencrypt_dns_resolvers ?? ['1.1.1.1:53']).join(', '))
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setUseStaging(dataQ.data.letsencrypt_use_staging)
+  }, [dataQ.data])
+
+  const save = useMutation({
+    mutationFn: () => {
+      const resolvers = dnsResolvers
+        .split(',')
+        .map((v) => v.trim())
+        .filter(Boolean)
+      const payload: Record<string, unknown> = {
+        letsencrypt_enabled: enabled,
+        letsencrypt_email: email.trim() || null,
+        letsencrypt_challenge: challenge,
+        letsencrypt_dns_provider: challenge === 'dns-01' ? dnsProvider || 'cloudflare' : null,
+        letsencrypt_dns_resolvers: resolvers.length ? resolvers : ['1.1.1.1:53'],
+        letsencrypt_use_staging: useStaging,
+      }
+      if (cfToken.trim()) payload.letsencrypt_cloudflare_api_token = cfToken.trim()
+      return settingsApi.update(payload)
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['settings'] })
+      setCfToken('')
+      push("let's encrypt settings saved", 'ok', 'settings://letsencrypt')
+    },
+    onError: (e: Error) => push(e.message, 'err', 'settings://letsencrypt'),
+  })
+
+  return (
+    <div className="card">
+      <div className="card-body">
+        <div className="settings-row" style={{ padding: '8px 0' }}>
+          <div>
+            <div style={{ fontWeight: 500 }}>Managed certificates</div>
+            <div style={{ color: 'var(--fg-2)', fontSize: 12 }}>
+              Traefik ACME settings used by server nodes for public HTTPS routes.
+            </div>
+          </div>
+          <div className="col" style={{ gap: 12, maxWidth: 520 }}>
+            <Field label="Enabled">
+              <div className="row" style={{ gap: 10 }}>
+                <Toggle on={enabled} onChange={setEnabled} />
+                <span style={{ color: enabled ? 'var(--ok)' : 'var(--fg-2)', fontSize: 12 }}>
+                  {enabled ? 'enabled' : 'disabled'}
+                </span>
+              </div>
+            </Field>
+            <Field label="Account email" hint="Used for ACME account registration and expiry notices.">
+              <Input
+                mono
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="admin@example.com"
+              />
+            </Field>
+            <Field label="Challenge">
+              <Select
+                value={challenge}
+                onChange={(e) => setChallenge(e.target.value as LetsEncryptChallenge)}
+              >
+                <option value="dns-01">DNS-01</option>
+                <option value="tls-alpn-01">TLS-ALPN-01</option>
+                <option value="http-01">HTTP-01</option>
+              </Select>
+            </Field>
+            <Field label="CA">
+              <Select value={useStaging ? 'staging' : 'production'} onChange={(e) => setUseStaging(e.target.value === 'staging')}>
+                <option value="production">Production</option>
+                <option value="staging">Staging</option>
+              </Select>
+            </Field>
+          </div>
+        </div>
+
+        {challenge === 'dns-01' && (
+          <>
+            <div className="hr" />
+            <div className="settings-row" style={{ padding: '8px 0' }}>
+              <div>
+                <div style={{ fontWeight: 500 }}>DNS-01 provider</div>
+                <div style={{ color: 'var(--fg-2)', fontSize: 12 }}>
+                  Cloudflare credentials used only by Traefik certificate issuance.
+                </div>
+              </div>
+              <div className="col" style={{ gap: 12, maxWidth: 520 }}>
+                <Field label="Provider">
+                  <Select value={dnsProvider} onChange={(e) => setDnsProvider(e.target.value)}>
+                    <option value="cloudflare">Cloudflare</option>
+                  </Select>
+                </Field>
+                <Field label="Resolvers" hint="Comma-separated DNS resolvers Traefik uses while checking propagation.">
+                  <Input
+                    mono
+                    value={dnsResolvers}
+                    onChange={(e) => setDnsResolvers(e.target.value)}
+                    placeholder="1.1.1.1:53, 1.0.0.1:53"
+                  />
+                </Field>
+                <Field
+                  label={
+                    dataQ.data?.letsencrypt_cloudflare_token_set
+                      ? 'Cloudflare API token (saved — leave blank to keep, type to replace)'
+                      : 'Cloudflare API token'
+                  }
+                  hint="Use a zone-scoped token with Zone:Read and DNS:Edit."
+                >
+                  <Input
+                    mono
+                    type="password"
+                    value={cfToken}
+                    onChange={(e) => setCfToken(e.target.value)}
+                    placeholder={dataQ.data?.letsencrypt_cloudflare_token_set ? '••••••••' : 'paste token here'}
+                  />
+                </Field>
+              </div>
+            </div>
+          </>
+        )}
+
+        <div style={{ textAlign: 'right', marginTop: 8 }}>
+          <Button variant="primary" onClick={() => save.mutate()} disabled={save.isPending}>
+            {save.isPending ? 'saving…' : 'Save changes'}
+          </Button>
+        </div>
+      </div>
     </div>
   )
 }

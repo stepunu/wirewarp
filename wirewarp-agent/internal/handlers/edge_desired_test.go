@@ -2,8 +2,13 @@ package handlers
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/wirewarp/agent/internal/config"
 )
 
 func TestInjectBouncerKeyReplacesSentinel(t *testing.T) {
@@ -139,7 +144,8 @@ func TestDesiredStateJSONShape(t *testing.T) {
 	raw := []byte(`{
 		"whitelist":{"ips":["1.2.3.4"],"cidrs":["10.21.0.0/24"]},
 		"traefik_static_config":{"entryPoints":{"web":{"address":":80"}}},
-		"traefik_dynamic_config":{"http":{"routers":{}}}
+		"traefik_dynamic_config":{"http":{"routers":{}}},
+		"traefik_acme":{"cloudflare_dns_api_token":"secret-token"}
 	}`)
 	var p EdgeDesiredStateParams
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -147,5 +153,76 @@ func TestDesiredStateJSONShape(t *testing.T) {
 	}
 	if p.Whitelist.IPs[0] != "1.2.3.4" || p.TraefikStaticConfig["entryPoints"] == nil {
 		t.Fatalf("unexpected decoded shape: %#v", p)
+	}
+	if p.TraefikACME.CloudflareDNSToken != "secret-token" {
+		t.Fatalf("acme token not decoded: %#v", p.TraefikACME)
+	}
+
+	persisted := config.EdgeDesiredState{
+		Whitelist:            config.EdgeWhitelist{IPs: p.Whitelist.IPs, CIDRs: p.Whitelist.CIDRs},
+		TraefikStaticConfig:  p.TraefikStaticConfig,
+		TraefikDynamicConfig: p.TraefikDynamicConfig,
+	}
+	data, err := json.Marshal(persisted)
+	if err != nil {
+		t.Fatalf("marshal persisted desired state: %v", err)
+	}
+	if strings.Contains(string(data), "secret-token") {
+		t.Fatalf("ACME secret must not be persisted in agent config: %s", data)
+	}
+}
+
+func TestApplyTraefikACMESecretsWritesTokenFileAndEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "traefik.env")
+	tokenPath := filepath.Join(dir, "secrets", "cloudflare_dns_api_token")
+
+	changed, err := applyTraefikACMESecrets(TraefikACMEParams{CloudflareDNSToken: "secret-token"}, envPath, tokenPath)
+	if err != nil {
+		t.Fatalf("apply acme secrets: %v", err)
+	}
+	if !changed {
+		t.Fatalf("first write should report changed")
+	}
+	token, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	if string(token) != "secret-token" {
+		t.Fatalf("token file content mismatch: %q", token)
+	}
+	info, err := os.Stat(tokenPath)
+	if err != nil {
+		t.Fatalf("stat token file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("token file mode: want 0600, got %v", info.Mode().Perm())
+	}
+	env, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("read env file: %v", err)
+	}
+	if string(env) != "CF_DNS_API_TOKEN_FILE="+tokenPath+"\n" {
+		t.Fatalf("env file mismatch: %q", env)
+	}
+
+	changed, err = applyTraefikACMESecrets(TraefikACMEParams{}, envPath, tokenPath)
+	if err != nil {
+		t.Fatalf("remove acme secrets: %v", err)
+	}
+	if !changed {
+		t.Fatalf("removing existing files should report changed")
+	}
+	if _, err := os.Stat(envPath); !os.IsNotExist(err) {
+		t.Fatalf("env file should be removed, got err=%v", err)
+	}
+	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+		t.Fatalf("token file should be removed, got err=%v", err)
+	}
+}
+
+func TestTraefikUnitLoadsManagedEnvironmentFile(t *testing.T) {
+	if !strings.Contains(traefikUnitTemplate, "EnvironmentFile=-/etc/traefik/traefik.env") {
+		t.Fatalf("traefik systemd unit must load the managed ACME env file")
 	}
 }

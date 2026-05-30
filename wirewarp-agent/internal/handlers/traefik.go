@@ -21,6 +21,8 @@ const (
 	traefikStaticCfg   = "/etc/traefik/traefik.yml"
 	traefikDynamicDir  = "/etc/traefik/dynamic"
 	traefikDynamicCfg  = "/etc/traefik/dynamic/wirewarp.yml"
+	traefikEnvPath     = "/etc/traefik/traefik.env"
+	traefikCFTokenPath = "/etc/traefik/secrets/cloudflare_dns_api_token"
 	traefikUnitPath    = "/etc/systemd/system/traefik.service"
 	traefikUnitName    = "traefik.service"
 	traefikDownloadURL = "https://github.com/traefik/traefik/releases/download/v3.3.4/traefik_v3.3.4_linux_amd64.tar.gz"
@@ -41,6 +43,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+EnvironmentFile=-/etc/traefik/traefik.env
 ExecStart=/usr/local/bin/traefik --configFile=/etc/traefik/traefik.yml
 Restart=on-failure
 RestartSec=5s
@@ -106,7 +109,8 @@ func (h *ServerHandlers) handleTraefikInstall(raw json.RawMessage) (string, erro
 
 	// 3. Write the static config dict the server built.
 	logf("==> write static config %s", traefikStaticCfg)
-	if err := writeYAML(traefikStaticCfg, p.StaticConfig); err != nil {
+	staticChanged, err := writeYAMLChanged(traefikStaticCfg, p.StaticConfig)
+	if err != nil {
 		return logBuf.String(), fmt.Errorf("write static config: %w", err)
 	}
 
@@ -117,6 +121,7 @@ func (h *ServerHandlers) handleTraefikInstall(raw json.RawMessage) (string, erro
 
 	// 5. Write the systemd unit.
 	logf("==> install systemd unit %s", traefikUnitPath)
+	unitChanged := false
 	current, _ := os.ReadFile(traefikUnitPath)
 	if string(current) != traefikUnitTemplate {
 		if err := os.MkdirAll("/etc/systemd/system", 0755); err != nil {
@@ -125,6 +130,7 @@ func (h *ServerHandlers) handleTraefikInstall(raw json.RawMessage) (string, erro
 		if err := os.WriteFile(traefikUnitPath, []byte(traefikUnitTemplate), 0644); err != nil {
 			return logBuf.String(), fmt.Errorf("write %s: %w", traefikUnitPath, err)
 		}
+		unitChanged = true
 		if out, err := exec.CommandContext(ctx, "systemctl", "daemon-reload").CombinedOutput(); err != nil {
 			return logBuf.String(), fmt.Errorf("daemon-reload: %w — %s", err, tail(out, 4))
 		}
@@ -134,6 +140,12 @@ func (h *ServerHandlers) handleTraefikInstall(raw json.RawMessage) (string, erro
 	logf("==> systemctl enable --now traefik")
 	if out, err := runCmd(ctx, "systemctl", "enable", "--now", traefikUnitName); err != nil {
 		return logBuf.String(), fmt.Errorf("enable traefik: %w\n%s", err, tail(out, 4))
+	}
+	if staticChanged || unitChanged {
+		logf("==> restart traefik after static/unit change")
+		if out, err := runCmd(ctx, "systemctl", "restart", traefikUnitName); err != nil {
+			return logBuf.String(), fmt.Errorf("restart traefik: %w\n%s", err, tail(out, 4))
+		}
 	}
 
 	// 7. Surface service state immediately in the response.
@@ -206,6 +218,48 @@ func reloadTraefik() {
 	}
 }
 
+func restartTraefik() {
+	ctx, cancel := context.WithTimeout(context.Background(), traefikCmdTimeout)
+	defer cancel()
+
+	sysctl := resolveBin("systemctl", "/usr/bin/systemctl", "/bin/systemctl")
+	if out, err := exec.CommandContext(ctx, sysctl, "restart", traefikUnitName).CombinedOutput(); err != nil {
+		log.Printf("[traefik] restart failed: %v — %s", err, tail(out, 2))
+	}
+}
+
+type TraefikACMEParams struct {
+	CloudflareDNSToken string `json:"cloudflare_dns_api_token"`
+}
+
+func applyTraefikACMESecrets(p TraefikACMEParams, envPath string, tokenPath string) (bool, error) {
+	if strings.TrimSpace(p.CloudflareDNSToken) == "" {
+		changed := false
+		for _, path := range []string{envPath, tokenPath} {
+			if err := os.Remove(path); err == nil {
+				changed = true
+			} else if !os.IsNotExist(err) {
+				return changed, fmt.Errorf("remove %s: %w", path, err)
+			}
+		}
+		return changed, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
+		return false, fmt.Errorf("mkdir %s: %w", filepath.Dir(tokenPath), err)
+	}
+	tokenChanged, err := writeBytesChanged(tokenPath, []byte(p.CloudflareDNSToken), 0600)
+	if err != nil {
+		return tokenChanged, fmt.Errorf("write ACME Cloudflare token: %w", err)
+	}
+	env := []byte("CF_DNS_API_TOKEN_FILE=" + tokenPath + "\n")
+	envChanged, err := writeBytesChanged(envPath, env, 0644)
+	if err != nil {
+		return tokenChanged || envChanged, fmt.Errorf("write Traefik env file: %w", err)
+	}
+	return tokenChanged || envChanged, nil
+}
+
 // writeYAML marshals v to YAML and writes it to path with a "do not edit"
 // header. Uses gopkg.in/yaml.v3 which is already in go.mod.
 func writeYAML(path string, v any) error {
@@ -227,6 +281,15 @@ func writeYAMLChanged(path string, v any) (bool, error) {
 		return false, nil
 	}
 	return true, writeFileAtomic(path, next, 0644)
+}
+
+func writeBytesChanged(path string, data []byte, perm os.FileMode) (bool, error) {
+	if current, err := os.ReadFile(path); err == nil && bytes.Equal(current, data) {
+		if info, statErr := os.Stat(path); statErr == nil && info.Mode().Perm() == perm {
+			return false, nil
+		}
+	}
+	return true, writeFileAtomic(path, data, perm)
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {

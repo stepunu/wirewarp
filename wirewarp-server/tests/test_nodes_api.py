@@ -7,13 +7,16 @@ import pytest
 from sqlalchemy import select
 
 from app.models.agent import Agent
+from app.models.command_log import CommandLog
 from app.models.crowdsec_snapshot import CrowdSecSnapshot
 from app.models.edge_route_config import EdgeRouteConfig
 from app.models.port_forward import PortForward
+from app.models.system_settings import SystemSettings
 from app.models.tunnel_client import TunnelClient
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
 from app.models.traefik_snapshot import TraefikSnapshot
+from app.services.secrets import encrypt_secret
 
 
 def _agent(agent_type: str, name: str) -> Agent:
@@ -134,9 +137,54 @@ async def test_edge_reconcile_dispatches_unified_desired_state(client, session_m
     assert fake_manager.sent
     msg = fake_manager.sent[-1]["message"]
     assert msg["type"] == "edge_desired_state"
-    assert set(msg["params"]) == {"whitelist", "traefik_static_config", "traefik_dynamic_config"}
+    assert set(msg["params"]) == {
+        "whitelist",
+        "traefik_static_config",
+        "traefik_dynamic_config",
+        "traefik_acme",
+    }
+    router = msg["params"]["traefik_dynamic_config"]["http"]["routers"]["app-example-com"]
+    assert router["tls"] == {}
     middleware = msg["params"]["traefik_dynamic_config"]["http"]["middlewares"]["crowdsec-bouncer"]
     assert middleware["plugin"]["bouncer"]["crowdsecAppsecEnabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_edge_reconcile_sends_acme_token_but_redacts_command_log(client, session_maker, fake_manager) -> None:
+    server_agent = _agent("server", "edge-1")
+    async with session_maker() as s:
+        s.add(server_agent)
+        await s.commit()
+        s.add(TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24"))
+        settings = await s.get(SystemSettings, 1)
+        if settings is None:
+            settings = SystemSettings(id=1)
+            s.add(settings)
+        settings.letsencrypt_enabled = True
+        settings.letsencrypt_email = "admin@example.com"
+        settings.letsencrypt_challenge = "dns-01"
+        settings.letsencrypt_dns_provider = "cloudflare"
+        settings.letsencrypt_dns_resolvers = ["1.1.1.1:53"]
+        settings.letsencrypt_cloudflare_api_token = encrypt_secret("real-le-token")
+        await s.commit()
+
+    fake_manager.online.add(str(server_agent.id))
+    resp = await client.post(f"/api/nodes/{server_agent.id}/edge/reconcile")
+
+    assert resp.status_code == 202
+    sent_params = fake_manager.sent[-1]["message"]["params"]
+    assert sent_params["traefik_acme"]["cloudflare_dns_api_token"] == "real-le-token"
+    resolver = sent_params["traefik_static_config"]["certificatesResolvers"]["wirewarp-le"]["acme"]
+    assert resolver["dnsChallenge"]["provider"] == "cloudflare"
+
+    async with session_maker() as s:
+        logged = await s.scalar(
+            select(CommandLog)
+            .where(CommandLog.agent_id == server_agent.id)
+            .order_by(CommandLog.executed_at.desc())
+        )
+        assert logged is not None
+        assert logged.params["traefik_acme"]["cloudflare_dns_api_token"] == "[redacted]"
 
 
 @pytest.mark.asyncio

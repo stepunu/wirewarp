@@ -99,6 +99,20 @@ async def get_captcha_secret_key(db: AsyncSession) -> str | None:
         return raw
 
 
+async def get_letsencrypt_cloudflare_api_token(db: AsyncSession) -> str | None:
+    """Load and decrypt the Cloudflare token used by Traefik ACME DNS-01."""
+    from app.models.system_settings import SystemSettings
+
+    row = await db.get(SystemSettings, 1)
+    if row is None or not row.letsencrypt_cloudflare_api_token:
+        return None
+    raw = row.letsencrypt_cloudflare_api_token
+    try:
+        return decrypt_secret(raw)
+    except InvalidToken:
+        return raw
+
+
 # Keys inside the OIDC / LDAP JSONB blobs that hold secrets and must be
 # encrypted on save / decrypted on read. Anything not listed is stored as
 # plaintext (issuer URL, group mappings, etc).

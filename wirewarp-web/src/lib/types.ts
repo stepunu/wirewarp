@@ -254,6 +254,13 @@ export interface SystemSettings {
   captcha_site_key: string | null
   captcha_site_key_set: boolean
   captcha_secret_key_set: boolean
+  letsencrypt_enabled: boolean
+  letsencrypt_email: string | null
+  letsencrypt_challenge: 'dns-01' | 'tls-alpn-01' | 'http-01'
+  letsencrypt_dns_provider: string | null
+  letsencrypt_dns_resolvers: string[]
+  letsencrypt_use_staging: boolean
+  letsencrypt_cloudflare_token_set: boolean
 }
 
 export interface SystemSettingsUpdate {
@@ -269,6 +276,13 @@ export interface SystemSettingsUpdate {
   captcha_provider?: string | null
   captcha_site_key?: string | null
   captcha_secret_key?: string | null
+  letsencrypt_enabled?: boolean | null
+  letsencrypt_email?: string | null
+  letsencrypt_challenge?: 'dns-01' | 'tls-alpn-01' | 'http-01' | null
+  letsencrypt_dns_provider?: string | null
+  letsencrypt_dns_resolvers?: string[] | null
+  letsencrypt_use_staging?: boolean | null
+  letsencrypt_cloudflare_api_token?: string | null
 }
 
 export type NodeRole = 'server' | 'gateway' | 'client'

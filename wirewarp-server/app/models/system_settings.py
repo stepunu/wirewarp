@@ -1,6 +1,6 @@
 from typing import Any
 
-from sqlalchemy import String, Integer
+from sqlalchemy import Boolean, String, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -35,3 +35,23 @@ class SystemSettings(Base):
     captcha_provider: Mapped[str | None] = mapped_column(String, nullable=True)
     captcha_site_key: Mapped[str | None] = mapped_column(String, nullable=True)
     captcha_secret_key: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Let's Encrypt / ACME settings for managed Traefik certificates. The
+    # Cloudflare token is separate from DNS sync and is Fernet-encrypted.
+    letsencrypt_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    letsencrypt_email: Mapped[str | None] = mapped_column(String, nullable=True)
+    letsencrypt_challenge: Mapped[str] = mapped_column(
+        String, nullable=False, default="dns-01", server_default="dns-01"
+    )
+    letsencrypt_dns_provider: Mapped[str | None] = mapped_column(
+        String, nullable=True, default="cloudflare", server_default="cloudflare"
+    )
+    letsencrypt_dns_resolvers: Mapped[list[str] | None] = mapped_column(
+        JSONB, nullable=True, default=lambda: ["1.1.1.1:53"]
+    )
+    letsencrypt_use_staging: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    letsencrypt_cloudflare_api_token: Mapped[str | None] = mapped_column(String, nullable=True)
