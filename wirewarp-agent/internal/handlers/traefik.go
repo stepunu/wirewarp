@@ -219,7 +219,11 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	tmpDir := atomicTempDir(path)
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", tmpDir, err)
+	}
+	tmp, err := os.CreateTemp(tmpDir, "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temp file for %s: %w", path, err)
 	}
@@ -255,6 +259,15 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		_ = d.Close()
 	}
 	return nil
+}
+
+func atomicTempDir(path string) string {
+	dir := filepath.Dir(path)
+	parent := filepath.Dir(dir)
+	if parent == dir || parent == "." {
+		return dir
+	}
+	return parent
 }
 
 // --- crowdsec_appsec_enable handler ---

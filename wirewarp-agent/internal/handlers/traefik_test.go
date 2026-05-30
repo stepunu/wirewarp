@@ -32,6 +32,13 @@ func TestWriteYAMLReplacesExistingFileAtomically(t *testing.T) {
 	}
 }
 
+func TestAtomicTempDirIsOutsideWatchedTargetDir(t *testing.T) {
+	path := "/etc/traefik/dynamic/wirewarp.yml"
+	if got := atomicTempDir(path); got != "/etc/traefik" {
+		t.Fatalf("atomic temp dir: want /etc/traefik, got %s", got)
+	}
+}
+
 func inodeOf(t *testing.T, path string) uint64 {
 	t.Helper()
 	info, err := os.Stat(path)
