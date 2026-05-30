@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,20 +19,23 @@ import (
 
 // traefik install / config paths
 const (
-	traefikBinary      = "/usr/local/bin/traefik"
-	traefikStaticCfg   = "/etc/traefik/traefik.yml"
-	traefikDynamicDir  = "/etc/traefik/dynamic"
-	traefikDynamicCfg  = "/etc/traefik/dynamic/wirewarp.yml"
-	traefikEnvPath     = "/etc/traefik/traefik.env"
-	traefikCFTokenPath = "/etc/traefik/secrets/cloudflare_dns_api_token"
-	traefikUnitPath    = "/etc/systemd/system/traefik.service"
-	traefikUnitName    = "traefik.service"
-	traefikDownloadURL = "https://github.com/traefik/traefik/releases/download/v3.3.4/traefik_v3.3.4_linux_amd64.tar.gz"
+	traefikBinary           = "/usr/local/bin/traefik"
+	traefikStaticCfg        = "/etc/traefik/traefik.yml"
+	traefikDynamicDir       = "/etc/traefik/dynamic"
+	traefikDynamicCfg       = "/etc/traefik/dynamic/wirewarp.yml"
+	traefikEnvPath          = "/etc/traefik/traefik.env"
+	traefikCFTokenPath      = "/etc/traefik/secrets/cloudflare_dns_api_token"
+	traefikEventsCursorPath = "/etc/wirewarp/traefik-events.cursor"
+	traefikUnitPath         = "/etc/systemd/system/traefik.service"
+	traefikUnitName         = "traefik.service"
+	traefikDownloadURL      = "https://github.com/traefik/traefik/releases/download/v3.3.4/traefik_v3.3.4_linux_amd64.tar.gz"
 )
 
 const traefikInstallTimeout = 5 * time.Minute
 const traefikPollInterval = 5 * time.Minute
 const traefikCmdTimeout = 15 * time.Second
+
+var traefikAccessLogRE = regexp.MustCompile(`^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) ([^"]*) HTTP/[^"]+" (\d{3}) \S+ "[^"]*" "[^"]*" \S+ "([^"]*)" "([^"]*)"`)
 
 // traefikUnitTemplate is the systemd unit for Traefik. Like the routing
 // unit, it runs as root with the static+dynamic config dirs the agent
@@ -492,7 +497,11 @@ func (h *ServerHandlers) traefikPollLoop(ctx context.Context) {
 
 func (h *ServerHandlers) pollAndEmitTraefik(ctx context.Context, retry bool) {
 	payload := collectTraefik()
-	if !h.tryEmitTraefik(payload) && retry {
+	if h.tryEmitTraefik(payload) {
+		h.emitTraefikAccessEvents(ctx)
+		return
+	}
+	if retry {
 		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
 			select {
@@ -501,6 +510,7 @@ func (h *ServerHandlers) pollAndEmitTraefik(ctx context.Context, retry bool) {
 			case <-time.After(2 * time.Second):
 			}
 			if h.tryEmitTraefik(payload) {
+				h.emitTraefikAccessEvents(ctx)
 				return
 			}
 		}
@@ -653,7 +663,119 @@ func countTraefikRoutes() int {
 	return len(routers)
 }
 
-// --- security_events emitter (crowdsec decisions) ---
+// --- security_events emitters ---
+
+func (h *ServerHandlers) emitTraefikAccessEvents(ctx context.Context) {
+	raw, err := readTraefikAccessJournal(ctx)
+	if err != nil {
+		log.Printf("[security-events] traefik access log: %v", err)
+		return
+	}
+	events, cursor := parseTraefikAccessSecurityEvents(raw)
+	if cursor != "" {
+		if err := writeTraefikEventsCursor(cursor); err != nil {
+			log.Printf("[security-events] write traefik cursor: %v", err)
+		}
+	}
+	if len(events) == 0 {
+		return
+	}
+
+	p := h.emit.Load()
+	if p == nil {
+		return
+	}
+	fn := *p
+	if fn == nil {
+		return
+	}
+	_ = fn("security_events", map[string]any{
+		"events": events,
+	})
+}
+
+func readTraefikAccessJournal(ctx context.Context) (string, error) {
+	args := []string{"-u", traefikUnitName, "--no-pager", "-o", "cat", "--show-cursor"}
+	if cursor := readTraefikEventsCursor(); cursor != "" {
+		args = append(args, "--after-cursor", cursor)
+	} else {
+		args = append(args, "--since", "5 minutes ago")
+	}
+	out, err := exec.CommandContext(ctx, "journalctl", args...).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("journalctl %s: %w — %s", strings.Join(args, " "), err, out)
+	}
+	return string(out), nil
+}
+
+func readTraefikEventsCursor() string {
+	data, err := os.ReadFile(traefikEventsCursorPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func writeTraefikEventsCursor(cursor string) error {
+	if err := os.MkdirAll(filepath.Dir(traefikEventsCursorPath), 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(traefikEventsCursorPath, []byte(cursor+"\n"), 0600)
+}
+
+func parseTraefikAccessSecurityEvents(raw string) ([]map[string]any, string) {
+	var cursor string
+	events := make([]map[string]any, 0)
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "-- cursor:") {
+			cursor = strings.TrimSpace(strings.TrimPrefix(line, "-- cursor:"))
+			continue
+		}
+		evt, ok := parseTraefikAccessSecurityEvent(line)
+		if ok {
+			events = append(events, evt)
+		}
+	}
+	return events, cursor
+}
+
+func parseTraefikAccessSecurityEvent(line string) (map[string]any, bool) {
+	m := traefikAccessLogRE.FindStringSubmatch(line)
+	if m == nil {
+		return nil, false
+	}
+	status, err := strconv.Atoi(m[5])
+	if err != nil || status != 429 {
+		return nil, false
+	}
+	occurred, err := time.Parse("02/Jan/2006:15:04:05 -0700", m[2])
+	if err != nil {
+		occurred = time.Now().UTC()
+	}
+	method := m[3]
+	path := m[4]
+	router := m[6]
+	service := m[7]
+	return map[string]any{
+		"source":      "traefik",
+		"kind":        "rate_limit",
+		"ip":          m[1],
+		"value":       router,
+		"action":      "rate_limit",
+		"occurred_at": occurred.UTC().Format(time.RFC3339),
+		"raw": map[string]any{
+			"method":  method,
+			"path":    path,
+			"status":  status,
+			"router":  router,
+			"service": service,
+		},
+	}, true
+}
 
 // emitSecurityEvents reads current CrowdSec decisions and emits them as a
 // `security_events` frame. Called opportunistically after crowdsec_install /

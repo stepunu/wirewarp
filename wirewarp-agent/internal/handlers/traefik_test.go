@@ -57,6 +57,37 @@ func TestAtomicTempDirIsOutsideWatchedTargetDir(t *testing.T) {
 	}
 }
 
+func TestParseTraefikRateLimitAccessEvents(t *testing.T) {
+	raw := strings.Join([]string{
+		`84.113.55.126 - - [30/May/2026:17:42:53 +0000] "GET /web/manifest.json HTTP/2.0" 429 17 "-" "-" 111 "media-ww-step1-ro@file" "-" 0ms`,
+		`84.113.55.126 - - [30/May/2026:17:42:54 +0000] "GET /web/ HTTP/2.0" 200 1408 "-" "-" 112 "media-ww-step1-ro@file" "http://192.168.20.151:8096" 30ms`,
+		`-- cursor: s=cursor-after-lines`,
+	}, "\n")
+
+	events, cursor := parseTraefikAccessSecurityEvents(raw)
+
+	if cursor != "s=cursor-after-lines" {
+		t.Fatalf("cursor: got %q", cursor)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events: got %d, want 1: %#v", len(events), events)
+	}
+	evt := events[0]
+	if evt["source"] != "traefik" || evt["kind"] != "rate_limit" || evt["action"] != "rate_limit" {
+		t.Fatalf("unexpected event identity: %#v", evt)
+	}
+	if evt["ip"] != "84.113.55.126" || evt["value"] != "media-ww-step1-ro@file" {
+		t.Fatalf("unexpected event target: %#v", evt)
+	}
+	rawPayload, ok := evt["raw"].(map[string]any)
+	if !ok {
+		t.Fatalf("raw payload type: %#v", evt["raw"])
+	}
+	if rawPayload["status"] != 429 || rawPayload["path"] != "/web/manifest.json" {
+		t.Fatalf("unexpected raw payload: %#v", rawPayload)
+	}
+}
+
 func inodeOf(t *testing.T, path string) uint64 {
 	t.Helper()
 	info, err := os.Stat(path)

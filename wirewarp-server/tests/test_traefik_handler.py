@@ -298,6 +298,39 @@ async def test_security_events_insert_batch(db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_security_events_accept_traefik_rate_limit_event(db) -> None:
+    agent = _agent()
+    db.add(agent)
+    await db.commit()
+
+    await handle_security_events(
+        str(agent.id),
+        {
+            "type": "security_events",
+            "events": [
+                {
+                    "source": "traefik",
+                    "kind": "rate_limit",
+                    "ip": "84.113.55.126",
+                    "value": "media-ww-step1-ro@file",
+                    "action": "rate_limit",
+                    "occurred_at": "2026-05-30T17:42:53+00:00",
+                    "raw": {"status": 429, "path": "/web/manifest.json"},
+                }
+            ],
+        },
+        db,
+    )
+
+    row = await db.scalar(select(SecurityEvent).where(SecurityEvent.agent_id == agent.id))
+    assert row is not None
+    assert row.source == "traefik"
+    assert row.kind == "rate_limit"
+    assert row.action == "rate_limit"
+    assert row.raw == {"status": 429, "path": "/web/manifest.json"}
+
+
+@pytest.mark.asyncio
 async def test_security_events_empty_list_is_noop(db) -> None:
     agent = _agent()
     db.add(agent)
