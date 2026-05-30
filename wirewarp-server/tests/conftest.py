@@ -3,9 +3,9 @@
 We run against SQLite via aiosqlite so the suite works without a Postgres
 sidecar. JSONB columns (used by command_log.params) get a compile hook that
 renders them as plain JSON on SQLite — semantically equivalent for our
-storage purposes. Postgres-specific migration features (gen_random_uuid,
-partial indexes, etc.) live in alembic, not the ORM, and tests skip alembic
-in favour of `Base.metadata.create_all`.
+storage purposes. Most Postgres-specific migration features (gen_random_uuid,
+older migration-only partial indexes, etc.) live in alembic, and tests skip
+alembic in favour of `Base.metadata.create_all`.
 """
 from __future__ import annotations
 

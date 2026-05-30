@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Integer, Boolean, ForeignKey, DateTime, func, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 
@@ -10,15 +10,6 @@ from app.database import Base
 
 class PortForward(Base):
     __tablename__ = "port_forwards"
-    __table_args__ = (
-        UniqueConstraint(
-            "attachment_id",
-            "tunnel_server_ip_id",
-            "protocol",
-            "public_port",
-            name="uq_pf_attach_ip_proto_port",
-        ),
-    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     attachment_id: Mapped[uuid.UUID] = mapped_column(
@@ -49,4 +40,23 @@ class PortForward(Base):
     tunnel_server_ip: Mapped["TunnelServerIP | None"] = relationship("TunnelServerIP")  # noqa: F821
     edge_route_config: Mapped["EdgeRouteConfig | None"] = relationship(  # noqa: F821
         "EdgeRouteConfig", back_populates="port_forward", uselist=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "attachment_id",
+            "tunnel_server_ip_id",
+            "protocol",
+            "public_port",
+            name="uq_pf_attach_ip_proto_port",
+        ),
+        Index(
+            "ix_pf_attach_null_ip_proto_port",
+            "attachment_id",
+            "protocol",
+            "public_port",
+            unique=True,
+            postgresql_where=text("tunnel_server_ip_id IS NULL AND service_kind = 'raw'"),
+            sqlite_where=text("tunnel_server_ip_id IS NULL AND service_kind = 'raw'"),
+        ),
     )

@@ -151,6 +151,68 @@ async def test_port_forward_unique_per_attachment(db, factories):
     await db.rollback()
 
 
+async def test_null_ip_port_uniqueness_is_raw_forward_only(db, factories):
+    server = await factories.make_server(db)
+    client = await factories.make_client(db)
+    att = await factories.make_attachment(db, client=client, server=server)
+    att_id = att.id
+    tunnel_ip = att.tunnel_ip
+
+    db.add(
+        PortForward(
+            id=uuid.uuid4(),
+            attachment_id=att_id,
+            protocol="tcp",
+            public_port=443,
+            destination_ip=tunnel_ip,
+            destination_port=8443,
+            service_kind="raw",
+        )
+    )
+    db.add(
+        PortForward(
+            id=uuid.uuid4(),
+            attachment_id=att_id,
+            protocol="tcp",
+            public_port=443,
+            destination_ip=tunnel_ip,
+            destination_port=9443,
+            service_kind="raw",
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        await db.commit()
+    await db.rollback()
+
+    db.add(
+        PortForward(
+            id=uuid.uuid4(),
+            attachment_id=att_id,
+            protocol="tcp",
+            public_port=443,
+            destination_ip=tunnel_ip,
+            destination_port=8096,
+            service_kind="http",
+            domain="media.ww.step1.ro",
+        )
+    )
+    db.add(
+        PortForward(
+            id=uuid.uuid4(),
+            attachment_id=att_id,
+            protocol="tcp",
+            public_port=443,
+            destination_ip=tunnel_ip,
+            destination_port=13378,
+            service_kind="http",
+            domain="audiobooks.ww.step1.ro",
+        )
+    )
+
+    await db.commit()
+
+
 async def test_client_eager_loads_attachments(db, factories):
     server = await factories.make_server(db)
     client = await factories.make_client(db)
