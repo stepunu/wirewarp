@@ -36,6 +36,38 @@ async def test_create_forward_with_attachment(client, db, factories, fake_manage
     assert add_msgs[0]["message"]["params"]["public_ip"] == "1.2.3.4"
 
 
+async def test_create_raw_edge_forward_rejects_active_security_site(client, db, factories, fake_manager):
+    server = await factories.make_server(db, primary_ip="1.2.3.4")
+    cli = await factories.make_client(db)
+    att = await factories.make_attachment(db, client=cli, server=server)
+
+    site = await client.post(
+        "/api/security/sites",
+        json={
+            "attachment_id": str(att.id),
+            "domain": "app.example.com",
+            "destination_ip": "192.168.1.10",
+            "destination_port": 8080,
+        },
+    )
+    assert site.status_code == 201, site.text
+
+    res = await client.post(
+        "/api/port-forwards",
+        json={
+            "attachment_id": str(att.id),
+            "protocol": "tcp",
+            "public_port": 443,
+            "destination_ip": att.tunnel_ip,
+            "destination_port": 443,
+        },
+    )
+
+    assert res.status_code == 409
+    assert "Raw TCP forwards on 80/443" in res.json()["detail"]
+    assert not [s for s in fake_manager.sent if s["message"]["type"] == "iptables_add_forward"]
+
+
 async def test_create_forward_404_when_attachment_missing(client, db, factories, fake_manager):
     res = await client.post(
         "/api/port-forwards",
@@ -48,6 +80,39 @@ async def test_create_forward_404_when_attachment_missing(client, db, factories,
         },
     )
     assert res.status_code == 404
+
+
+async def test_patch_raw_edge_forward_rejects_active_security_site(client, db, factories):
+    server = await factories.make_server(db)
+    cli = await factories.make_client(db)
+    att = await factories.make_attachment(db, client=cli, server=server)
+
+    site = await client.post(
+        "/api/security/sites",
+        json={
+            "attachment_id": str(att.id),
+            "domain": "app.example.com",
+            "destination_ip": "192.168.1.10",
+            "destination_port": 8080,
+        },
+    )
+    assert site.status_code == 201, site.text
+    raw = await client.post(
+        "/api/port-forwards",
+        json={
+            "attachment_id": str(att.id),
+            "protocol": "tcp",
+            "public_port": 8080,
+            "destination_ip": att.tunnel_ip,
+            "destination_port": 8080,
+        },
+    )
+    assert raw.status_code == 201, raw.text
+
+    res = await client.patch(f"/api/port-forwards/{raw.json()['id']}", json={"public_port": 80})
+
+    assert res.status_code == 409
+    assert "Raw TCP forwards on 80/443" in res.json()["detail"]
 
 
 async def test_list_filter_by_tunnel_server_id(client, db, factories, fake_manager):

@@ -254,6 +254,56 @@ async def test_security_sites_filter_by_agent_id_and_default_observe(client, ses
 
 
 @pytest.mark.asyncio
+async def test_security_site_rejects_conflicting_raw_edge_forward(client, session_maker) -> None:
+    server_agent = _agent("server", "edge-1")
+    gateway_agent = _agent("client", "gw-1")
+    async with session_maker() as s:
+        s.add_all([server_agent, gateway_agent])
+        await s.commit()
+        server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
+        client_row = TunnelClient(id=uuid.uuid4(), agent_id=gateway_agent.id, is_gateway=True)
+        s.add_all([server, client_row])
+        await s.commit()
+        att = TunnelClientAttachment(
+            id=uuid.uuid4(),
+            tunnel_client_id=client_row.id,
+            tunnel_server_id=server.id,
+            tunnel_ip="10.21.0.2",
+            wg_interface="wg0",
+            fwmark=0x101,
+            route_table_id=100,
+        )
+        s.add(att)
+        await s.commit()
+        s.add(
+            PortForward(
+                id=uuid.uuid4(),
+                attachment_id=att.id,
+                protocol="tcp",
+                public_port=443,
+                destination_ip="192.168.1.2",
+                destination_port=443,
+                service_kind="raw",
+                active=True,
+            )
+        )
+        await s.commit()
+
+    resp = await client.post(
+        "/api/security/sites",
+        json={
+            "attachment_id": str(att.id),
+            "domain": "app.example.com",
+            "destination_ip": "192.168.1.10",
+            "destination_port": 8080,
+        },
+    )
+
+    assert resp.status_code == 409
+    assert "Raw TCP port forward 443" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_antibot_requires_configured_captcha_keys(client, session_maker) -> None:
     server_agent = _agent("server", "edge-1")
     gateway_agent = _agent("client", "gw-1")

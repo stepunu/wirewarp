@@ -43,6 +43,10 @@ from app.schemas.security import (
     TopItem,
     TraefikStatusRead,
 )
+from app.services.edge_port_conflicts import (
+    find_active_raw_edge_forward_on_server,
+    server_id_for_attachment,
+)
 from app.services.edge_ops import dispatch_edge_desired_state, dispatch_edge_for_attachment, site_server_context
 from app.services.secrets import get_captcha_secret_key
 
@@ -267,6 +271,34 @@ async def _get_server_agent_for_pf(pf: PortForward, db: AsyncSession) -> str | N
     return str(ts.agent_id)
 
 
+async def _ensure_site_does_not_shadow_raw_edge_forward(
+    *,
+    db: AsyncSession,
+    attachment_id: uuid.UUID,
+    active: bool,
+    exclude_port_forward_id: uuid.UUID | None = None,
+) -> None:
+    if not active:
+        return
+    server_id = await server_id_for_attachment(db, attachment_id)
+    if server_id is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    conflict = await find_active_raw_edge_forward_on_server(
+        db,
+        server_id,
+        exclude_port_forward_id=exclude_port_forward_id,
+    )
+    if conflict is None:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"Raw TCP port forward {conflict.public_port} is active on this server. "
+            "Disable raw forwards on 80/443 before enabling Security Edge sites."
+        ),
+    )
+
+
 @router.get("/sites", response_model=list[SiteRead])
 async def list_sites(
     server_id: uuid.UUID | None = None,
@@ -323,6 +355,11 @@ async def create_site(
     """Create an HTTP port_forward + edge_route_config, then sync Traefik."""
     if body.antibot and not await _captcha_configured(db):
         raise HTTPException(status_code=400, detail="CAPTCHA provider keys must be configured before enabling anti-bot")
+    await _ensure_site_does_not_shadow_raw_edge_forward(
+        db=db,
+        attachment_id=body.attachment_id,
+        active=True,
+    )
 
     pf = PortForward(
         id=uuid.uuid4(),
@@ -388,6 +425,13 @@ async def update_site(
         raise HTTPException(status_code=400, detail="CAPTCHA provider keys must be configured before enabling anti-bot")
 
     body_fields = body.model_fields_set
+    next_active = body.active if "active" in body_fields and body.active is not None else pf.active
+    await _ensure_site_does_not_shadow_raw_edge_forward(
+        db=db,
+        attachment_id=pf.attachment_id,
+        active=next_active,
+        exclude_port_forward_id=pf.id,
+    )
 
     # Update port_forward fields. Nullable fields may be explicitly cleared;
     # non-null transport fields only update when a concrete value is supplied.

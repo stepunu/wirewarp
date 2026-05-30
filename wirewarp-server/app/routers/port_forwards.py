@@ -21,6 +21,10 @@ from app.schemas.port_forward import (
 from app.auth import get_current_user, require_role, require_ops_role
 from app.realtime.events import emit_port_forward_changed, emit_tunnel_server_changed
 from app.services.agent_commands import send_command
+from app.services.edge_port_conflicts import (
+    find_active_http_site_on_server,
+    uses_edge_entrypoint,
+)
 from app.services.port_security import classify_forward
 from app.services.primary_ip import resolve_public_ip
 
@@ -71,6 +75,35 @@ async def _push_forward(pf: PortForward, command_type: str, db: AsyncSession) ->
             "Server agent %s not connected — %s not delivered for port %s",
             server.agent_id, command_type, port_str,
         )
+
+
+async def _ensure_raw_forward_does_not_shadow_edge(
+    *,
+    db: AsyncSession,
+    attachment: TunnelClientAttachment,
+    protocol: str,
+    public_port: int,
+    public_port_end: int | None,
+    active: bool,
+    exclude_port_forward_id: uuid.UUID | None = None,
+) -> None:
+    if not active or not uses_edge_entrypoint(protocol, public_port, public_port_end):
+        return
+    conflict = await find_active_http_site_on_server(
+        db,
+        attachment.tunnel_server_id,
+        exclude_port_forward_id=exclude_port_forward_id,
+    )
+    if conflict is None:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "Raw TCP forwards on 80/443 cannot be active while Security Edge "
+            "sites exist on the same server. Use a Security Edge site instead, "
+            "or disable the existing site first."
+        ),
+    )
 
 
 async def migrate_port_forwards_to_pin(
@@ -233,6 +266,14 @@ async def create_port_forward(
     )
     if att is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
+    await _ensure_raw_forward_does_not_shadow_edge(
+        db=db,
+        attachment=att,
+        protocol=body.protocol,
+        public_port=body.public_port,
+        public_port_end=body.public_port_end,
+        active=True,
+    )
 
     pf = PortForward(**body.model_dump())
     db.add(pf)
@@ -289,6 +330,22 @@ async def update_port_forward(
     }
     changes = body.model_dump(exclude_unset=True)
     rule_changed = bool(rule_fields & changes.keys())
+
+    next_attachment_id = changes.get("attachment_id", pf.attachment_id)
+    next_attachment = await db.scalar(
+        select(TunnelClientAttachment).where(TunnelClientAttachment.id == next_attachment_id)
+    )
+    if next_attachment is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    await _ensure_raw_forward_does_not_shadow_edge(
+        db=db,
+        attachment=next_attachment,
+        protocol=changes.get("protocol", pf.protocol),
+        public_port=changes.get("public_port", pf.public_port),
+        public_port_end=changes.get("public_port_end", pf.public_port_end),
+        active=changes.get("active", pf.active),
+        exclude_port_forward_id=pf.id,
+    )
 
     for field, value in changes.items():
         setattr(pf, field, value)
