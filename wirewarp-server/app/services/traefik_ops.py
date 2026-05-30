@@ -280,6 +280,7 @@ async def build_traefik_dynamic_config(
     servers_transports: dict = {}
     acme_ready = await letsencrypt_resolver_ready(db)
     letsencrypt_domains: list[str] = []
+    letsencrypt_router_names: list[str] = []
     server_rate_limit = None
     if server.edge_rate_limit_rps:
         server_burst = server.edge_rate_limit_burst or server.edge_rate_limit_rps * 5
@@ -403,6 +404,7 @@ async def build_traefik_dynamic_config(
         if tls_source == "letsencrypt" and acme_ready:
             if pf.domain:
                 letsencrypt_domains.append(pf.domain)
+                letsencrypt_router_names.append(safe_name)
 
         routers[safe_name] = {
             "rule": rule,
@@ -426,21 +428,14 @@ async def build_traefik_dynamic_config(
 
         services[f"svc-{safe_name}"] = {"loadBalancer": lb}
 
-    tls_config: dict = {}
     cert_domain = _build_default_generated_cert_domain(letsencrypt_domains)
     if cert_domain:
-        tls_config = {
-            "stores": {
-                "default": {
-                    "defaultGeneratedCert": {
-                        "resolver": "wirewarp-le",
-                        "domain": cert_domain,
-                    }
-                }
-            }
+        routers[letsencrypt_router_names[0]]["tls"] = {
+            "certResolver": "wirewarp-le",
+            "domains": [cert_domain],
         }
 
-    return _build_http_config(routers, services, middlewares, servers_transports, tls_config)
+    return _build_http_config(routers, services, middlewares, servers_transports)
 
 
 def _build_http_config(
@@ -448,13 +443,10 @@ def _build_http_config(
     services: dict,
     middlewares: dict,
     servers_transports: dict | None = None,
-    tls_config: dict | None = None,
 ) -> dict:
     servers_transports = servers_transports or {}
-    tls_config = tls_config or {}
-    if not routers and not services and not middlewares and not servers_transports and not tls_config:
+    if not routers and not services and not middlewares and not servers_transports:
         return {}
-    cfg = {}
     http = {}
     if routers:
         http["routers"] = routers
@@ -464,11 +456,7 @@ def _build_http_config(
         http["middlewares"] = middlewares
     if servers_transports:
         http["serversTransports"] = servers_transports
-    if http:
-        cfg["http"] = http
-    if tls_config:
-        cfg["tls"] = tls_config
-    return cfg
+    return {"http": http}
 
 
 async def dispatch_traefik_sync(

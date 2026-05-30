@@ -395,15 +395,24 @@ async def test_letsencrypt_routes_share_default_wildcard_certificate(
 
         cfg = await build_traefik_dynamic_config(agent_id, s)
 
-    for router in cfg["http"]["routers"].values():
-        assert router["tls"] == {}
-
-    generated = cfg["tls"]["stores"]["default"]["defaultGeneratedCert"]
-    assert generated["resolver"] == "wirewarp-le"
-    assert generated["domain"] == {
+    tls_configs = [
+        router["tls"]
+        for router in cfg["http"]["routers"].values()
+        if router["tls"].get("certResolver") == "wirewarp-le"
+    ]
+    assert len(tls_configs) == 1
+    assert tls_configs[0]["domains"] == [{
         "main": "*.step1.ro",
         "sans": ["*.infra.step1.ro", "*.ww.step1.ro"],
-    }
+    }]
+
+    passive_tls = [
+        router["tls"]
+        for router in cfg["http"]["routers"].values()
+        if router["tls"].get("certResolver") != "wirewarp-le"
+    ]
+    assert passive_tls
+    assert all(tls == {} for tls in passive_tls)
 
 
 @pytest.mark.asyncio
