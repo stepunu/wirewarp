@@ -10,9 +10,11 @@ from app.models.agent import Agent
 from app.models.edge_route_config import EdgeRouteConfig
 from app.models.port_forward import PortForward
 from app.models.security_event import SecurityEvent
+from app.models.system_settings import SystemSettings
 from app.models.tunnel_client import TunnelClient
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
+from app.services.secrets import encrypt_secret
 from app.services.traefik_ops import build_traefik_dynamic_config
 
 
@@ -343,6 +345,64 @@ async def test_forward_auth_render_strips_unsupported_response_body_limit(
         "address": "http://192.168.20.112:9091/api/verify?rd=https://auth.step1.ro",
         "trustForwardHeader": True,
         "authResponseHeaders": ["Remote-User", "Remote-Groups"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_letsencrypt_routes_share_default_wildcard_certificate(
+    session_maker,
+) -> None:
+    agent_id, _server_id, attachment_id = await _server_with_attachment(session_maker)
+    async with session_maker() as s:
+        settings = await s.get(SystemSettings, 1)
+        if settings is None:
+            settings = SystemSettings(id=1)
+            s.add(settings)
+        settings.letsencrypt_enabled = True
+        settings.letsencrypt_email = "admin@example.com"
+        settings.letsencrypt_challenge = "dns-01"
+        settings.letsencrypt_dns_provider = "cloudflare"
+        settings.letsencrypt_cloudflare_api_token = encrypt_secret("cf-token")
+
+        for domain in (
+            "media.step1.ro",
+            "wirewarp.step1.ro",
+            "px.infra.step1.ro",
+            "media.ww.step1.ro",
+        ):
+            pf = PortForward(
+                id=uuid.uuid4(),
+                attachment_id=attachment_id,
+                protocol="tcp",
+                public_port=443,
+                destination_ip="192.168.20.151",
+                destination_port=8096,
+                service_kind="http",
+                domain=domain,
+                active=True,
+            )
+            s.add(pf)
+            await s.flush()
+            s.add(
+                EdgeRouteConfig(
+                    id=uuid.uuid4(),
+                    port_forward_id=pf.id,
+                    waf_mode="observe",
+                    tls_source="letsencrypt",
+                )
+            )
+        await s.commit()
+
+        cfg = await build_traefik_dynamic_config(agent_id, s)
+
+    for router in cfg["http"]["routers"].values():
+        assert router["tls"] == {}
+
+    generated = cfg["tls"]["stores"]["default"]["defaultGeneratedCert"]
+    assert generated["resolver"] == "wirewarp-le"
+    assert generated["domain"] == {
+        "main": "*.step1.ro",
+        "sans": ["*.infra.step1.ro", "*.ww.step1.ro"],
     }
 
 

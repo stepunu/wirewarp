@@ -87,6 +87,42 @@ def _render_forward_auth_config(config: dict) -> dict:
     }
 
 
+def _normalise_domain(domain: str | None) -> str | None:
+    if not domain:
+        return None
+    cleaned = domain.strip().strip(".").lower()
+    if not cleaned or "`" in cleaned or "/" in cleaned:
+        return None
+    return cleaned
+
+
+def _wildcard_cert_domain_for_host(domain: str) -> str:
+    labels = domain.split(".")
+    if len(labels) <= 2:
+        return domain
+    return "*." + ".".join(labels[1:])
+
+
+def _domain_sort_key(domain: str) -> tuple[int, int, str]:
+    # Prefer exact names as the certificate main domain, then broader wildcards.
+    return (domain.startswith("*."), domain.count("."), domain)
+
+
+def _build_default_generated_cert_domain(domains: list[str]) -> dict | None:
+    cert_domains = {
+        _wildcard_cert_domain_for_host(domain)
+        for raw in domains
+        if (domain := _normalise_domain(raw))
+    }
+    if not cert_domains:
+        return None
+    ordered = sorted(cert_domains, key=_domain_sort_key)
+    domain_cfg: dict = {"main": ordered[0]}
+    if len(ordered) > 1:
+        domain_cfg["sans"] = ordered[1:]
+    return domain_cfg
+
+
 def build_traefik_static_config(
     le_email: str | None = None,
     letsencrypt: LetsEncryptConfig | None = None,
@@ -243,6 +279,7 @@ async def build_traefik_dynamic_config(
     middlewares: dict = {}
     servers_transports: dict = {}
     acme_ready = await letsencrypt_resolver_ready(db)
+    letsencrypt_domains: list[str] = []
     server_rate_limit = None
     if server.edge_rate_limit_rps:
         server_burst = server.edge_rate_limit_burst or server.edge_rate_limit_rps * 5
@@ -364,9 +401,8 @@ async def build_traefik_dynamic_config(
         tls_source = ec.tls_source if ec else "letsencrypt"
         tls_cfg: dict = {}
         if tls_source == "letsencrypt" and acme_ready:
-            tls_cfg = {"certResolver": "wirewarp-le"}
-        else:
-            tls_cfg = {}
+            if pf.domain:
+                letsencrypt_domains.append(pf.domain)
 
         routers[safe_name] = {
             "rule": rule,
@@ -390,7 +426,21 @@ async def build_traefik_dynamic_config(
 
         services[f"svc-{safe_name}"] = {"loadBalancer": lb}
 
-    return _build_http_config(routers, services, middlewares, servers_transports)
+    tls_config: dict = {}
+    cert_domain = _build_default_generated_cert_domain(letsencrypt_domains)
+    if cert_domain:
+        tls_config = {
+            "stores": {
+                "default": {
+                    "defaultGeneratedCert": {
+                        "resolver": "wirewarp-le",
+                        "domain": cert_domain,
+                    }
+                }
+            }
+        }
+
+    return _build_http_config(routers, services, middlewares, servers_transports, tls_config)
 
 
 def _build_http_config(
@@ -398,10 +448,13 @@ def _build_http_config(
     services: dict,
     middlewares: dict,
     servers_transports: dict | None = None,
+    tls_config: dict | None = None,
 ) -> dict:
     servers_transports = servers_transports or {}
-    if not routers and not services and not middlewares and not servers_transports:
+    tls_config = tls_config or {}
+    if not routers and not services and not middlewares and not servers_transports and not tls_config:
         return {}
+    cfg = {}
     http = {}
     if routers:
         http["routers"] = routers
@@ -411,7 +464,11 @@ def _build_http_config(
         http["middlewares"] = middlewares
     if servers_transports:
         http["serversTransports"] = servers_transports
-    return {"http": http}
+    if http:
+        cfg["http"] = http
+    if tls_config:
+        cfg["tls"] = tls_config
+    return cfg
 
 
 async def dispatch_traefik_sync(
