@@ -353,11 +353,12 @@ func (h *ServerHandlers) handleCrowdSecAppSecEnable(raw json.RawMessage) (string
 
 func appSecBootstrapCommands() [][]string {
 	return [][]string{
+		{"collections", "install", "crowdsecurity/appsec-virtual-patching"},
+		{"collections", "install", "crowdsecurity/appsec-generic-rules"},
+		{"collections", "install", "crowdsecurity/appsec-crs"},
 		{"appsec-configs", "install", "crowdsecurity/appsec-default"},
 		{"appsec-configs", "install", "crowdsecurity/crs"},
 		{"appsec-rules", "install", "crowdsecurity/crs"},
-		{"collections", "install", "crowdsecurity/appsec-virtual-patching"},
-		{"collections", "install", "crowdsecurity/appsec-crs"},
 	}
 }
 
@@ -373,6 +374,8 @@ func appSecBootstrapFilesPresent() bool {
 		"/etc/crowdsec/appsec-configs/crs.yaml",
 		"/etc/crowdsec/appsec-rules/crs.yaml",
 		"/etc/crowdsec/appsec-configs/virtual-patching.yaml",
+		"/etc/crowdsec/appsec-configs/generic-rules.yaml",
+		"/etc/crowdsec/appsec-rules/experimental-no-user-agent.yaml",
 	} {
 		if _, err := os.Stat(path); err != nil {
 			return false

@@ -48,6 +48,9 @@ func TestBuildAppSecAcquisitionModes(t *testing.T) {
 	}
 	observeConfigs := observe["appsec_configs"].([]string)
 	blockConfigs := block["appsec_configs"].([]string)
+	if observeConfigs[0] != "crowdsecurity/appsec-default" || observeConfigs[1] != "crowdsecurity/crs" {
+		t.Fatalf("acquisition should follow CrowdSec AppSec default+CRS docs, got %#v", observeConfigs)
+	}
 	if observeConfigs[len(observeConfigs)-1] != appSecObserveName {
 		t.Fatalf("observe acquisition should load %s last, got %#v", appSecObserveName, observeConfigs)
 	}
@@ -77,11 +80,12 @@ func TestBuildAppSecModeConfigs(t *testing.T) {
 func TestAppSecBootstrapCommandsEnableReferencedConfigs(t *testing.T) {
 	got := appSecBootstrapCommands()
 	want := [][]string{
+		{"collections", "install", "crowdsecurity/appsec-virtual-patching"},
+		{"collections", "install", "crowdsecurity/appsec-generic-rules"},
+		{"collections", "install", "crowdsecurity/appsec-crs"},
 		{"appsec-configs", "install", "crowdsecurity/appsec-default"},
 		{"appsec-configs", "install", "crowdsecurity/crs"},
 		{"appsec-rules", "install", "crowdsecurity/crs"},
-		{"collections", "install", "crowdsecurity/appsec-virtual-patching"},
-		{"collections", "install", "crowdsecurity/appsec-crs"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("bootstrap command count: want %d, got %d (%#v)", len(want), len(got), got)
