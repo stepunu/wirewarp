@@ -456,6 +456,14 @@ kbd {
   outline: none;
   background: var(--bg-2);
 }
+/* Native <select> popups don't honor color-scheme in every browser
+   (notably Firefox on Linux), so the open option list renders as a white
+   box on the dark UI. Theme the options explicitly — tokens adapt per
+   theme, so this is correct in both dark and light. */
+option, optgroup {
+  background: var(--bg-1);
+  color: var(--fg-0);
+}
 .input.mono, .input-mono { font-family: var(--font-mono); }
 .input::placeholder { color: var(--fg-3); }
 .textarea { height: auto; min-height: 80px; padding: 8px 10px; resize: vertical; }
