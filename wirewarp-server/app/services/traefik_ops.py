@@ -26,6 +26,7 @@ from app.services.secrets import get_captcha_secret_key, get_letsencrypt_cloudfl
 
 
 LE_STAGING_CA_SERVER = "https://acme-staging-v02.api.letsencrypt.org/directory"
+PINNED_TRAEFIK_UNSUPPORTED_FORWARDAUTH_KEYS = {"maxResponseBodySize"}
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,14 @@ async def load_letsencrypt_config(db: AsyncSession) -> LetsEncryptConfig:
 
 async def letsencrypt_resolver_ready(db: AsyncSession) -> bool:
     return (await load_letsencrypt_config(db)).complete
+
+
+def _render_forward_auth_config(config: dict) -> dict:
+    return {
+        key: value
+        for key, value in config.items()
+        if key not in PINNED_TRAEFIK_UNSUPPORTED_FORWARDAUTH_KEYS
+    }
 
 
 def build_traefik_static_config(
@@ -342,7 +351,7 @@ async def build_traefik_dynamic_config(
         # Forward auth
         if ec and ec.auth_mode == "forward" and ec.auth_config:
             mw_name = f"forwardauth-{safe_name}"
-            middlewares[mw_name] = {"forwardAuth": ec.auth_config}
+            middlewares[mw_name] = {"forwardAuth": _render_forward_auth_config(ec.auth_config)}
             router_middlewares.append(mw_name)
 
         # Router rule: Host header match or catch-all

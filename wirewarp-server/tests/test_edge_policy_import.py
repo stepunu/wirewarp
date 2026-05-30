@@ -302,6 +302,51 @@ async def test_server_edge_policy_renders_global_rate_limit_before_site_limit(
 
 
 @pytest.mark.asyncio
+async def test_forward_auth_render_strips_unsupported_response_body_limit(
+    session_maker,
+) -> None:
+    agent_id, _server_id, attachment_id = await _server_with_attachment(session_maker)
+    async with session_maker() as s:
+        pf = PortForward(
+            id=uuid.uuid4(),
+            attachment_id=attachment_id,
+            protocol="tcp",
+            public_port=443,
+            destination_ip="192.168.20.150",
+            destination_port=8989,
+            service_kind="http",
+            domain="sonarr.home.step1.ro",
+            active=True,
+        )
+        s.add(pf)
+        await s.flush()
+        s.add(
+            EdgeRouteConfig(
+                id=uuid.uuid4(),
+                port_forward_id=pf.id,
+                waf_mode="observe",
+                auth_mode="forward",
+                auth_config={
+                    "address": "http://192.168.20.112:9091/api/verify?rd=https://auth.step1.ro",
+                    "trustForwardHeader": True,
+                    "authResponseHeaders": ["Remote-User", "Remote-Groups"],
+                    "maxResponseBodySize": 4096,
+                },
+            )
+        )
+        await s.commit()
+
+        cfg = await build_traefik_dynamic_config(agent_id, s)
+
+    forward_auth = cfg["http"]["middlewares"]["forwardauth-sonarr-home-step1-ro"]["forwardAuth"]
+    assert forward_auth == {
+        "address": "http://192.168.20.112:9091/api/verify?rd=https://auth.step1.ro",
+        "trustForwardHeader": True,
+        "authResponseHeaders": ["Remote-User", "Remote-Groups"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_node_edge_includes_server_policy_and_effective_site_policy(
     client,
     session_maker,
