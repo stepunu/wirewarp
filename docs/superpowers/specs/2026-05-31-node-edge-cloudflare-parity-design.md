@@ -31,6 +31,10 @@ features map to these Cloudflare product areas:
   <https://developers.cloudflare.com/health-checks/>
 - Cache rules:
   <https://developers.cloudflare.com/cache/how-to/cache-rules/settings/>
+- Nginx proxy cache directives:
+  <https://nginx.org/en/docs/http/ngx_http_proxy_module.html>
+- NGINX content caching guide:
+  <https://docs.nginx.com/nginx/admin-guide/content-cache/content-caching/>
 
 WireWarp will not match Cloudflare's global Anycast network, global DDoS
 capacity, ML bot score, or distributed CDN storage. It can match most
@@ -119,10 +123,15 @@ Tabs for a server node:
    - Query-string preservation/removal where Traefik supports it.
 
 9. **Cache**
-   - Local proxy cache controls for static assets and selected paths.
-   - Cache mode: bypass, standard, static-only, custom.
-   - Edge TTL, stale-if-error, cache key mode.
-   - Purge by host/path/prefix.
+   - Local Nginx `proxy_cache` controls for static assets and selected paths.
+   - Capability-gated mode: headers-only until the Nginx cache backend is
+     installed, healthy, and verified.
+   - Cache mode: off, headers-only, respect-origin, static-assets, custom.
+   - Edge TTL, browser TTL, stale-if-error, revalidation, cache key mode.
+   - Bypass/no-store rules for auth headers, cookies, API paths, query strings,
+     response status codes, and `Set-Cookie`.
+   - Purge by route, host, path, prefix, or full node cache where supported by
+     the managed cache index.
    - This is local VPS cache, not a Cloudflare CDN.
 
 10. **Import / Diff**
@@ -307,10 +316,34 @@ Fields:
 - `rendered_static_hash`
 - `rendered_dynamic_hash`
 - `rendered_dynamic_yaml`
+- `rendered_cache_hash`
+- `rendered_cache_config`
 - `created_by`
 - `created_at`
 - `applied_at`
 - `agent_result`
+
+### `edge_cache_snapshots`
+
+Observed Nginx cache backend state for a server node.
+
+Fields:
+
+- `node_id`
+- `backend`: nginx_proxy_cache
+- `installed`
+- `running`
+- `phase`: pending, healthy, degraded, failed
+- `version`
+- `cache_path`
+- `max_size_bytes`
+- `current_size_bytes`
+- `keys_zone_size`
+- `last_config_hash`
+- `last_test_status`: hit, miss, bypass, stale, failed
+- `last_purge_result`
+- `last_error`
+- `updated_at`
 
 ### `edge_access_events`
 
@@ -335,6 +368,7 @@ Fields:
 - `action`: pass, block, captcha, rate_limit, auth_denied, upstream_error
 - `source`: traefik, crowdsec, appsec
 - `latency_ms`
+- `cache_status`: hit, miss, bypass, stale, revalidated, not_configured
 - `upstream_url`
 - `upstream_status`
 - `bytes_in`, `bytes_out`
@@ -361,10 +395,12 @@ The live feed behaves like Pi-hole's query stream:
 Implementation:
 
 1. Agent tails Traefik access logs in JSON mode.
-2. Agent batches events over WebSocket to the control server.
-3. Server stores access events in `edge_access_events`.
-4. Server emits realtime `edge.access` events to dashboards.
-5. Dashboard keeps a bounded in-memory live list and refetches paginated history
+2. Cache-enabled routes add `X-WireWarp-Cache-Status` from Nginx, and Traefik
+   access logs include that response header.
+3. Agent batches events over WebSocket to the control server.
+4. Server stores access events in `edge_access_events`.
+5. Server emits realtime `edge.access` events to dashboards.
+6. Dashboard keeps a bounded in-memory live list and refetches paginated history
    from REST for searches.
 
 Privacy and safety:
@@ -472,6 +508,29 @@ Query filters:
 - `limit`
 - `cursor`
 
+### Cache
+
+```http
+GET    /api/nodes/{agent_id}/edge/cache
+PATCH  /api/nodes/{agent_id}/edge/cache
+POST   /api/nodes/{agent_id}/edge/cache/install
+POST   /api/nodes/{agent_id}/edge/cache/reconcile
+GET    /api/nodes/{agent_id}/edge/cache/stats
+POST   /api/nodes/{agent_id}/edge/cache/purge
+POST   /api/nodes/{agent_id}/edge/cache/test
+POST   /api/edge/routes/{route_id}/cache/purge
+POST   /api/edge/routes/{route_id}/cache/preview
+```
+
+Cache mutation is capability-gated:
+
+- `headers_only` is always available because it renders response headers.
+- `edge_cache` requires a healthy `nginx_proxy_cache` backend snapshot.
+- `purge` requires the backend to report purge support for the selected scope.
+
+Routes return `cache.available`, `cache.backend`, and `cache.reason` so UI and
+Ansible can distinguish a disabled setting from an unavailable node capability.
+
 ### Import
 
 ```http
@@ -573,20 +632,80 @@ routes:
 
 ## Rendering Rules
 
-The server renderer owns all Traefik/CrowdSec/AppSec config. Agents should not
-invent config; they apply desired state and report observed state.
+The server renderer owns all Traefik/CrowdSec/AppSec/Nginx cache config. Agents
+should not invent config; they apply desired state and report observed state.
 
 Renderer responsibilities:
 
 - Compute inheritance.
 - Render Traefik routers, services, middlewares, TLS, transports.
 - Render CrowdSec bouncer/AppSec middleware.
-- Render rate limits, in-flight limits, redirects, headers, auth, cache, and
+- Render rate limits, in-flight limits, redirects, headers, auth, and
   transforms.
+- Render Nginx `proxy_cache` config when a route uses real edge cache.
 - Validate generated config before dispatch.
 - Store rendered config version and hash.
 
 Generated config should be deterministic so diffs are stable for UI and Ansible.
+
+## Cache Backend
+
+WireWarp cache uses a managed local Nginx `proxy_cache` backend on each server
+node. Traefik remains the public edge for TLS, routing, WAF, CrowdSec, auth, and
+rate limits. Cache-enabled routes point from Traefik to a loopback Nginx listener;
+Nginx then proxies to the origin over the normal WireWarp path.
+
+```text
+client or Cloudflare
+  -> Traefik security edge
+  -> local Nginx cache backend on 127.0.0.1
+  -> origin over WireGuard
+```
+
+This keeps security decisions in one place and makes cache behavior concrete and
+testable. A cached response is never served before Traefik has applied the route
+middleware chain.
+
+Supported cache policy:
+
+- `off`: no cache headers and no Nginx cache path.
+- `headers_only`: set browser/cache-control headers without storing responses.
+- `respect_origin`: use Nginx cache but honor origin `Cache-Control`, `Expires`,
+  `Set-Cookie`, and authorization safety rules.
+- `static_assets`: cache safe static extensions and bypass API/auth/session
+  paths.
+- `custom`: explicit TTL, status-code TTLs, cache key, bypass, no-cache, stale,
+  and revalidation settings.
+
+Required safety defaults:
+
+- Cache only `GET` and `HEAD` unless explicitly overridden.
+- Bypass and do not store when `Authorization` is present.
+- Bypass and do not store session/auth cookies by default.
+- Do not store responses with `Set-Cookie`.
+- Do not store `Cache-Control: private` or `no-store`.
+- Do not cache API/login/admin paths in generated presets.
+- Add a cache-status response header only when enabled by policy.
+
+Purge behavior:
+
+- Nginx open source supports cache storage and cache-control directives, but
+  `proxy_cache_purge` is commercial. WireWarp must not depend on that directive
+  for the open-source path.
+- For open-source Nginx, WireWarp stores deterministic cache keys and performs
+  purge through a controlled local agent helper that deletes matching cache
+  entries by route, host, path, prefix, or full node cache.
+- Purge APIs return `unsupported` if the node cannot safely identify matching
+  cache files.
+
+Health verification:
+
+- After applying cache config, the agent performs a synthetic request sequence
+  against a test route or configured route sample.
+- The node is marked cache-healthy only when it can observe real `MISS` followed
+  by `HIT`, or a policy-valid `BYPASS`.
+- The live feed reports the real Nginx cache status as `hit`, `miss`, `bypass`,
+  `stale`, `revalidated`, or `not_configured`.
 
 ## Import Behavior
 
@@ -665,11 +784,17 @@ Warnings are categorized:
 
 ### Cache
 
-- Local cache mode.
-- TTL.
-- Cache key.
-- Bypass.
-- Purge.
+- Headers-only mode without installing a cache backend.
+- Nginx `proxy_cache` backend mode for real edge cache.
+- Capability gating so unavailable cache backends cannot be enabled by accident.
+- Edge TTL and browser TTL.
+- Status-code TTLs.
+- Cache key controls.
+- Bypass and no-store rules.
+- Stale-if-error and revalidation.
+- Route, host, path, prefix, and node purge where supported by the managed cache
+  index.
+- Live feed cache status from observed Nginx behavior.
 
 ### Observability
 
@@ -772,10 +897,16 @@ The full explorer is a tab or drill-down from the side panel. It supports:
 
 ### Phase 7 - Cache And Advanced Fragments
 
-- Add local cache controls and purge.
+- Add headers-only cache controls first.
+- Add managed Nginx `proxy_cache` install/reconcile/status.
+- Add capability-gated route cache policy and cache-status feed fields.
+- Add purge by route/host/path/prefix/full-node through the agent-managed cache
+  helper.
 - Add validated advanced fragments and rollback.
-- Acceptance: safe unsupported middleware can be preserved; bad fragments fail
-  validation before reaching an agent.
+- Acceptance: cache-enabled route proves `MISS` then `HIT`; unsafe auth/API
+  requests prove `BYPASS`; purge removes matching cached entries; safe
+  unsupported middleware can be preserved; bad fragments fail validation before
+  reaching an agent.
 
 ### Phase 8 - Import V2 And Bulk Desired State
 
@@ -799,6 +930,9 @@ Backend:
 Agent:
 
 - Access-log tail parser tests.
+- Nginx cache-status parser tests.
+- Nginx cache config render/apply tests.
+- Cache purge helper tests using deterministic keys.
 - Batch send/retry tests.
 - Reconnect behavior.
 - Rendered config apply and rollback tests.
@@ -815,6 +949,8 @@ Integration/manual:
 - Imported routes stay reachable.
 - Cloudflare/mobile request shows correct TLS and access-feed identity.
 - WAF probe produces both live feed row and security event.
+- Cache test route shows `MISS` then `HIT`, auth/API route shows `BYPASS`, and
+  purge causes the next request to return `MISS`.
 - Ansible-style `PUT desired-state` dry-run then apply is idempotent.
 
 ## Out Of Scope
