@@ -672,7 +672,22 @@ func (h *ServerHandlers) emitTraefikAccessEvents(ctx context.Context) {
 		return
 	}
 	events, cursor := parseTraefikAccessSecurityEvents(raw)
-	if cursor != "" {
+	emitOK := false
+	if len(events) == 0 {
+		emitOK = true
+	} else {
+		p := h.emit.Load()
+		if p != nil {
+			if fn := *p; fn != nil {
+				if err := fn("security_events", map[string]any{"events": events}); err != nil {
+					log.Printf("[security-events] emit traefik access events: %v", err)
+				} else {
+					emitOK = true
+				}
+			}
+		}
+	}
+	if cursor != "" && shouldAdvanceTraefikEventsCursor(len(events), emitOK) {
 		if err := writeTraefikEventsCursor(cursor); err != nil {
 			log.Printf("[security-events] write traefik cursor: %v", err)
 		}
@@ -680,18 +695,10 @@ func (h *ServerHandlers) emitTraefikAccessEvents(ctx context.Context) {
 	if len(events) == 0 {
 		return
 	}
+}
 
-	p := h.emit.Load()
-	if p == nil {
-		return
-	}
-	fn := *p
-	if fn == nil {
-		return
-	}
-	_ = fn("security_events", map[string]any{
-		"events": events,
-	})
+func shouldAdvanceTraefikEventsCursor(eventCount int, emitOK bool) bool {
+	return eventCount == 0 || emitOK
 }
 
 func readTraefikAccessJournal(ctx context.Context) (string, error) {

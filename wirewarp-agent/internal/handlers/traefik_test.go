@@ -88,6 +88,18 @@ func TestParseTraefikRateLimitAccessEvents(t *testing.T) {
 	}
 }
 
+func TestShouldAdvanceTraefikCursorWaitsForSuccessfulEventEmit(t *testing.T) {
+	if !shouldAdvanceTraefikEventsCursor(0, false) {
+		t.Fatal("empty reads should advance the cursor")
+	}
+	if shouldAdvanceTraefikEventsCursor(1, false) {
+		t.Fatal("event reads must not advance the cursor when emit failed")
+	}
+	if !shouldAdvanceTraefikEventsCursor(1, true) {
+		t.Fatal("event reads should advance the cursor after a successful emit")
+	}
+}
+
 func inodeOf(t *testing.T, path string) uint64 {
 	t.Helper()
 	info, err := os.Stat(path)
