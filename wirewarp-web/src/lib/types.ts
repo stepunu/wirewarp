@@ -598,6 +598,7 @@ export interface TraefikImportRequest {
   server_id: string
   attachment_id: string
   content: string
+  middlewares_content?: string | null
   content_format?: 'auto' | 'yaml' | 'yml' | 'toml'
   domain_suffix?: string | null
   activate?: boolean

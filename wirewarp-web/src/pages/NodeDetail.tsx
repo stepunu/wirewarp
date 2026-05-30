@@ -389,6 +389,7 @@ function TraefikImportDialog({
   const [attachmentId, setAttachmentId] = useState('')
   const [domainSuffix, setDomainSuffix] = useState('ww.step1.ro')
   const [content, setContent] = useState('')
+  const [middlewaresContent, setMiddlewaresContent] = useState('')
   const [activate, setActivate] = useState(false)
   const [overwrite, setOverwrite] = useState(false)
   const [preview, setPreview] = useState<TraefikImportPreview | null>(null)
@@ -398,6 +399,7 @@ function TraefikImportDialog({
     server_id: serverId,
     attachment_id: activeAttachment,
     content,
+    middlewares_content: middlewaresContent || null,
     content_format: 'auto',
     domain_suffix: domainSuffix || null,
     activate,
@@ -428,7 +430,7 @@ function TraefikImportDialog({
       footer={
         <>
           <span className="left">
-            {preview ? `${preview.summary.importable}/${preview.summary.routers} importable` : 'paste dynamic YAML or TOML'}
+            {preview ? `${preview.summary.importable}/${preview.summary.routers} importable` : 'paste routes and optional middlewares'}
           </span>
           <div className="right">
             <Button variant="ghost" onClick={onClose}>Cancel</Button>
@@ -474,7 +476,7 @@ function TraefikImportDialog({
             update existing domains
           </label>
         </div>
-        <Field label="Dynamic config" hint="Paste Traefik dynamic config. You can paste external.yml and middlewares.yml together.">
+        <Field label="Routes config" hint="Paste external.yml or the dynamic config section that contains routers and services.">
           <textarea
             className="textarea input-mono"
             style={{ minHeight: 220 }}
@@ -484,6 +486,18 @@ function TraefikImportDialog({
               setPreview(null)
             }}
             placeholder={'http:\\n  routers:\\n    jellyfin:\\n      rule: "Host(`media.{{ domain }}`)"\\n      service: jellyfin'}
+          />
+        </Field>
+        <Field label="Middlewares config" hint="Optional. Paste middlewares.yml so chains like secured and secured-auth can be mapped.">
+          <textarea
+            className="textarea input-mono"
+            style={{ minHeight: 140 }}
+            value={middlewaresContent}
+            onChange={(e) => {
+              setMiddlewaresContent(e.target.value)
+              setPreview(null)
+            }}
+            placeholder={'http:\\n  middlewares:\\n    secured:\\n      chain:\\n        middlewares:\\n          - internal-only@file'}
           />
         </Field>
         {preview && <TraefikImportPreviewTable preview={preview} />}

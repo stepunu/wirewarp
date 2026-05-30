@@ -233,6 +233,7 @@ class TraefikImportRequest(BaseModel):
     server_id: uuid.UUID
     attachment_id: uuid.UUID
     content: str
+    middlewares_content: str | None = None
     content_format: str = "auto"
     domain_suffix: str | None = None
     activate: bool = False

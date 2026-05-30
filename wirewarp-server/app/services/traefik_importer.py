@@ -66,8 +66,7 @@ async def preview_traefik_import(
     if server is None:
         raise ValueError("Tunnel server not found")
 
-    content = render_template_vars(request.content, request.domain_suffix)
-    config = parse_traefik_config(content, request.content_format)
+    config = _parse_import_request_config(request)
     http = config.get("http") if isinstance(config, dict) else {}
     if not isinstance(http, dict):
         http = {}
@@ -108,6 +107,21 @@ async def preview_traefik_import(
         ),
         routes=previews,
     )
+
+
+def _parse_import_request_config(request: TraefikImportRequest) -> dict[str, Any]:
+    content = render_template_vars(request.content, request.domain_suffix)
+    config = parse_traefik_config(content, request.content_format)
+    if request.middlewares_content:
+        middlewares_content = render_template_vars(
+            request.middlewares_content,
+            request.domain_suffix,
+        )
+        _deep_merge(
+            config,
+            parse_traefik_config(middlewares_content, request.content_format),
+        )
+    return config
 
 
 def _preview_router(

@@ -109,6 +109,48 @@ http:
 """
 
 
+TRAEFIK_EXTERNAL_ONLY = """
+http:
+  serversTransports:
+    insecureSkipVerify:
+      insecureSkipVerify: true
+  routers:
+    proxmox:
+      entryPoints: [websecure]
+      rule: "Host(`px.infra.{{ domain }}`)"
+      middlewares: [secured]
+      service: proxmox
+      tls:
+        certResolver: cloudflare
+  services:
+    proxmox:
+      loadBalancer:
+        servers:
+          - url: "https://192.168.20.11:8006"
+        passHostHeader: true
+        serversTransport: insecureSkipVerify
+"""
+
+
+TRAEFIK_MIDDLEWARES_ONLY = """
+http:
+  middlewares:
+    internal-only:
+      ipAllowList:
+        sourceRange:
+          - "192.168.0.0/16"
+          - "10.100.0.0/24"
+    default-headers:
+      headers:
+        contentTypeNosniff: true
+    secured:
+      chain:
+        middlewares:
+          - internal-only@file
+          - default-headers@file
+"""
+
+
 @pytest.mark.asyncio
 async def test_traefik_import_preview_maps_routes_and_middleware_policy(
     client,
@@ -140,6 +182,33 @@ async def test_traefik_import_preview_maps_routes_and_middleware_policy(
     proxmox = next(route for route in body["routes"] if route["router_name"] == "proxmox")
     assert proxmox["upstream_scheme"] == "https"
     assert proxmox["upstream_insecure_skip_verify"] is True
+
+
+@pytest.mark.asyncio
+async def test_traefik_import_preview_accepts_separate_middlewares_file(
+    client,
+    session_maker,
+) -> None:
+    _agent_id, server_id, attachment_id = await _server_with_attachment(session_maker)
+
+    resp = await client.post(
+        "/api/security/traefik/import/preview",
+        json={
+            "server_id": str(server_id),
+            "attachment_id": str(attachment_id),
+            "content": TRAEFIK_EXTERNAL_ONLY,
+            "middlewares_content": TRAEFIK_MIDDLEWARES_ONLY,
+            "domain_suffix": "ww.step1.ro",
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"]["importable"] == 1
+    route = body["routes"][0]
+    assert route["domain"] == "px.infra.ww.step1.ro"
+    assert route["mapped_policy"]["ip_allow"] == ["192.168.0.0/16", "10.100.0.0/24"]
+    assert any("default-headers" in warning for warning in route["warnings"])
 
 
 @pytest.mark.asyncio
