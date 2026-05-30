@@ -5,12 +5,13 @@ security-edge designs by turning the per-server node edge into a full control
 surface with policy inheritance, live request visibility, and first-class API
 automation for Ansible.
 
-**Goal**: make each WireWarp server node feel like a self-hosted Cloudflare
-zone: routes, WAF, rate limiting, access, TLS, origin behavior, headers,
-transforms, cache, import, live access feed, and rendered-config diffs are all
-managed from one node-scoped console. Every UI action maps to documented,
-idempotent REST APIs so the same state can be managed from Ansible or other
-automation.
+**Goal**: let operators choose whether a WireWarp server node is a simple
+WireGuard plus TCP/UDP forwarding host or a full security-edge host. When the
+security edge is enabled, the node feels like a self-hosted Cloudflare zone:
+routes, WAF, rate limiting, access, TLS, origin behavior, headers, transforms,
+cache, import, live access feed, and rendered-config diffs are all managed from
+one node-scoped console. Every UI action maps to documented, idempotent REST
+APIs so the same state can be managed from Ansible or other automation.
 
 ## Design Reference
 
@@ -55,6 +56,44 @@ VPS nodes.
    and return rendered/effective policy for drift detection.
 5. **Live visibility is part of the product**. The console has a Pi-hole-style
    access feed showing current HTTP edge traffic, not only blocked requests.
+6. **Edge features are optional**. A tunnel server can run as pure WireGuard plus
+   TCP/UDP forwarding. Traefik, CrowdSec, AppSec, Nginx cache, and live edge
+   logging are installed only when the operator enables the security-edge
+   capability for that node.
+
+## Server Provisioning Modes
+
+Adding a tunnel server exposes an explicit mode choice:
+
+1. **TCP/UDP only**
+   - Installs and heals WireGuard, iptables forwarding, sysctl, and route
+     restore.
+   - Supports raw TCP/UDP forwards and tunnel attachments.
+   - Does not install Traefik, CrowdSec, AppSec, or Nginx cache.
+   - Node detail shows Edge as unavailable with an install/enable action.
+
+2. **Security Edge**
+   - Installs the TCP/UDP baseline plus Traefik, CrowdSec, AppSec support, edge
+     access logging, and optional Nginx cache capability.
+   - Enables HTTP route management, WAF/rate/access/TLS/origin/header policy,
+     live access feed, import/diff, and rendered config history.
+   - Runs the same self-healing loop, but only for enabled edge components.
+
+The add-server screen should default to the simpler `tcp_udp_only` mode unless
+the operator opts into Security Edge. This prevents surprise package installs on
+minimal VPS nodes and keeps the blast radius of the larger edge stack explicit.
+
+Existing server nodes derive their mode from observed state:
+
+- No Traefik/CrowdSec desired state: `tcp_udp_only`.
+- Existing Traefik or CrowdSec snapshots, HTTP routes, or edge policies:
+  `security_edge`.
+
+Operators can enable Security Edge later from Node Settings. Disabling Security
+Edge is a separate destructive action because it may remove HTTP routes,
+generated configs, package-managed services, and access-log collection. The
+first implementation should support enable/install and component repair; full
+uninstall can remain a later guarded workflow.
 
 ## Node Edge Console IA
 
@@ -62,7 +101,12 @@ The accepted layout is a node-scoped console:
 
 - Left column: server node identity and Security Edge tabs.
 - Center: current tab workspace.
-- Right column: persistent live access feed.
+- Right column: persistent live access feed when Security Edge is enabled.
+
+For `tcp_udp_only` servers, the node page keeps the normal Forwards, Peers,
+Activity, and Audit tabs. The Security Edge tab becomes a concise capability
+panel showing what is not installed and offering "Enable Security Edge". It must
+not show route/cache/WAF controls that cannot work yet.
 
 Tabs for a server node:
 
@@ -195,6 +239,35 @@ Existing tables stay:
 - `security_events`
 
 New or expanded resources:
+
+### `tunnel_servers` additions
+
+Server nodes store the operator-selected capability mode.
+
+Fields:
+
+- `edge_mode`: tcp_udp_only, security_edge
+- `edge_enabled_at` nullable
+- `edge_enabled_by` nullable
+- `edge_install_phase`: disabled, pending, installing, healthy, degraded, failed
+- `edge_last_error` nullable
+
+`edge_mode` is desired state. Snapshot rows remain observed state. A node can be
+`security_edge` and temporarily `degraded` if one component is unhealthy.
+
+### `edge_component_states`
+
+Observed and desired state for optional edge components.
+
+Fields:
+
+- `node_id`
+- `component`: traefik, crowdsec, appsec, nginx_cache, access_log
+- `desired`: disabled, enabled
+- `phase`: disabled, pending, installing, healthy, degraded, failed
+- `version`
+- `last_error`
+- `updated_at`
 
 ### `edge_profiles`
 
@@ -385,7 +458,8 @@ Retention:
 
 The live feed behaves like Pi-hole's query stream:
 
-- Always visible on server-node Security Edge pages.
+- Always visible on server-node Security Edge pages when Security Edge is
+  enabled.
 - Shows new requests in near real time.
 - Filters by host, path, status, action, IP, country, upstream, method.
 - Clicking a row opens details: request headers, matched route, policy action,
@@ -421,12 +495,27 @@ can read. Write APIs are idempotent when addressed by stable resource IDs or slu
 GET    /api/nodes/{agent_id}/edge
 GET    /api/nodes/{agent_id}/edge/effective
 PATCH  /api/nodes/{agent_id}/edge/policy
+GET    /api/nodes/{agent_id}/edge/capabilities
+PUT    /api/nodes/{agent_id}/edge/capabilities
+POST   /api/nodes/{agent_id}/edge/install
 POST   /api/nodes/{agent_id}/edge/reconcile
 GET    /api/nodes/{agent_id}/edge/rendered
 POST   /api/nodes/{agent_id}/edge/validate
 GET    /api/nodes/{agent_id}/edge/versions
 POST   /api/nodes/{agent_id}/edge/versions/{version_id}/rollback
 ```
+
+Capability behavior:
+
+- `GET /edge` works for every server node and returns `mode`, component phases,
+  and unavailable reasons.
+- `PUT /edge/capabilities` is idempotent and accepts desired components such as
+  `traefik`, `crowdsec`, `appsec`, `access_log`, and `nginx_cache`.
+- `POST /edge/install` starts or retries installation for enabled components.
+- Route, policy, import, live-feed, and cache mutation endpoints return a
+  machine-readable `edge_feature_disabled` error when called on a `tcp_udp_only`
+  server.
+- Raw TCP/UDP forwarding APIs remain available in both modes.
 
 ### Profiles
 
@@ -600,6 +689,13 @@ Example desired-state shape:
 
 ```yaml
 node: vps-at-1
+mode: security_edge
+components:
+  traefik: enabled
+  crowdsec: enabled
+  appsec: enabled
+  access_log: enabled
+  nginx_cache: disabled
 policy:
   cloudflare_mode: cloudflare_only
   access_log_retention_hours: 72
@@ -634,9 +730,12 @@ routes:
 
 The server renderer owns all Traefik/CrowdSec/AppSec/Nginx cache config. Agents
 should not invent config; they apply desired state and report observed state.
+For `tcp_udp_only` nodes, the renderer produces no edge config and sends no edge
+desired-state command.
 
 Renderer responsibilities:
 
+- Refuse edge route rendering when the node's `edge_mode` is `tcp_udp_only`.
 - Compute inheritance.
 - Render Traefik routers, services, middlewares, TLS, transports.
 - Render CrowdSec bouncer/AppSec middleware.
@@ -848,16 +947,21 @@ The full explorer is a tab or drill-down from the side panel. It supports:
 
 ### Phase 1 - Foundation And API Shape
 
-- Add edge profile, node policy, access-event, config-version models.
+- Add server `edge_mode`, component state, edge profile, node policy,
+  access-event, and config-version models.
+- Update add-server UI/API with `tcp_udp_only` versus `security_edge` mode.
+- Add Node Settings capability panel for enabling Security Edge after server
+  creation.
 - Add REST endpoints for profiles, node policy, rendered config, desired-state
-  dry-run, and access-event query.
+  dry-run, access-event query, and edge capabilities.
 - Preserve existing site APIs while adding route-shaped aliases.
-- Acceptance: OpenAPI shows all new resources; Ansible can read/write node
-  policy and profiles idempotently.
+- Acceptance: OpenAPI shows all new resources; Ansible can create or update a
+  server's edge capability mode idempotently; TCP/UDP-only nodes do not install
+  Traefik/CrowdSec/Nginx and still support raw forwarding.
 
 ### Phase 2 - Live Access Feed
 
-- Configure Traefik JSON access logs.
+- Configure Traefik JSON access logs only for nodes with Security Edge enabled.
 - Agent tails and batches access events.
 - Server stores short-retention events and emits `edge.access`.
 - Frontend adds right-side live feed and full event explorer.
@@ -920,6 +1024,8 @@ The full explorer is a tab or drill-down from the side panel. It supports:
 
 Backend:
 
+- Server provisioning mode tests.
+- Edge capability idempotency and disabled-feature error tests.
 - Inheritance resolver tests.
 - Renderer snapshot tests.
 - API idempotency tests.
@@ -929,6 +1035,9 @@ Backend:
 
 Agent:
 
+- Component capability install/skip tests.
+- TCP/UDP-only server reconciler tests proving no edge package install is
+  attempted.
 - Access-log tail parser tests.
 - Nginx cache-status parser tests.
 - Nginx cache config render/apply tests.
@@ -945,7 +1054,10 @@ Frontend:
 
 Integration/manual:
 
-- Fresh node converges healthy.
+- Fresh TCP/UDP-only node converges healthy without Traefik, CrowdSec, AppSec,
+  or Nginx installed.
+- Enabling Security Edge later installs components and converges healthy without
+  breaking existing raw forwards.
 - Imported routes stay reachable.
 - Cloudflare/mobile request shows correct TLS and access-feed identity.
 - WAF probe produces both live feed row and security event.
