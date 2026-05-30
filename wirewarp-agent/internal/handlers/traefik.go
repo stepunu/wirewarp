@@ -326,16 +326,14 @@ func (h *ServerHandlers) handleCrowdSecAppSecEnable(raw json.RawMessage) (string
 		logBuf.WriteString(tail([]byte(out), 4))
 	}
 
-	// Install the AppSec collections that provide crowdsecurity/appsec-default
-	// and crowdsecurity/crs, which the generated acquisition file references.
-	for _, collection := range []string{
-		"crowdsecurity/appsec-virtual-patching",
-		"crowdsecurity/appsec-crs",
-	} {
-		logf("==> cscli collections install %s", collection)
-		if out, err := runCSCli(ctx, bin, "collections", "install", collection); err != nil {
-			if !strings.Contains(err.Error(), "already install") {
-				logf("WARN: collection install: %v\n%s", err, out)
+	// Enable every AppSec config/rule the generated acquisition references.
+	// Collections alone do not consistently enable appsec-default/crs on
+	// existing hosts, so keep the explicit cscli commands here.
+	for _, args := range appSecBootstrapCommands() {
+		logf("==> cscli %s", strings.Join(args, " "))
+		if out, err := runCSCli(ctx, bin, args...); err != nil {
+			if !cscliAlreadySatisfied(err.Error() + "\n" + out) {
+				logf("WARN: appsec bootstrap: %v\n%s", err, out)
 			}
 		} else {
 			logBuf.WriteString(tail([]byte(out), 4))
@@ -351,6 +349,36 @@ func (h *ServerHandlers) handleCrowdSecAppSecEnable(raw json.RawMessage) (string
 
 	go h.EmitCrowdSecNow()
 	return logBuf.String() + "\nOK — CrowdSec AppSec enabled.", nil
+}
+
+func appSecBootstrapCommands() [][]string {
+	return [][]string{
+		{"appsec-configs", "install", "crowdsecurity/appsec-default"},
+		{"appsec-configs", "install", "crowdsecurity/crs"},
+		{"appsec-rules", "install", "crowdsecurity/crs"},
+		{"collections", "install", "crowdsecurity/appsec-virtual-patching"},
+		{"collections", "install", "crowdsecurity/appsec-crs"},
+	}
+}
+
+func cscliAlreadySatisfied(s string) bool {
+	return strings.Contains(s, "already install") ||
+		strings.Contains(s, "Nothing to install or remove") ||
+		strings.Contains(s, "already enabled")
+}
+
+func appSecBootstrapFilesPresent() bool {
+	for _, path := range []string{
+		"/etc/crowdsec/appsec-configs/appsec-default.yaml",
+		"/etc/crowdsec/appsec-configs/crs.yaml",
+		"/etc/crowdsec/appsec-rules/crs.yaml",
+		"/etc/crowdsec/appsec-configs/virtual-patching.yaml",
+	} {
+		if _, err := os.Stat(path); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // --- traefik_status poller ---

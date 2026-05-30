@@ -66,6 +66,36 @@ func TestBuildAppSecModeConfigs(t *testing.T) {
 	if block["name"] != appSecBlockName || block["default_remediation"] != "ban" {
 		t.Fatalf("block config should actively remediate: %#v", block)
 	}
+	if _, ok := observe["labels"]; ok {
+		t.Fatalf("CrowdSec AppSec configs do not accept labels: %#v", observe)
+	}
+	if _, ok := observe["default_pass_action"]; ok {
+		t.Fatalf("CrowdSec AppSec configs do not accept default_pass_action: %#v", observe)
+	}
+}
+
+func TestAppSecBootstrapCommandsEnableReferencedConfigs(t *testing.T) {
+	got := appSecBootstrapCommands()
+	want := [][]string{
+		{"appsec-configs", "install", "crowdsecurity/appsec-default"},
+		{"appsec-configs", "install", "crowdsecurity/crs"},
+		{"appsec-rules", "install", "crowdsecurity/crs"},
+		{"collections", "install", "crowdsecurity/appsec-virtual-patching"},
+		{"collections", "install", "crowdsecurity/appsec-crs"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("bootstrap command count: want %d, got %d (%#v)", len(want), len(got), got)
+	}
+	for i := range want {
+		if len(got[i]) != len(want[i]) {
+			t.Fatalf("command %d length: want %#v, got %#v", i, want[i], got[i])
+		}
+		for j := range want[i] {
+			if got[i][j] != want[i][j] {
+				t.Fatalf("command %d: want %#v, got %#v", i, want[i], got[i])
+			}
+		}
+	}
 }
 
 func TestBouncerListDetectsWirewarpTraefik(t *testing.T) {

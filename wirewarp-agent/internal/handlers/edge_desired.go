@@ -134,19 +134,13 @@ func buildAppSecAcquisition(block bool) map[string]any {
 func buildAppSecModeConfig(block bool) map[string]any {
 	name := appSecObserveName
 	remediation := "allow"
-	mode := "observe"
 	if block {
 		name = appSecBlockName
 		remediation = "ban"
-		mode = "block"
 	}
 	return map[string]any{
 		"name":                name,
 		"default_remediation": remediation,
-		"default_pass_action": "allow",
-		"labels": map[string]string{
-			"wirewarp_mode": mode,
-		},
 	}
 }
 
@@ -226,36 +220,35 @@ func (h *ServerHandlers) reconcileDesiredEdge(ctx context.Context) error {
 	}
 
 	var firstErr error
+	usesWAF, block := desiredUsesWAF(h.cfg.EdgeDesired.TraefikDynamicConfig)
+	if usesWAF && h.cfg.EdgeBouncerKey == "" {
+		key, err := generateBouncerKey()
+		if err != nil && firstErr == nil {
+			firstErr = err
+		} else {
+			h.cfg.EdgeBouncerKey = key
+			_ = h.cfg.Save(h.cfgPath)
+		}
+	}
+
 	whitelist := h.desiredWhitelist()
 	if resolveCSCli() == "" {
 		raw, _ := json.Marshal(whitelist)
 		if _, err := h.handleCrowdSecInstall(raw); err != nil && firstErr == nil {
 			firstErr = err
 		}
-	} else {
-		raw, _ := json.Marshal(whitelist)
-		if _, err := h.handleCrowdSecSyncWhitelist(raw); err != nil && firstErr == nil {
-			firstErr = err
-		}
 	}
 
-	usesWAF, block := desiredUsesWAF(h.cfg.EdgeDesired.TraefikDynamicConfig)
 	if usesWAF {
 		appsecChanged, err := writeAppSecAcquisition(block)
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
-		if h.cfg.EdgeBouncerKey == "" {
-			key, err := generateBouncerKey()
-			if err != nil && firstErr == nil {
-				firstErr = err
-			} else {
-				h.cfg.EdgeBouncerKey = key
-				_ = h.cfg.Save(h.cfgPath)
-			}
-		}
 		needsBootstrap := appsecChanged
 		if bin := resolveCSCli(); bin != "" && !crowdSecBouncerRegistered(ctx, bin) {
+			needsBootstrap = true
+		}
+		if !appSecBootstrapFilesPresent() {
 			needsBootstrap = true
 		}
 		if needsBootstrap {
@@ -263,6 +256,12 @@ func (h *ServerHandlers) reconcileDesiredEdge(ctx context.Context) error {
 			if _, err := h.handleCrowdSecAppSecEnable(appsecRaw); err != nil && firstErr == nil {
 				firstErr = err
 			}
+		}
+	}
+	if resolveCSCli() != "" {
+		raw, _ := json.Marshal(whitelist)
+		if _, err := h.handleCrowdSecSyncWhitelist(raw); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 
