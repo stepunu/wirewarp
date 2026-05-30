@@ -118,7 +118,7 @@ async def build_traefik_dynamic_config(
     from app.models.tunnel_client_attachment import TunnelClientAttachment
 
     if server is None:
-        return {"http": {"routers": {}, "services": {}, "middlewares": {}}}
+        return _build_http_config({}, {}, {})
 
     # Find all attachment IDs for this server
     att_ids_result = await db.execute(
@@ -291,13 +291,17 @@ async def build_traefik_dynamic_config(
             }
         }
 
-    return {
-        "http": {
-            "routers": routers,
-            "services": services,
-            "middlewares": middlewares,
-        }
+    return _build_http_config(routers, services, middlewares)
+
+
+def _build_http_config(routers: dict, services: dict, middlewares: dict) -> dict:
+    http = {
+        "routers": routers,
+        "services": services,
     }
+    if middlewares:
+        http["middlewares"] = middlewares
+    return {"http": http}
 
 
 async def dispatch_traefik_sync(

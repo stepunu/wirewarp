@@ -14,7 +14,7 @@ from app.models.agent import Agent
 from app.models.security_event import SecurityEvent
 from app.models.traefik_snapshot import TraefikSnapshot
 from app.models.tunnel_server import TunnelServer
-from app.services.traefik_ops import build_traefik_static_config
+from app.services.traefik_ops import _build_http_config, build_traefik_static_config
 from app.websocket.handlers import handle_security_events, handle_traefik_status
 
 
@@ -39,6 +39,26 @@ def test_static_config_pins_available_denyip_plugin_version() -> None:
     assert denyip == {
         "moduleName": "github.com/kvncrw/denyip",
         "version": "v1.3.0",
+    }
+
+
+def test_dynamic_config_omits_empty_middlewares_section() -> None:
+    assert _build_http_config({}, {}, {}) == {
+        "http": {
+            "routers": {},
+            "services": {},
+        }
+    }
+
+
+def test_dynamic_config_keeps_nonempty_middlewares_section() -> None:
+    middleware = {"rate": {"rateLimit": {"average": 3, "burst": 9}}}
+    assert _build_http_config({}, {}, middleware) == {
+        "http": {
+            "routers": {},
+            "services": {},
+            "middlewares": middleware,
+        }
     }
 
 
