@@ -882,8 +882,11 @@ function NewForwardDialog({ onClose }: { onClose: () => void }) {
             </Button>
           </div>
         </Field>
-        <div style={{ paddingBottom: 7, color: 'var(--fg-3)', textAlign: 'center' }}>
-          <Ic.arrow />
+        <div className="field" style={{ alignItems: 'center' }}>
+          <span className="field-label" style={{ visibility: 'hidden' }}>·</span>
+          <span style={{ color: 'var(--fg-3)', height: 30, display: 'flex', alignItems: 'center' }}>
+            <Ic.arrow />
+          </span>
         </div>
         <Field
           label="Destination IP"

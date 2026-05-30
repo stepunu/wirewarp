@@ -1133,7 +1133,11 @@ option, optgroup {
   display: grid;
   grid-template-columns: 100px 1fr 24px 1fr 1fr;
   gap: 10px;
-  align-items: end;
+  /* Top-align: fields have hints of differing length (the Public port
+     hint wraps to 2-3 lines), and bottom-aligning staggered every
+     field's label/input to a different height. Top-align keeps all
+     labels + inputs on the same line; hints just hang below. */
+  align-items: start;
   margin-bottom: 12px;
 }
 
