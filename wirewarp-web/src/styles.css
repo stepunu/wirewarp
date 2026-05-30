@@ -3,6 +3,10 @@
    ============================================================ */
 
 :root {
+  /* Render native form controls (checkboxes, scrollbars, date pickers)
+     in the matching theme — without this, native checkboxes render as
+     white boxes on the dark surface. */
+  color-scheme: dark;
   /* Surfaces (dark default) */
   --bg-0: oklch(0.145 0.008 240);
   --bg-1: oklch(0.175 0.008 240);
@@ -64,6 +68,7 @@
 
 /* Light mode overrides */
 [data-theme="light"] {
+  color-scheme: light;
   --bg-0: oklch(0.985 0.003 240);
   --bg-1: oklch(0.965 0.004 240);
   --bg-2: oklch(0.945 0.005 240);
