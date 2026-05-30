@@ -103,6 +103,40 @@ async def test_heartbeat_upsert_updates_existing_row(db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_removes_wg_peer_snapshots_absent_from_report(db) -> None:
+    agent = _agent()
+    db.add(agent)
+    await db.commit()
+
+    await handle_heartbeat(
+        str(agent.id),
+        {
+            "all_peers": [
+                _peer_entry("wg0", "current-pk"),
+                _peer_entry("wg0", "stale-pk"),
+                _peer_entry("wg1", "stale-interface-pk"),
+            ]
+        },
+        db,
+    )
+
+    await handle_heartbeat(
+        str(agent.id),
+        {"all_peers": [_peer_entry("wg0", "current-pk", rx=42, tx=24)]},
+        db,
+    )
+
+    rows = (
+        await db.execute(
+            select(WgPeerSnapshot).where(WgPeerSnapshot.agent_id == agent.id)
+        )
+    ).scalars().all()
+    assert [r.public_key for r in rows] == ["current-pk"]
+    assert rows[0].rx_bytes == 42
+    assert rows[0].tx_bytes == 24
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_ignores_malformed_peer_entries(db) -> None:
     agent = _agent()
     db.add(agent)

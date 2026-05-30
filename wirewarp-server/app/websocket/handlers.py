@@ -240,6 +240,7 @@ async def handle_heartbeat(agent_id: str, msg: dict, db: AsyncSession) -> None:
     all_peers = msg.get("all_peers")
     wg_peer_dirty = False
     if isinstance(all_peers, list):
+        seen_peers: set[tuple[str, str]] = set()
         for entry in all_peers:
             if not isinstance(entry, dict):
                 continue
@@ -247,6 +248,7 @@ async def handle_heartbeat(agent_id: str, msg: dict, db: AsyncSession) -> None:
             pubkey = entry.get("public_key")
             if not iface or not pubkey:
                 continue
+            seen_peers.add((iface, pubkey))
             kind = "vpn" if iface.startswith("wg-vpn") else "mesh"
             existing = await db.scalar(
                 select(WgPeerSnapshot).where(
@@ -295,6 +297,17 @@ async def handle_heartbeat(agent_id: str, msg: dict, db: AsyncSession) -> None:
                         updated_at=now,
                     )
                 )
+            wg_peer_dirty = True
+
+        existing_rows = (
+            await db.execute(
+                select(WgPeerSnapshot).where(WgPeerSnapshot.agent_id == agent_id)
+            )
+        ).scalars().all()
+        for row in existing_rows:
+            if (row.interface, row.public_key) in seen_peers:
+                continue
+            await db.delete(row)
             wg_peer_dirty = True
 
     await db.commit()
