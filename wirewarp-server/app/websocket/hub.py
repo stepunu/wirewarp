@@ -1,7 +1,7 @@
 import json
 from typing import Any
 
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 
 
 class ConnectionManager:
@@ -18,12 +18,21 @@ class ConnectionManager:
     def disconnect(self, agent_id: str) -> None:
         self._connections.pop(agent_id, None)
 
+    def _disconnect_if_current(self, agent_id: str, websocket: WebSocket) -> None:
+        if self._connections.get(agent_id) is websocket:
+            self._connections.pop(agent_id, None)
+
     async def send(self, agent_id: str, message: dict[str, Any]) -> bool:
         """Send a message to a specific agent. Returns False if agent not connected."""
         ws = self._connections.get(agent_id)
         if ws is None:
             return False
-        await ws.send_text(json.dumps(message))
+        payload = json.dumps(message)
+        try:
+            await ws.send_text(payload)
+        except (RuntimeError, WebSocketDisconnect):
+            self._disconnect_if_current(agent_id, ws)
+            return False
         return True
 
     async def broadcast(self, agent_type: str, message: dict[str, Any], agent_types: dict[str, str]) -> None:
