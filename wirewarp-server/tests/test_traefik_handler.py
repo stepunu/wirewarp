@@ -43,20 +43,30 @@ def test_static_config_pins_available_denyip_plugin_version() -> None:
 
 
 def test_dynamic_config_omits_empty_middlewares_section() -> None:
-    assert _build_http_config({}, {}, {}) == {
+    assert _build_http_config({}, {}, {}) == {}
+
+
+def test_dynamic_config_omits_empty_http_sections() -> None:
+    routers = {"app": {"rule": "Host(`app.example.com`)", "service": "svc-app"}}
+    services = {"svc-app": {"loadBalancer": {"servers": [{"url": "http://10.0.0.2:80"}]}}}
+
+    assert _build_http_config(routers, services, {}) == {
         "http": {
-            "routers": {},
-            "services": {},
+            "routers": routers,
+            "services": services,
         }
     }
 
 
 def test_dynamic_config_keeps_nonempty_middlewares_section() -> None:
     middleware = {"rate": {"rateLimit": {"average": 3, "burst": 9}}}
-    assert _build_http_config({}, {}, middleware) == {
+    routers = {"app": {"rule": "Host(`app.example.com`)", "service": "svc-app"}}
+    services = {"svc-app": {"loadBalancer": {"servers": [{"url": "http://10.0.0.2:80"}]}}}
+
+    assert _build_http_config(routers, services, middleware) == {
         "http": {
-            "routers": {},
-            "services": {},
+            "routers": routers,
+            "services": services,
             "middlewares": middleware,
         }
     }

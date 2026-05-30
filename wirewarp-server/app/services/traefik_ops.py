@@ -295,10 +295,13 @@ async def build_traefik_dynamic_config(
 
 
 def _build_http_config(routers: dict, services: dict, middlewares: dict) -> dict:
-    http = {
-        "routers": routers,
-        "services": services,
-    }
+    if not routers and not services and not middlewares:
+        return {}
+    http = {}
+    if routers:
+        http["routers"] = routers
+    if services:
+        http["services"] = services
     if middlewares:
         http["middlewares"] = middlewares
     return {"http": http}
