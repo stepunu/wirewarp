@@ -14,6 +14,7 @@ from app.models.agent import Agent
 from app.models.security_event import SecurityEvent
 from app.models.traefik_snapshot import TraefikSnapshot
 from app.models.tunnel_server import TunnelServer
+from app.services.traefik_ops import build_traefik_static_config
 from app.websocket.handlers import handle_security_events, handle_traefik_status
 
 
@@ -24,6 +25,21 @@ def _agent() -> Agent:
         type="server",
         last_seen=datetime.now(timezone.utc),
     )
+
+
+# ---------------------------------------------------------------------------
+# Traefik config rendering
+# ---------------------------------------------------------------------------
+
+
+def test_static_config_pins_available_denyip_plugin_version() -> None:
+    cfg = build_traefik_static_config()
+    denyip = cfg["experimental"]["plugins"]["denyip"]
+
+    assert denyip == {
+        "moduleName": "github.com/kvncrw/denyip",
+        "version": "v1.3.0",
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -71,7 +71,7 @@ def build_traefik_static_config(
                 },
                 "denyip": {
                     "moduleName": "github.com/kvncrw/denyip",
-                    "version": "v2.0.0",
+                    "version": "v1.3.0",
                 },
                 "geoblock": {
                     "moduleName": "github.com/nscuro/traefik-plugin-geoblock",
