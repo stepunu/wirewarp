@@ -248,3 +248,29 @@ applied, tests green, `/rebuild`, manual gate verified, commit.
 ### 12.6 Bans + Certs + polish + alerts
 - [ ] `/security/bans` (CrowdSec decisions; manual add/remove); `/security/certs` (Traefik Let's Encrypt status); alert hooks
 - [ ] Gate: manual ban blocks an IP; cert status shown; threshold alert fires
+
+---
+
+## Phase 13: Self-healing edge + unified console IA
+
+Supersedes the operator-driven install model from Phase 12 (12.3/12.4/12.5
+fold in here). Design:
+[`docs/superpowers/specs/2026-05-30-self-healing-edge-and-console-ia-design.md`](docs/superpowers/specs/2026-05-30-self-healing-edge-and-console-ia-design.md).
+The edge is provisioned + healed automatically (no install clicks), and the
+dashboard reorganizes around one node-with-a-role model.
+
+### 13.A Self-healing edge (agent reconciler + backend)
+- [ ] Promote the healer into a reconciler that drives CrowdSec/Traefik/AppSec to present+healthy on server-role agents (health checks every cycle; heavy actions only on drift)
+- [ ] Gentle-first escalation (restart → re-apply/re-register → purge+reinstall after K cycles), preserving acme.json + wg key
+- [ ] Degraded state + exponential backoff (cap ~30 min) on non-convergeable hosts; no reinstall thrash / LE rate-limit storms
+- [ ] Per-component health (`healthy/converging/repairing/degraded` + last_error) via crowdsec/traefik snapshots + heal_events; `emit_edge_changed()`
+- [ ] Remove operator install endpoints/buttons (keep handlers as internal reconciler calls); subsume the standalone pollers
+- [ ] Gates: fresh server agent self-provisions to edge:healthy with no action; killing crowdsec self-heals; non-Debian → degraded+backoff; Traefik reinstall preserves acme.json
+
+### 13.B Unified console IA (frontend)
+- [ ] Nodes list replaces Agents + Tunnel servers + Tunnel clients (role filter; gateways visually distinct)
+- [ ] Role-adaptive node detail (server/gateway/client); merge Agent-detail + Tunnel-server-detail
+- [ ] Server node Security Edge section: read-only edge health panel + Sites merged with Protections (inline WAF/rate-limit/auth/geo/ACL; ip_allow/deny inputs; new site defaults to observe)
+- [ ] Security Overview overhaul (hybrid): per-node edge health + all-sites roll-up, all clickable through to owning node
+- [ ] Remove `/security/sites` + `/security/protections` standalone pages and all install buttons
+- [ ] Gates: one Nodes list with gateway treatment; per-node edge health + inline site config; Overview drills into nodes
