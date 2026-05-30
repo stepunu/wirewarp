@@ -408,11 +408,9 @@ func (h *ServerHandlers) handleCrowdSecAppSecEnable(raw json.RawMessage) (string
 		}
 	}
 
-	logf("==> systemctl reload crowdsec")
-	if out, err := runCmd(ctx, "systemctl", "reload", "crowdsec"); err != nil {
-		if out2, err2 := runCmd(ctx, "systemctl", "restart", "crowdsec"); err2 != nil {
-			logf("WARN: reload+restart crowdsec: %v / %v\n%s\n%s", err, err2, tail(out, 4), tail(out2, 4))
-		}
+	logf("==> systemctl restart crowdsec")
+	if out, err := runCmd(ctx, "systemctl", "restart", "crowdsec"); err != nil {
+		logf("WARN: restart crowdsec: %v\n%s", err, tail(out, 4))
 	}
 
 	go h.EmitCrowdSecNow()
