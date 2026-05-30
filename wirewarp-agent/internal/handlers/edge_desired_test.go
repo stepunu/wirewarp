@@ -68,6 +68,30 @@ func TestBuildAppSecModeConfigs(t *testing.T) {
 	}
 }
 
+func TestBouncerListDetectsWirewarpTraefik(t *testing.T) {
+	out := []byte(`[
+		{"name":"cs-firewall-bouncer-1","revoked":false},
+		{"name":"wirewarp-traefik","revoked":false}
+	]`)
+	if !bouncerListHas(out, "wirewarp-traefik") {
+		t.Fatalf("wirewarp-traefik bouncer should be detected")
+	}
+	revoked := []byte(`[{"name":"wirewarp-traefik","revoked":true}]`)
+	if bouncerListHas(revoked, "wirewarp-traefik") {
+		t.Fatalf("revoked wirewarp-traefik bouncer should not count as registered")
+	}
+}
+
+func TestDesiredAppSecModeDefaultsToObserve(t *testing.T) {
+	uses, block := desiredUsesWAF(map[string]any{})
+	if !uses {
+		t.Fatalf("edge reconcile should keep AppSec installed even when there are no HTTP routes yet")
+	}
+	if block {
+		t.Fatalf("empty desired state should use observe mode, not block")
+	}
+}
+
 func TestBackoffDurationCapsAtThirtyMinutes(t *testing.T) {
 	if got := edgeBackoffDuration(0); got != 60*time.Second {
 		t.Fatalf("attempt 0: want 60s, got %v", got)

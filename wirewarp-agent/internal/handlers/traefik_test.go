@@ -32,6 +32,24 @@ func TestWriteYAMLReplacesExistingFileAtomically(t *testing.T) {
 	}
 }
 
+func TestWriteYAMLSkipsUnchangedContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wirewarp.yml")
+	cfg := map[string]any{"http": map[string]any{"routers": map[string]any{}}}
+	if err := writeYAML(path, cfg); err != nil {
+		t.Fatalf("initial writeYAML: %v", err)
+	}
+	before := inodeOf(t, path)
+
+	if err := writeYAML(path, cfg); err != nil {
+		t.Fatalf("second writeYAML: %v", err)
+	}
+
+	after := inodeOf(t, path)
+	if after != before {
+		t.Fatalf("writeYAML should leave unchanged files alone; inode changed from %d to %d", before, after)
+	}
+}
+
 func TestAtomicTempDirIsOutsideWatchedTargetDir(t *testing.T) {
 	path := "/etc/traefik/dynamic/wirewarp.yml"
 	if got := atomicTempDir(path); got != "/etc/traefik" {

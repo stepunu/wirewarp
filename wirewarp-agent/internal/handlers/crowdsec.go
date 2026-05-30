@@ -146,18 +146,20 @@ func collectCrowdSec(parent context.Context) map[string]any {
 	}
 
 	version := csVersion(parent, bin)
+	bouncerRegistered := crowdSecBouncerRegistered(parent, bin)
 
 	decisions, dErr := runCSCli(parent, bin, "decisions", "list", "-o", "json")
 	if dErr != nil {
 		return map[string]any{
-			"installed":      true,
-			"running":        true,
-			"version":        version,
-			"error":          "decisions list: " + dErr.Error(),
-			"last_error":     "decisions list: " + dErr.Error(),
-			"phase":          "degraded",
-			"appsec_enabled": appSecAcquisitionPresent(),
-			"timestamp":      now,
+			"installed":          true,
+			"running":            true,
+			"version":            version,
+			"error":              "decisions list: " + dErr.Error(),
+			"last_error":         "decisions list: " + dErr.Error(),
+			"phase":              "degraded",
+			"appsec_enabled":     appSecAcquisitionPresent(),
+			"bouncer_registered": bouncerRegistered,
+			"timestamp":          now,
 		}
 	}
 	totalDecisions, topIPs := summariseDecisions(decisions)
@@ -172,23 +174,48 @@ func collectCrowdSec(parent context.Context) map[string]any {
 	}
 
 	return map[string]any{
-		"installed":       true,
-		"running":         true,
-		"version":         version,
-		"total_decisions": totalDecisions,
-		"top_scenarios":   topScenarios,
-		"top_ips":         topIPs,
-		"error":           metricsErr, // non-fatal — we still have decisions
-		"last_error":      metricsErr,
-		"phase":           "healthy",
-		"appsec_enabled":  appSecAcquisitionPresent(),
-		"timestamp":       now,
+		"installed":          true,
+		"running":            true,
+		"version":            version,
+		"total_decisions":    totalDecisions,
+		"top_scenarios":      topScenarios,
+		"top_ips":            topIPs,
+		"error":              metricsErr, // non-fatal — we still have decisions
+		"last_error":         metricsErr,
+		"phase":              "healthy",
+		"appsec_enabled":     appSecAcquisitionPresent(),
+		"bouncer_registered": bouncerRegistered,
+		"timestamp":          now,
 	}
 }
 
 func appSecAcquisitionPresent() bool {
 	if fi, err := os.Stat(appSecAcquisitionFile); err == nil && !fi.IsDir() {
 		return true
+	}
+	return false
+}
+
+func crowdSecBouncerRegistered(parent context.Context, bin string) bool {
+	out, err := runCSCli(parent, bin, "bouncers", "list", "-o", "json")
+	if err != nil {
+		return false
+	}
+	return bouncerListHas([]byte(out), "wirewarp-traefik")
+}
+
+func bouncerListHas(out []byte, name string) bool {
+	var rows []struct {
+		Name    string `json:"name"`
+		Revoked bool   `json:"revoked"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return false
+	}
+	for _, row := range rows {
+		if row.Name == name && !row.Revoked {
+			return true
+		}
 	}
 	return false
 }
