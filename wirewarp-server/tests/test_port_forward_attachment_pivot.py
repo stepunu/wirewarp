@@ -37,7 +37,13 @@ async def test_create_forward_with_attachment(client, db, factories, fake_manage
 
 
 async def test_create_raw_edge_forward_rejects_active_security_site(client, db, factories, fake_manager):
-    server = await factories.make_server(db, primary_ip="1.2.3.4")
+    server = await factories.make_server(
+        db,
+        primary_ip="1.2.3.4",
+        edge_mode="security_edge",
+        edge_state="enabled",
+        edge_install_phase="healthy",
+    )
     cli = await factories.make_client(db)
     att = await factories.make_attachment(db, client=cli, server=server)
 
@@ -83,7 +89,12 @@ async def test_create_forward_404_when_attachment_missing(client, db, factories,
 
 
 async def test_patch_raw_edge_forward_rejects_active_security_site(client, db, factories):
-    server = await factories.make_server(db)
+    server = await factories.make_server(
+        db,
+        edge_mode="security_edge",
+        edge_state="enabled",
+        edge_install_phase="healthy",
+    )
     cli = await factories.make_client(db)
     att = await factories.make_attachment(db, client=cli, server=server)
 

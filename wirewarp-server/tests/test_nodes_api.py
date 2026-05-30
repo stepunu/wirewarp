@@ -30,6 +30,12 @@ def _agent(agent_type: str, name: str) -> Agent:
     )
 
 
+def _enable_security_edge(server: TunnelServer) -> None:
+    server.edge_mode = "security_edge"
+    server.edge_state = "enabled"
+    server.edge_install_phase = "healthy"
+
+
 @pytest.mark.asyncio
 async def test_nodes_list_derives_server_gateway_client_roles(client, session_maker) -> None:
     server_agent = _agent("server", "edge-1")
@@ -58,7 +64,9 @@ async def test_node_edge_rolls_up_component_phases(client, session_maker) -> Non
     async with session_maker() as s:
         s.add(agent)
         await s.commit()
-        s.add(TunnelServer(id=uuid.uuid4(), agent_id=agent.id, tunnel_network="10.21.0.0/24"))
+        server = TunnelServer(id=uuid.uuid4(), agent_id=agent.id, tunnel_network="10.21.0.0/24")
+        _enable_security_edge(server)
+        s.add(server)
         s.add(
             CrowdSecSnapshot(
                 agent_id=agent.id,
@@ -85,11 +93,137 @@ async def test_node_edge_rolls_up_component_phases(client, session_maker) -> Non
     assert resp.status_code == 200
     body = resp.json()
     assert body["agent_id"] == str(agent.id)
+    assert body["mode"] == "security_edge"
+    assert body["state"] == "enabled"
     assert body["phase"] == "degraded"
     assert body["crowdsec"]["phase"] == "healthy"
     assert body["crowdsec"]["appsec_enabled"] is True
     assert body["traefik"]["phase"] == "degraded"
     assert body["traefik"]["last_error"] == "unit failed"
+    assert body["components"]["traefik"]["installed"] is True
+    assert body["components"]["appsec"]["desired"] == "enabled"
+
+
+@pytest.mark.asyncio
+async def test_node_edge_defaults_to_tcp_udp_only_and_blocks_reconcile(client, session_maker) -> None:
+    agent = _agent("server", "edge-1")
+    async with session_maker() as s:
+        s.add(agent)
+        await s.commit()
+        s.add(TunnelServer(id=uuid.uuid4(), agent_id=agent.id, tunnel_network="10.21.0.0/24"))
+        await s.commit()
+
+    edge = await client.get(f"/api/nodes/{agent.id}/edge")
+    assert edge.status_code == 200
+    body = edge.json()
+    assert body["mode"] == "tcp_udp_only"
+    assert body["state"] == "disabled"
+    assert body["phase"] == "disabled"
+    assert body["unavailable_reason"] == "security_edge_not_enabled"
+    assert body["components"]["traefik"]["desired"] == "disabled"
+
+    reconcile = await client.post(f"/api/nodes/{agent.id}/edge/reconcile")
+    assert reconcile.status_code == 409
+    assert reconcile.json()["detail"]["code"] == "edge_feature_disabled"
+
+
+@pytest.mark.asyncio
+async def test_node_edge_capabilities_put_enable_disable_are_idempotent(
+    client,
+    session_maker,
+    fake_manager,
+) -> None:
+    agent = _agent("server", "edge-1")
+    async with session_maker() as s:
+        s.add(agent)
+        await s.commit()
+        s.add(TunnelServer(id=uuid.uuid4(), agent_id=agent.id, tunnel_network="10.21.0.0/24"))
+        await s.commit()
+
+    put = await client.put(
+        f"/api/nodes/{agent.id}/edge/capabilities",
+        json={
+            "mode": "security_edge",
+            "state": "enabled",
+            "components": {
+                "traefik": "enabled",
+                "crowdsec": "enabled",
+                "appsec": "enabled",
+                "access_log": "enabled",
+                "nginx_cache": "disabled",
+            },
+        },
+    )
+    assert put.status_code == 200, put.text
+    body = put.json()
+    assert body["mode"] == "security_edge"
+    assert body["state"] == "enabled"
+    assert body["components"]["traefik"]["desired"] == "enabled"
+    assert body["components"]["nginx_cache"]["desired"] == "disabled"
+
+    second = await client.put(
+        f"/api/nodes/{agent.id}/edge/capabilities",
+        json={"mode": "security_edge", "state": "enabled", "components": {"traefik": "enabled"}},
+    )
+    assert second.status_code == 200
+    assert second.json()["components"]["traefik"]["desired"] == "enabled"
+
+    fake_manager.online.add(str(agent.id))
+    disabled = await client.post(f"/api/nodes/{agent.id}/edge/disable")
+    assert disabled.status_code == 202
+    assert disabled.json()["sent"] is True
+    assert fake_manager.sent[-1]["message"]["type"] == "edge_disable"
+    assert fake_manager.sent[-1]["message"]["params"]["preserve_state"] is True
+
+    enabled = await client.post(f"/api/nodes/{agent.id}/edge/enable")
+    assert enabled.status_code == 202
+    assert enabled.json()["sent"] is True
+    assert fake_manager.sent[-1]["message"]["type"] == "edge_desired_state"
+
+    final = await client.get(f"/api/nodes/{agent.id}/edge/capabilities")
+    assert final.status_code == 200
+    assert final.json()["state"] == "enabled"
+
+
+@pytest.mark.asyncio
+async def test_security_site_create_returns_edge_feature_disabled_for_tcp_udp_node(
+    client,
+    session_maker,
+) -> None:
+    server_agent = _agent("server", "edge-1")
+    gateway_agent = _agent("client", "gw-1")
+    async with session_maker() as s:
+        s.add_all([server_agent, gateway_agent])
+        await s.commit()
+        server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
+        client_row = TunnelClient(id=uuid.uuid4(), agent_id=gateway_agent.id, is_gateway=True)
+        s.add_all([server, client_row])
+        await s.commit()
+        att = TunnelClientAttachment(
+            id=uuid.uuid4(),
+            tunnel_client_id=client_row.id,
+            tunnel_server_id=server.id,
+            tunnel_ip="10.21.0.2",
+            wg_interface="wg0",
+            fwmark=0x101,
+            route_table_id=100,
+        )
+        s.add(att)
+        await s.commit()
+
+    resp = await client.post(
+        "/api/security/sites",
+        json={
+            "attachment_id": str(att.id),
+            "domain": "app.example.com",
+            "destination_ip": "192.168.1.10",
+            "destination_port": 8080,
+        },
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["code"] == "edge_feature_disabled"
+    assert resp.json()["detail"]["reason"] == "security_edge_not_enabled"
 
 
 @pytest.mark.asyncio
@@ -100,6 +234,7 @@ async def test_edge_reconcile_dispatches_unified_desired_state(client, session_m
         s.add_all([server_agent, gateway_agent])
         await s.commit()
         server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
+        _enable_security_edge(server)
         client_row = TunnelClient(id=uuid.uuid4(), agent_id=gateway_agent.id, is_gateway=True)
         s.add_all([server, client_row])
         await s.commit()
@@ -155,7 +290,9 @@ async def test_edge_reconcile_sends_acme_token_but_redacts_command_log(client, s
     async with session_maker() as s:
         s.add(server_agent)
         await s.commit()
-        s.add(TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24"))
+        server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
+        _enable_security_edge(server)
+        s.add(server)
         settings = await s.get(SystemSettings, 1)
         if settings is None:
             settings = SystemSettings(id=1)
@@ -197,6 +334,8 @@ async def test_security_sites_filter_by_agent_id_and_default_observe(client, ses
         await s.commit()
         server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
         other = TunnelServer(id=uuid.uuid4(), agent_id=other_agent.id, tunnel_network="10.22.0.0/24")
+        _enable_security_edge(server)
+        _enable_security_edge(other)
         client_row = TunnelClient(id=uuid.uuid4(), agent_id=gateway_agent.id, is_gateway=True)
         s.add_all([server, other, client_row])
         await s.commit()
@@ -261,6 +400,7 @@ async def test_security_site_rejects_conflicting_raw_edge_forward(client, sessio
         s.add_all([server_agent, gateway_agent])
         await s.commit()
         server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
+        _enable_security_edge(server)
         client_row = TunnelClient(id=uuid.uuid4(), agent_id=gateway_agent.id, is_gateway=True)
         s.add_all([server, client_row])
         await s.commit()
@@ -311,6 +451,7 @@ async def test_antibot_requires_configured_captcha_keys(client, session_maker) -
         s.add_all([server_agent, gateway_agent])
         await s.commit()
         server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
+        _enable_security_edge(server)
         client_row = TunnelClient(id=uuid.uuid4(), agent_id=gateway_agent.id, is_gateway=True)
         s.add_all([server, client_row])
         await s.commit()

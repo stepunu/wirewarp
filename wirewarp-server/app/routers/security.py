@@ -56,7 +56,13 @@ from app.services.edge_port_conflicts import (
     find_active_raw_edge_forward_on_server,
     server_id_for_attachment,
 )
-from app.services.edge_ops import dispatch_edge_desired_state, dispatch_edge_for_attachment, site_server_context
+from app.services.edge_ops import (
+    dispatch_edge_desired_state,
+    dispatch_edge_for_attachment,
+    edge_feature_disabled_detail,
+    edge_unavailable_reason,
+    site_server_context,
+)
 from app.services.secrets import get_captcha_secret_key
 from app.services.traefik_importer import preview_traefik_import
 
@@ -390,6 +396,29 @@ async def _get_server_agent_for_pf(pf: PortForward, db: AsyncSession) -> str | N
     return str(ts.agent_id)
 
 
+async def _ensure_security_edge_enabled_for_attachment(
+    attachment_id: uuid.UUID,
+    db: AsyncSession,
+) -> TunnelServer:
+    server_id = await server_id_for_attachment(db, attachment_id)
+    if server_id is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    server = await db.get(TunnelServer, server_id)
+    if server is None:
+        raise HTTPException(status_code=404, detail="Tunnel server not found")
+    if edge_unavailable_reason(server):
+        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(server))
+    return server
+
+
+async def _ensure_security_edge_enabled_for_site(
+    pf: PortForward,
+    db: AsyncSession,
+) -> TunnelServer:
+    server = await _ensure_security_edge_enabled_for_attachment(pf.attachment_id, db)
+    return server
+
+
 def _validate_rate_limit(rps: int | None, burst: int | None) -> None:
     if rps is not None and rps < 1:
         raise HTTPException(status_code=400, detail="Rate limit RPS must be at least 1")
@@ -419,6 +448,8 @@ async def update_server_edge_policy(
     server = await db.get(TunnelServer, server_id)
     if server is None:
         raise HTTPException(status_code=404, detail="Tunnel server not found")
+    if edge_unavailable_reason(server):
+        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(server))
     fields = body.model_fields_set
     rps = body.rate_limit_rps if "rate_limit_rps" in fields else server.edge_rate_limit_rps
     burst = body.rate_limit_burst if "rate_limit_burst" in fields else server.edge_rate_limit_burst
@@ -467,6 +498,8 @@ async def import_traefik_routes(
     server = await db.get(TunnelServer, body.server_id)
     if server is None:
         raise HTTPException(status_code=404, detail="Tunnel server not found")
+    if edge_unavailable_reason(server):
+        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(server))
 
     created = 0
     updated = 0
@@ -633,6 +666,7 @@ async def create_site(
     user: User = Depends(require_role("admin")),
 ):
     """Create an HTTP port_forward + edge_route_config, then sync Traefik."""
+    server = await _ensure_security_edge_enabled_for_attachment(body.attachment_id, db)
     if body.antibot and not await _captcha_configured(db):
         raise HTTPException(status_code=400, detail="CAPTCHA provider keys must be configured before enabling anti-bot")
     await _ensure_site_does_not_shadow_raw_edge_forward(
@@ -686,7 +720,6 @@ async def create_site(
 
     emit_security_changed()
     sid, aid = await site_server_context(pf, db)
-    server = await db.get(TunnelServer, sid) if sid else None
     return _site_read(pf, server_id=sid, agent_id=aid, server=server)
 
 
@@ -704,6 +737,7 @@ async def update_site(
     )
     if pf is None:
         raise HTTPException(status_code=404, detail="Site not found")
+    server = await _ensure_security_edge_enabled_for_site(pf, db)
     if body.antibot is True and not await _captcha_configured(db):
         raise HTTPException(status_code=400, detail="CAPTCHA provider keys must be configured before enabling anti-bot")
 
@@ -756,7 +790,6 @@ async def update_site(
 
     emit_security_changed()
     sid, aid = await site_server_context(pf, db)
-    server = await db.get(TunnelServer, sid) if sid else None
     return _site_read(pf, server_id=sid, agent_id=aid, server=server)
 
 
@@ -773,6 +806,7 @@ async def delete_site(
     )
     if pf is None:
         raise HTTPException(status_code=404, detail="Site not found")
+    await _ensure_security_edge_enabled_for_site(pf, db)
     agent_id = await _get_server_agent_for_pf(pf, db)
     attachment_id = pf.attachment_id
     await db.delete(pf)

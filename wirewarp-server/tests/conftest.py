@@ -293,6 +293,9 @@ async def make_server(
     network: str = "10.21.0.0/24",
     primary_ip: str = "1.2.3.4",
     public_key: str = "SERVERPUBKEY",
+    edge_mode: str = "tcp_udp_only",
+    edge_state: str = "disabled",
+    edge_install_phase: str = "disabled",
 ) -> TunnelServer:
     if agent is None:
         agent = await make_agent(db, type_="server", name=f"srv-{network}")
@@ -304,6 +307,9 @@ async def make_server(
         public_iface="eth0",
         wg_public_key=public_key,
         tunnel_network=network,
+        edge_mode=edge_mode,
+        edge_state=edge_state,
+        edge_install_phase=edge_install_phase,
     )
     db.add(s)
     await db.commit()

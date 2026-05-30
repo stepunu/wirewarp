@@ -179,7 +179,16 @@ async def test_patch_letsencrypt_settings_dispatches_server_edge(client, session
     async with session_maker() as s:
         s.add(agent)
         await s.commit()
-        s.add(TunnelServer(id=uuid.uuid4(), agent_id=agent.id, tunnel_network="10.21.0.0/24"))
+        s.add(
+            TunnelServer(
+                id=uuid.uuid4(),
+                agent_id=agent.id,
+                tunnel_network="10.21.0.0/24",
+                edge_mode="security_edge",
+                edge_state="enabled",
+                edge_install_phase="healthy",
+            )
+        )
         await s.commit()
 
     fake_manager.online.add(str(agent.id))

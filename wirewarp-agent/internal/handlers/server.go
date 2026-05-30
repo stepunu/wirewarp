@@ -122,6 +122,7 @@ func (h *ServerHandlers) Register(exec *executor.Executor) {
 	exec.Register("traefik_sync_config", h.handleTraefikSyncConfig)
 	exec.Register("crowdsec_appsec_enable", h.handleCrowdSecAppSecEnable)
 	exec.Register("edge_desired_state", h.handleEdgeDesiredState)
+	exec.Register("edge_disable", h.handleEdgeDisable)
 }
 
 // --- command handlers ---

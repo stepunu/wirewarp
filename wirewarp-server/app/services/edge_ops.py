@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import uuid
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent import Agent
 from app.models.crowdsec_snapshot import CrowdSecSnapshot
+from app.models.edge_component_state import EdgeComponentState
 from app.models.edge_route_config import EdgeRouteConfig
 from app.models.port_forward import PortForward
 from app.models.traefik_snapshot import TraefikSnapshot
@@ -22,6 +24,44 @@ from app.services.secrets import get_letsencrypt_cloudflare_api_token
 
 
 SECRET_KEYS = {"captchaSecretKey", "cloudflare_dns_api_token"}
+EDGE_COMPONENTS = ("traefik", "crowdsec", "appsec", "access_log", "nginx_cache")
+DEFAULT_SECURITY_EDGE_COMPONENTS = {
+    "traefik": "enabled",
+    "crowdsec": "enabled",
+    "appsec": "enabled",
+    "access_log": "enabled",
+    "nginx_cache": "disabled",
+}
+
+
+def edge_unavailable_reason(server: TunnelServer) -> str | None:
+    if server.edge_mode != "security_edge":
+        return "security_edge_not_enabled"
+    if server.edge_state != "enabled":
+        return "security_edge_disabled"
+    return None
+
+
+def edge_feature_disabled_detail(server: TunnelServer) -> dict:
+    reason = edge_unavailable_reason(server) or "edge_feature_disabled"
+    return {
+        "code": "edge_feature_disabled",
+        "reason": reason,
+        "mode": server.edge_mode,
+        "state": server.edge_state,
+        "detail": "Security Edge must be enabled for this node before using this endpoint.",
+    }
+
+
+def ensure_edge_enabled(server: TunnelServer) -> None:
+    if edge_unavailable_reason(server):
+        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(server))
+
+
+def default_component_desired(server: TunnelServer, component: str) -> str:
+    if server.edge_mode == "security_edge" and server.edge_state == "enabled":
+        return DEFAULT_SECURITY_EDGE_COMPONENTS.get(component, "disabled")
+    return "disabled"
 
 
 def component_phase(installed: bool, running: bool, last_error: str | None = None) -> str:
@@ -44,10 +84,62 @@ def edge_phase(cs: CrowdSecSnapshot | None, tk: TraefikSnapshot | None) -> str:
     return "pending"
 
 
+async def load_component_states(
+    agent_id: uuid.UUID | str,
+    db: AsyncSession,
+) -> dict[str, EdgeComponentState]:
+    rows = (
+        await db.execute(
+            select(EdgeComponentState).where(EdgeComponentState.agent_id == agent_id)
+        )
+    ).scalars().all()
+    return {row.component: row for row in rows}
+
+
+async def set_component_desired(
+    agent_id: uuid.UUID | str,
+    db: AsyncSession,
+    components: dict[str, str],
+) -> dict[str, EdgeComponentState]:
+    existing = await load_component_states(agent_id, db)
+    out: dict[str, EdgeComponentState] = {}
+    agent_uuid = uuid.UUID(str(agent_id))
+    for component, desired in components.items():
+        if component not in EDGE_COMPONENTS:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_edge_component", "field": component, "detail": "Unknown edge component."},
+            )
+        if desired not in {"enabled", "disabled"}:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_edge_component_state", "field": component, "detail": "Component state must be enabled or disabled."},
+            )
+        row = existing.get(component)
+        if row is None:
+            row = EdgeComponentState(
+                id=uuid.uuid4(),
+                agent_id=agent_uuid,
+                component=component,
+            )
+            db.add(row)
+        row.desired = desired
+        if desired == "disabled":
+            row.phase = "disabled"
+            row.running = False
+        elif row.phase == "disabled":
+            row.phase = "pending"
+        out[component] = row
+    return out
+
+
 async def build_edge_desired_state(
     agent_id: uuid.UUID | str,
     db: AsyncSession,
 ) -> dict:
+    server = await db.scalar(select(TunnelServer).where(TunnelServer.agent_id == agent_id))
+    if server is not None:
+        ensure_edge_enabled(server)
     letsencrypt = await load_letsencrypt_config(db)
     le_token = await get_letsencrypt_cloudflare_api_token(db)
     traefik_acme: dict[str, str] = {}
@@ -83,6 +175,9 @@ async def dispatch_edge_desired_state(
 ) -> tuple[bool, str]:
     from app.services.agent_commands import send_command
 
+    server = await db.scalar(select(TunnelServer).where(TunnelServer.agent_id == agent_id))
+    if server is None or edge_unavailable_reason(server):
+        return False, "edge_feature_disabled"
     payload = await build_edge_desired_state(agent_id, db)
     return await send_command(
         agent_id=str(agent_id),
@@ -100,7 +195,12 @@ async def dispatch_all_server_edges(
 ) -> None:
     rows = (
         await db.execute(
-            select(Agent.id).join(TunnelServer, TunnelServer.agent_id == Agent.id)
+            select(Agent.id)
+            .join(TunnelServer, TunnelServer.agent_id == Agent.id)
+            .where(
+                TunnelServer.edge_mode == "security_edge",
+                TunnelServer.edge_state == "enabled",
+            )
         )
     ).scalars().all()
     for agent_id in rows:

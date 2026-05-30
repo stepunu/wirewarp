@@ -24,9 +24,48 @@ class NodeRead(BaseModel):
     edge_phase: str | None = None
 
 
+class EdgeComponentRead(BaseModel):
+    component: str
+    desired: str = "disabled"
+    installed: bool = False
+    running: bool = False
+    phase: str = "disabled"
+    version: str | None = None
+    last_error: str | None = None
+    updated_at: datetime | None = None
+
+
+class NodeEdgeCapabilitiesRead(BaseModel):
+    agent_id: uuid.UUID
+    mode: str = "tcp_udp_only"
+    state: str = "disabled"
+    install_phase: str = "disabled"
+    last_error: str | None = None
+    components: dict[str, EdgeComponentRead]
+    unavailable_reason: str | None = None
+
+
+class NodeEdgeCapabilitiesUpdate(BaseModel):
+    mode: str | None = None
+    state: str | None = None
+    components: dict[str, str] | None = None
+
+
+class NodeEdgeActionResult(BaseModel):
+    sent: bool
+    command_id: str | None = None
+    edge: NodeEdgeCapabilitiesRead
+
+
 class NodeEdgeRead(BaseModel):
     agent_id: uuid.UUID
+    mode: str = "tcp_udp_only"
+    state: str = "disabled"
     phase: str
+    install_phase: str = "disabled"
+    last_error: str | None = None
+    unavailable_reason: str | None = None
+    components: dict[str, EdgeComponentRead]
     policy: ServerEdgePolicyRead
     crowdsec: CrowdSecSnapshotRead
     traefik: TraefikStatusRead

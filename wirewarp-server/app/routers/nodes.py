@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -11,6 +12,7 @@ from app.auth import require_ops_role, require_role
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.crowdsec_snapshot import CrowdSecSnapshot
+from app.models.edge_component_state import EdgeComponentState
 from app.models.port_forward import PortForward
 from app.models.traefik_snapshot import TraefikSnapshot
 from app.models.tunnel_client import TunnelClient
@@ -19,7 +21,14 @@ from app.models.tunnel_server import TunnelServer
 from app.models.user import User
 from app.realtime.events import emit_edge_changed
 from app.schemas.crowdsec import CrowdSecSnapshotRead
-from app.schemas.nodes import NodeEdgeRead, NodeRead
+from app.schemas.nodes import (
+    EdgeComponentRead,
+    NodeEdgeActionResult,
+    NodeEdgeCapabilitiesRead,
+    NodeEdgeCapabilitiesUpdate,
+    NodeEdgeRead,
+    NodeRead,
+)
 from app.schemas.security import (
     EdgeRouteConfigRead,
     EffectiveRateLimit,
@@ -29,7 +38,16 @@ from app.schemas.security import (
     SiteRead,
     TraefikStatusRead,
 )
-from app.services.edge_ops import dispatch_edge_desired_state, edge_phase
+from app.services.edge_ops import (
+    EDGE_COMPONENTS,
+    DEFAULT_SECURITY_EDGE_COMPONENTS,
+    dispatch_edge_desired_state,
+    edge_feature_disabled_detail,
+    edge_phase,
+    edge_unavailable_reason,
+    set_component_desired,
+)
+from app.services.agent_commands import send_command
 
 router = APIRouter()
 
@@ -59,8 +77,18 @@ async def _node_read(agent: Agent, db: AsyncSession) -> NodeRead:
         tunnel_server_id=server.id if server else None,
         tunnel_client_id=client.id if client else None,
         is_gateway=bool(client and client.is_gateway),
-        edge_phase=edge_phase(cs, tk) if server else None,
+        edge_phase=_node_edge_phase(server, cs, tk) if server else None,
     )
+
+
+def _node_edge_phase(
+    server: TunnelServer,
+    cs: CrowdSecSnapshot | None,
+    tk: TraefikSnapshot | None,
+) -> str:
+    if edge_unavailable_reason(server):
+        return "disabled"
+    return edge_phase(cs, tk)
 
 
 def _site_read(
@@ -123,6 +151,155 @@ def _server_policy(server: TunnelServer) -> ServerEdgePolicyRead:
         rate_limit_rps=server.edge_rate_limit_rps,
         rate_limit_burst=server.edge_rate_limit_burst,
     )
+
+
+async def _component_state_map(
+    server: TunnelServer,
+    db: AsyncSession,
+    *,
+    crowdsec: CrowdSecSnapshot | None = None,
+    traefik: TraefikSnapshot | None = None,
+) -> dict[str, EdgeComponentRead]:
+    if crowdsec is None:
+        crowdsec = await db.scalar(select(CrowdSecSnapshot).where(CrowdSecSnapshot.agent_id == server.agent_id))
+    if traefik is None:
+        traefik = await db.scalar(select(TraefikSnapshot).where(TraefikSnapshot.agent_id == server.agent_id))
+    rows = (
+        await db.execute(
+            select(EdgeComponentState).where(EdgeComponentState.agent_id == server.agent_id)
+        )
+    ).scalars().all()
+    desired_by_component = {row.component: row for row in rows}
+
+    out: dict[str, EdgeComponentRead] = {}
+    for component in EDGE_COMPONENTS:
+        row = desired_by_component.get(component)
+        desired = row.desired if row else _default_component_desired(server, component)
+        installed = row.installed if row else False
+        running = row.running if row else False
+        phase = row.phase if row else ("pending" if desired == "enabled" else "disabled")
+        version = row.version if row else None
+        last_error = row.last_error if row else None
+        updated_at = row.updated_at if row else None
+
+        if component == "traefik" and traefik is not None:
+            installed = traefik.installed
+            running = traefik.running
+            phase = traefik.phase or phase
+            version = traefik.version
+            last_error = traefik.last_error or traefik.error
+            updated_at = traefik.updated_at
+        elif component == "crowdsec" and crowdsec is not None:
+            installed = crowdsec.installed
+            running = crowdsec.running
+            phase = crowdsec.phase or phase
+            version = crowdsec.version
+            last_error = crowdsec.last_error or crowdsec.error
+            updated_at = crowdsec.updated_at
+        elif component == "appsec" and crowdsec is not None:
+            installed = crowdsec.installed and crowdsec.appsec_enabled
+            running = crowdsec.running and crowdsec.appsec_enabled and crowdsec.bouncer_registered
+            if crowdsec.appsec_enabled and crowdsec.bouncer_registered:
+                phase = "healthy"
+            elif crowdsec.appsec_enabled:
+                phase = "degraded"
+            elif desired == "enabled":
+                phase = "pending"
+            else:
+                phase = "disabled"
+            last_error = crowdsec.last_error or crowdsec.error
+            updated_at = crowdsec.updated_at
+
+        if edge_unavailable_reason(server) and component not in desired_by_component:
+            desired = "disabled"
+            if not installed:
+                phase = "disabled"
+
+        out[component] = EdgeComponentRead(
+            component=component,
+            desired=desired,
+            installed=installed,
+            running=running,
+            phase=phase,
+            version=version,
+            last_error=last_error,
+            updated_at=updated_at,
+        )
+    return out
+
+
+def _default_component_desired(server: TunnelServer, component: str) -> str:
+    if server.edge_mode == "security_edge" and server.edge_state == "enabled":
+        return DEFAULT_SECURITY_EDGE_COMPONENTS.get(component, "disabled")
+    return "disabled"
+
+
+async def _capabilities_read(
+    server: TunnelServer,
+    db: AsyncSession,
+    *,
+    crowdsec: CrowdSecSnapshot | None = None,
+    traefik: TraefikSnapshot | None = None,
+) -> NodeEdgeCapabilitiesRead:
+    reason = edge_unavailable_reason(server)
+    return NodeEdgeCapabilitiesRead(
+        agent_id=server.agent_id,
+        mode=server.edge_mode,
+        state=server.edge_state,
+        install_phase=server.edge_install_phase,
+        last_error=server.edge_last_error,
+        unavailable_reason=reason,
+        components=await _component_state_map(server, db, crowdsec=crowdsec, traefik=traefik),
+    )
+
+
+async def _server_for_agent(agent_id: uuid.UUID, db: AsyncSession) -> TunnelServer:
+    server = await db.scalar(select(TunnelServer).where(TunnelServer.agent_id == agent_id))
+    if server is None:
+        raise HTTPException(status_code=404, detail="Security edge is only available on server nodes")
+    return server
+
+
+async def _apply_capabilities(
+    server: TunnelServer,
+    body: NodeEdgeCapabilitiesUpdate,
+    db: AsyncSession,
+    actor: User,
+) -> None:
+    now = datetime.now(timezone.utc)
+    fields = body.model_fields_set
+    if "mode" in fields and body.mode is not None:
+        if body.mode not in {"tcp_udp_only", "security_edge"}:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_edge_mode", "field": "mode", "detail": "Mode must be tcp_udp_only or security_edge."},
+            )
+        server.edge_mode = body.mode
+        if body.mode == "tcp_udp_only":
+            server.edge_state = "disabled"
+            server.edge_install_phase = "disabled"
+    if "state" in fields and body.state is not None:
+        if body.state not in {"enabled", "disabled"}:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_edge_state", "field": "state", "detail": "State must be enabled or disabled."},
+            )
+        if body.state == "enabled":
+            server.edge_mode = "security_edge"
+            if server.edge_state != "enabled":
+                server.edge_enabled_at = now
+                server.edge_enabled_by = actor.id
+            server.edge_state = "enabled"
+            if server.edge_install_phase == "disabled":
+                server.edge_install_phase = "pending"
+        else:
+            if server.edge_state != "disabled":
+                server.edge_disabled_at = now
+                server.edge_disabled_by = actor.id
+            server.edge_state = "disabled"
+            server.edge_install_phase = "disabled"
+    if body.components:
+        await set_component_desired(server.agent_id, db, body.components)
 
 
 def _effective_site_policy(
@@ -221,14 +398,18 @@ async def get_node_edge(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_ops_role),
 ):
-    server = await db.scalar(select(TunnelServer).where(TunnelServer.agent_id == agent_id))
-    if server is None:
-        raise HTTPException(status_code=404, detail="Security edge is only available on server nodes")
+    server = await _server_for_agent(agent_id, db)
     cs = await db.scalar(select(CrowdSecSnapshot).where(CrowdSecSnapshot.agent_id == agent_id))
     tk = await db.scalar(select(TraefikSnapshot).where(TraefikSnapshot.agent_id == agent_id))
     return NodeEdgeRead(
         agent_id=agent_id,
-        phase=edge_phase(cs, tk),
+        mode=server.edge_mode,
+        state=server.edge_state,
+        phase=_node_edge_phase(server, cs, tk),
+        install_phase=server.edge_install_phase,
+        last_error=server.edge_last_error,
+        unavailable_reason=edge_unavailable_reason(server),
+        components=await _component_state_map(server, db, crowdsec=cs, traefik=tk),
         policy=_server_policy(server),
         crowdsec=(
             CrowdSecSnapshotRead.model_validate(cs)
@@ -244,6 +425,109 @@ async def get_node_edge(
     )
 
 
+@router.get("/{agent_id}/edge/capabilities", response_model=NodeEdgeCapabilitiesRead)
+async def get_node_edge_capabilities(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    server = await _server_for_agent(agent_id, db)
+    return await _capabilities_read(server, db)
+
+
+@router.put("/{agent_id}/edge/capabilities", response_model=NodeEdgeCapabilitiesRead)
+async def put_node_edge_capabilities(
+    agent_id: uuid.UUID,
+    body: NodeEdgeCapabilitiesUpdate,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    server = await _server_for_agent(agent_id, db)
+    await _apply_capabilities(server, body, db, actor)
+    await db.commit()
+    await db.refresh(server)
+    emit_edge_changed()
+    return await _capabilities_read(server, db)
+
+
+@router.post("/{agent_id}/edge/install", response_model=NodeEdgeActionResult, status_code=202)
+async def install_node_edge(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    server = await _server_for_agent(agent_id, db)
+    await _apply_capabilities(
+        server,
+        NodeEdgeCapabilitiesUpdate(
+            mode="security_edge",
+            state="enabled",
+            components=DEFAULT_SECURITY_EDGE_COMPONENTS,
+        ),
+        db,
+        actor,
+    )
+    server.edge_install_phase = "pending"
+    await db.commit()
+    await db.refresh(server)
+    sent, command_id = await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
+    emit_edge_changed()
+    return NodeEdgeActionResult(sent=sent, command_id=command_id if sent else None, edge=await _capabilities_read(server, db))
+
+
+@router.post("/{agent_id}/edge/enable", response_model=NodeEdgeActionResult, status_code=202)
+async def enable_node_edge(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    server = await _server_for_agent(agent_id, db)
+    components = {}
+    current = await _component_state_map(server, db)
+    if not any(component.desired == "enabled" for component in current.values()):
+        components = DEFAULT_SECURITY_EDGE_COMPONENTS
+    await _apply_capabilities(
+        server,
+        NodeEdgeCapabilitiesUpdate(mode="security_edge", state="enabled", components=components or None),
+        db,
+        actor,
+    )
+    await db.commit()
+    await db.refresh(server)
+    sent, command_id = await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
+    emit_edge_changed()
+    return NodeEdgeActionResult(sent=sent, command_id=command_id if sent else None, edge=await _capabilities_read(server, db))
+
+
+@router.post("/{agent_id}/edge/disable", response_model=NodeEdgeActionResult, status_code=202)
+async def disable_node_edge(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    server = await _server_for_agent(agent_id, db)
+    await _apply_capabilities(
+        server,
+        NodeEdgeCapabilitiesUpdate(mode="security_edge", state="disabled"),
+        db,
+        actor,
+    )
+    await db.commit()
+    await db.refresh(server)
+    sent, command_id = await send_command(
+        agent_id=str(agent_id),
+        command_type="edge_disable",
+        params={
+            "preserve_state": True,
+            "services": ["traefik", "crowdsec", "nginx"],
+        },
+        db=db,
+        actor_user_id=actor.id,
+    )
+    emit_edge_changed()
+    return NodeEdgeActionResult(sent=sent, command_id=command_id if sent else None, edge=await _capabilities_read(server, db))
+
+
 @router.post("/{agent_id}/edge/reconcile", status_code=202)
 async def reconcile_node_edge(
     agent_id: uuid.UUID,
@@ -253,6 +537,9 @@ async def reconcile_node_edge(
     agent = await db.get(Agent, agent_id)
     if agent is None or agent.type != "server":
         raise HTTPException(status_code=404, detail="Server node not found")
+    server = await _server_for_agent(agent_id, db)
+    if edge_unavailable_reason(server):
+        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(server))
     sent, command_id = await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
     emit_edge_changed()
     if not sent:

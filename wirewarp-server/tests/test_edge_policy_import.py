@@ -39,6 +39,9 @@ async def _server_with_attachment(session_maker):
             id=uuid.uuid4(),
             agent_id=server_agent.id,
             tunnel_network="10.21.0.0/24",
+            edge_mode="security_edge",
+            edge_state="enabled",
+            edge_install_phase="healthy",
         )
         gateway = TunnelClient(
             id=uuid.uuid4(),
