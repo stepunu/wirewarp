@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -30,6 +31,13 @@ type EdgeCachePurgeParams struct {
 	Prefix string `json:"prefix"`
 }
 
+type EdgeCachePurgeResult struct {
+	Removed     int
+	Key         string
+	Unsupported bool
+	Reason      string
+}
+
 func (h *ServerHandlers) handleEdgeCachePurge(raw json.RawMessage) (string, error) {
 	var p EdgeCachePurgeParams
 	if len(raw) > 0 {
@@ -45,16 +53,146 @@ func (h *ServerHandlers) handleEdgeCachePurge(raw json.RawMessage) (string, erro
 	default:
 		return "", fmt.Errorf("unsupported cache purge scope: %s", p.Scope)
 	}
-	key := edgeCachePurgeKey(p.Host, p.Path)
-	if p.Prefix != "" {
-		key = edgeCachePurgeKey(p.Host, strings.TrimRight(p.Prefix, "/")+"/")
+	root := nginxCacheDefaultDir
+	if h != nil && h.cfg != nil && h.cfg.EdgeDesired != nil && h.cfg.EdgeDesired.NginxCacheConfig != nil {
+		root = nginxString(h.cfg.EdgeDesired.NginxCacheConfig, "cache_path", nginxCacheDefaultDir)
 	}
-	return fmt.Sprintf("cache purge accepted: scope=%s key=%s", p.Scope, key), nil
+	result, err := purgeNginxCacheFiles(root, p)
+	if err != nil {
+		return "", err
+	}
+	if result.Unsupported {
+		message := fmt.Sprintf("cache purge unsupported: scope=%s reason=%s", p.Scope, result.Reason)
+		h.emitNginxCachePurgeResult(message)
+		return message, nil
+	}
+	keyPart := ""
+	if result.Key != "" {
+		keyPart = " key=" + result.Key
+	}
+	message := fmt.Sprintf("cache purge completed: scope=%s removed=%d%s", p.Scope, result.Removed, keyPart)
+	h.emitNginxCachePurgeResult(message)
+	return message, nil
 }
 
 func edgeCachePurgeKey(host, path string) string {
-	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(host)) + "\n" + strings.TrimSpace(path)))
+	host = strings.ToLower(strings.TrimSpace(host))
+	path = cleanCachePurgePath(path)
+	sum := md5.Sum([]byte("http|" + host + "|" + path))
 	return hex.EncodeToString(sum[:])
+}
+
+func cleanCachePurgePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return path
+}
+
+func purgeNginxCacheFiles(root string, p EdgeCachePurgeParams) (EdgeCachePurgeResult, error) {
+	root, err := safeNginxCacheRoot(root)
+	if err != nil {
+		return EdgeCachePurgeResult{}, err
+	}
+	if p.Scope == "" {
+		p.Scope = "node"
+	}
+	switch p.Scope {
+	case "node":
+		removed, err := removeCacheRootChildren(root)
+		return EdgeCachePurgeResult{Removed: removed}, err
+	case "path":
+		if strings.TrimSpace(p.Host) == "" || strings.TrimSpace(p.Path) == "" {
+			return EdgeCachePurgeResult{Unsupported: true, Reason: "path purge requires host and path"}, nil
+		}
+		key := edgeCachePurgeKey(p.Host, p.Path)
+		path := nginxCacheFilePath(root, key)
+		if err := os.Remove(path); err != nil {
+			if os.IsNotExist(err) {
+				return EdgeCachePurgeResult{Key: key, Removed: 0}, nil
+			}
+			return EdgeCachePurgeResult{}, err
+		}
+		return EdgeCachePurgeResult{Key: key, Removed: 1}, nil
+	case "host", "prefix", "route":
+		return EdgeCachePurgeResult{Unsupported: true, Reason: "scope requires cache index support"}, nil
+	default:
+		return EdgeCachePurgeResult{}, fmt.Errorf("unsupported cache purge scope: %s", p.Scope)
+	}
+}
+
+func nginxCacheFilePath(root, key string) string {
+	key = strings.ToLower(strings.TrimSpace(key))
+	if len(key) < 3 {
+		return filepath.Join(root, key)
+	}
+	return filepath.Join(root, key[len(key)-1:], key[len(key)-3:len(key)-1], key)
+}
+
+func safeNginxCacheRoot(root string) (string, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = nginxCacheDefaultDir
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	abs = filepath.Clean(abs)
+	parts := strings.Split(strings.Trim(abs, string(os.PathSeparator)), string(os.PathSeparator))
+	if abs == string(os.PathSeparator) || abs == "." || len(parts) < 2 {
+		return "", fmt.Errorf("refusing unsafe cache root: %s", abs)
+	}
+	return abs, nil
+}
+
+func removeCacheRootChildren(root string) (int, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	removed := 0
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		removed += countFiles(path)
+		if err := os.RemoveAll(path); err != nil {
+			return removed, err
+		}
+	}
+	return removed, nil
+}
+
+func countFiles(root string) int {
+	count := 0
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			count++
+		}
+		return nil
+	})
+	return count
+}
+
+func (h *ServerHandlers) emitNginxCachePurgeResult(message string) {
+	if h == nil {
+		return
+	}
+	var cfg map[string]any
+	if h.cfg != nil && h.cfg.EdgeDesired != nil {
+		cfg = h.cfg.EdgeDesired.NginxCacheConfig
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	payload := collectNginxCache(ctx, cfg)
+	payload["last_purge_result"] = message
+	h.tryEmitNginxCache(payload)
 }
 
 type nginxCacheRoute struct {

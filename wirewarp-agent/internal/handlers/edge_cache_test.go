@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -15,6 +17,61 @@ func TestEdgeCachePurgeKeyIsDeterministic(t *testing.T) {
 	}
 	if a == c {
 		t.Fatalf("different paths should produce different keys")
+	}
+}
+
+func TestEdgeCachePurgePathDeletesDeterministicFile(t *testing.T) {
+	root := t.TempDir()
+	key := edgeCachePurgeKey("app.example.com", "/assets/app.css")
+	cacheFile := nginxCacheFilePath(root, key)
+	if err := os.MkdirAll(filepath.Dir(cacheFile), 0755); err != nil {
+		t.Fatalf("mkdir cache path: %v", err)
+	}
+	if err := os.WriteFile(cacheFile, []byte("cached"), 0644); err != nil {
+		t.Fatalf("write cache file: %v", err)
+	}
+
+	result, err := purgeNginxCacheFiles(root, EdgeCachePurgeParams{
+		Scope: "path",
+		Host:  "app.example.com",
+		Path:  "/assets/app.css",
+	})
+	if err != nil {
+		t.Fatalf("purge path: %v", err)
+	}
+	if result.Removed != 1 {
+		t.Fatalf("removed count: want 1, got %d", result.Removed)
+	}
+	if _, err := os.Stat(cacheFile); !os.IsNotExist(err) {
+		t.Fatalf("cache file should be deleted, stat err=%v", err)
+	}
+}
+
+func TestEdgeCachePurgeNodeClearsManagedCacheRoot(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a/aa/one", "b/bb/two"} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte("cached"), 0644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	result, err := purgeNginxCacheFiles(root, EdgeCachePurgeParams{Scope: "node"})
+	if err != nil {
+		t.Fatalf("purge node: %v", err)
+	}
+	if result.Removed != 2 {
+		t.Fatalf("removed count: want 2, got %d", result.Removed)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read cache root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("cache root should be empty, got %d entries", len(entries))
 	}
 }
 
