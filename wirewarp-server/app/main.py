@@ -383,17 +383,23 @@ async def agent_websocket(websocket: WebSocket):
         logger.exception("WebSocket error for agent %s: %s", agent_id, exc)
     finally:
         if agent_id:
-            manager.disconnect(agent_id)
-            logger.info("Agent %s disconnected", agent_id)
-            async with SessionLocal() as db:
-                from sqlalchemy import select
-                from app.models.agent import Agent
-                result = await db.execute(select(Agent).where(Agent.id == agent_id))
-                agent = result.scalar_one_or_none()
-                if agent:
-                    agent.status = "disconnected"
-                    await db.commit()
-                    emit_agent_changed()
+            disconnected_current = manager.disconnect(agent_id, websocket)
+            if not disconnected_current and manager.is_connected(agent_id):
+                logger.info(
+                    "Stale WebSocket for agent %s closed; current connection remains active",
+                    agent_id,
+                )
+            else:
+                logger.info("Agent %s disconnected", agent_id)
+                async with SessionLocal() as db:
+                    from sqlalchemy import select
+                    from app.models.agent import Agent
+                    result = await db.execute(select(Agent).where(Agent.id == agent_id))
+                    agent = result.scalar_one_or_none()
+                    if agent:
+                        agent.status = "disconnected"
+                        await db.commit()
+                        emit_agent_changed()
 
 
 @app.websocket("/ws/dashboard")

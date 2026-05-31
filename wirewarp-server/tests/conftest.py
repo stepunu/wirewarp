@@ -163,8 +163,10 @@ class FakeManager:
     async def connect(self, agent_id: str, ws: Any) -> None:  # pragma: no cover
         self.online.add(agent_id)
 
-    def disconnect(self, agent_id: str) -> None:  # pragma: no cover
+    def disconnect(self, agent_id: str, ws: Any | None = None) -> bool:  # pragma: no cover
+        was_online = agent_id in self.online
         self.online.discard(agent_id)
+        return was_online
 
     async def send(self, agent_id: str, message: dict[str, Any]) -> bool:
         self.sent.append({"agent_id": agent_id, "message": message})

@@ -15,12 +15,23 @@ class ConnectionManager:
     async def connect(self, agent_id: str, websocket: WebSocket) -> None:
         self._connections[agent_id] = websocket
 
-    def disconnect(self, agent_id: str) -> None:
-        self._connections.pop(agent_id, None)
+    def disconnect(self, agent_id: str, websocket: WebSocket | None = None) -> bool:
+        """Drop an agent connection.
 
-    def _disconnect_if_current(self, agent_id: str, websocket: WebSocket) -> None:
+        When websocket is provided, only remove the mapping if that exact
+        socket is still current. Agent reconnects can overlap with stale
+        socket cleanup, and the stale cleanup must not discard the fresh
+        connection.
+        """
+        if websocket is None:
+            return self._connections.pop(agent_id, None) is not None
         if self._connections.get(agent_id) is websocket:
             self._connections.pop(agent_id, None)
+            return True
+        return False
+
+    def _disconnect_if_current(self, agent_id: str, websocket: WebSocket) -> None:
+        self.disconnect(agent_id, websocket)
 
     async def send(self, agent_id: str, message: dict[str, Any]) -> bool:
         """Send a message to a specific agent. Returns False if agent not connected."""
