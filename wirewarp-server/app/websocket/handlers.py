@@ -9,6 +9,7 @@ from sqlalchemy import delete, select, func
 from app.models.agent import Agent
 from app.models.command_log import CommandLog
 from app.models.crowdsec_snapshot import CrowdSecSnapshot
+from app.models.edge_access_event import EdgeAccessEvent
 from app.models.gateway_lan_client import GatewayLanClient
 from app.models.heal_event import AgentHealEvent
 from app.models.metric import Metric
@@ -26,6 +27,7 @@ from app.realtime.events import (
     emit_audit_changed,
     emit_crowdsec_changed,
     emit_edge_changed,
+    emit_edge_access,
     emit_heal_event_changed,
     emit_lan_client_changed,
     emit_security_changed,
@@ -689,6 +691,80 @@ async def handle_security_events(agent_id: str, msg: dict, db: AsyncSession) -> 
     emit_security_changed()
 
 
+async def handle_edge_access_events(agent_id: str, msg: dict, db: AsyncSession) -> None:
+    events_raw = msg.get("events")
+    if not isinstance(events_raw, list) or not events_raw:
+        return
+
+    now = datetime.now(timezone.utc)
+    for entry in events_raw:
+        if not isinstance(entry, dict):
+            continue
+        occurred_raw = entry.get("occurred_at")
+        try:
+            occurred_at = datetime.fromisoformat(occurred_raw) if occurred_raw else now
+        except (TypeError, ValueError):
+            occurred_at = now
+        route_id = entry.get("route_id")
+        try:
+            route_uuid = uuid.UUID(str(route_id)) if route_id else None
+        except (TypeError, ValueError):
+            route_uuid = None
+        status_code = _int_or_none(entry.get("status_code"))
+        db.add(
+            EdgeAccessEvent(
+                agent_id=agent_id,
+                route_id=route_uuid,
+                request_id=entry.get("request_id") or None,
+                occurred_at=occurred_at,
+                host=entry.get("host") or None,
+                path=entry.get("path") or None,
+                method=entry.get("method") or None,
+                status_code=status_code,
+                client_ip=entry.get("client_ip") or None,
+                client_country=entry.get("client_country") or None,
+                client_asn=entry.get("client_asn") or None,
+                user_agent=entry.get("user_agent") or None,
+                referer=entry.get("referer") or None,
+                action=str(entry.get("action") or _action_from_status(status_code)),
+                source=str(entry.get("source") or "traefik"),
+                latency_ms=_int_or_none(entry.get("latency_ms")),
+                cache_status=entry.get("cache_status") or "not_configured",
+                upstream_url=entry.get("upstream_url") or None,
+                upstream_status=_int_or_none(entry.get("upstream_status")),
+                bytes_in=_int_or_none(entry.get("bytes_in")),
+                bytes_out=_int_or_none(entry.get("bytes_out")),
+                matched_rule=entry.get("matched_rule") or None,
+                sampled=bool(entry.get("sampled") or False),
+            )
+        )
+
+    agent = await db.scalar(select(Agent).where(Agent.id == agent_id))
+    if agent:
+        agent.last_seen = now
+    await db.commit()
+    emit_edge_access()
+
+
+def _int_or_none(value) -> int | None:  # noqa: ANN001
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _action_from_status(status_code: int | None) -> str:
+    if status_code == 429:
+        return "rate_limit"
+    if status_code in {401, 403}:
+        return "block"
+    if status_code is not None and status_code >= 500:
+        return "upstream_error"
+    return "pass"
+
+
 async def dispatch(agent_id: str, msg: dict, db: AsyncSession) -> None:
     msg_type = msg.get("type")
     if msg_type == "heartbeat":
@@ -705,4 +781,6 @@ async def dispatch(agent_id: str, msg: dict, db: AsyncSession) -> None:
         await handle_traefik_status(agent_id, msg, db)
     elif msg_type == "security_events":
         await handle_security_events(agent_id, msg, db)
+    elif msg_type == "edge_access_events":
+        await handle_edge_access_events(agent_id, msg, db)
     # Unknown message types are silently ignored

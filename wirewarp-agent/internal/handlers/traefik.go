@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -669,28 +670,41 @@ func (h *ServerHandlers) emitTraefikAccessEvents(ctx context.Context) {
 		log.Printf("[security-events] traefik access log: %v", err)
 		return
 	}
-	events, cursor := parseTraefikAccessSecurityEvents(raw)
+	accessEvents, cursor := parseTraefikJSONAccessEvents(raw)
+	securityEvents, legacyCursor := parseTraefikAccessSecurityEvents(raw)
+	if legacyCursor != "" {
+		cursor = legacyCursor
+	}
 	emitOK := false
-	if len(events) == 0 {
+	if len(accessEvents) == 0 && len(securityEvents) == 0 {
 		emitOK = true
 	} else {
 		p := h.emit.Load()
 		if p != nil {
 			if fn := *p; fn != nil {
-				if err := fn("security_events", map[string]any{"events": events}); err != nil {
-					log.Printf("[security-events] emit traefik access events: %v", err)
-				} else {
-					emitOK = true
+				emitOK = true
+				if len(accessEvents) > 0 {
+					if err := fn("edge_access_events", map[string]any{"events": accessEvents}); err != nil {
+						log.Printf("[edge-access] emit traefik access events: %v", err)
+						emitOK = false
+					}
+				}
+				if len(securityEvents) > 0 {
+					if err := fn("security_events", map[string]any{"events": securityEvents}); err != nil {
+						log.Printf("[security-events] emit traefik security events: %v", err)
+						emitOK = false
+					}
 				}
 			}
 		}
 	}
-	if cursor != "" && shouldAdvanceTraefikEventsCursor(len(events), emitOK) {
+	totalEvents := len(accessEvents) + len(securityEvents)
+	if cursor != "" && shouldAdvanceTraefikEventsCursor(totalEvents, emitOK) {
 		if err := writeTraefikEventsCursor(cursor); err != nil {
 			log.Printf("[security-events] write traefik cursor: %v", err)
 		}
 	}
-	if len(events) == 0 {
+	if totalEvents == 0 {
 		return
 	}
 }
@@ -726,6 +740,130 @@ func writeTraefikEventsCursor(cursor string) error {
 		return err
 	}
 	return os.WriteFile(traefikEventsCursorPath, []byte(cursor+"\n"), 0600)
+}
+
+func parseTraefikJSONAccessEvents(raw string) ([]map[string]any, string) {
+	var cursor string
+	events := make([]map[string]any, 0)
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "-- cursor:") {
+			cursor = strings.TrimSpace(strings.TrimPrefix(line, "-- cursor:"))
+			continue
+		}
+		evt, ok := parseTraefikJSONAccessEvent(line)
+		if ok {
+			events = append(events, evt)
+		}
+	}
+	return events, cursor
+}
+
+func parseTraefikJSONAccessEvent(line string) (map[string]any, bool) {
+	var row map[string]any
+	if err := json.Unmarshal([]byte(line), &row); err != nil {
+		return nil, false
+	}
+	host := stringField(row, "RequestHost")
+	path := stringField(row, "RequestPath")
+	method := stringField(row, "RequestMethod")
+	if host == "" && path == "" && method == "" {
+		return nil, false
+	}
+	status := intField(row, "DownstreamStatus")
+	originStatus := intField(row, "OriginStatus")
+	clientIP := clientIPFromAddr(stringField(row, "ClientAddr"))
+	cacheStatus := strings.ToLower(firstStringField(row,
+		"downstream_X-WireWarp-Cache-Status",
+		"Downstream_X-WireWarp-Cache-Status",
+		"downstream_X-Cache-Status",
+	))
+	if cacheStatus == "" {
+		cacheStatus = "not_configured"
+	}
+	durationNs := intField(row, "Duration")
+	latencyMs := 0
+	if durationNs > 0 {
+		latencyMs = durationNs / int(time.Millisecond)
+	}
+	out := map[string]any{
+		"request_id":      firstStringField(row, "request_X-Request-Id", "RequestID", "RequestId"),
+		"host":            host,
+		"path":            path,
+		"method":          method,
+		"status_code":     status,
+		"client_ip":       clientIP,
+		"user_agent":      stringField(row, "request_User-Agent"),
+		"referer":         stringField(row, "request_Referer"),
+		"action":          accessActionFromStatus(status),
+		"source":          "traefik",
+		"latency_ms":      latencyMs,
+		"cache_status":    cacheStatus,
+		"upstream_status": originStatus,
+		"bytes_out":       intField(row, "DownstreamContentSize"),
+		"matched_rule":    firstStringField(row, "RouterName", "router_name"),
+	}
+	if service := firstStringField(row, "ServiceURL", "ServiceAddr", "ServiceName"); service != "" {
+		out["upstream_url"] = service
+	}
+	return out, true
+}
+
+func stringField(row map[string]any, key string) string {
+	v, _ := row[key].(string)
+	return v
+}
+
+func firstStringField(row map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v := stringField(row, key); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func intField(row map[string]any, key string) int {
+	switch v := row[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		i, _ := v.Int64()
+		return int(i)
+	default:
+		return 0
+	}
+}
+
+func clientIPFromAddr(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err == nil {
+		return host
+	}
+	return strings.Trim(addr, "[]")
+}
+
+func accessActionFromStatus(status int) string {
+	switch {
+	case status == 429:
+		return "rate_limit"
+	case status == 401 || status == 403:
+		return "block"
+	case status >= 500:
+		return "upstream_error"
+	default:
+		return "pass"
+	}
 }
 
 func parseTraefikAccessSecurityEvents(raw string) ([]map[string]any, string) {

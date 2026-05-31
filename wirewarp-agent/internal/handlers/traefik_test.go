@@ -88,6 +88,35 @@ func TestParseTraefikRateLimitAccessEvents(t *testing.T) {
 	}
 }
 
+func TestParseTraefikJSONAccessEvents(t *testing.T) {
+	raw := strings.Join([]string{
+		`{"ClientAddr":"203.0.113.20:53000","RequestHost":"app.example.com","RequestMethod":"GET","RequestPath":"/assets/app.css","DownstreamStatus":200,"OriginStatus":200,"RouterName":"app-example-com@file","ServiceName":"svc-app-example-com@file","Duration":12000000,"DownstreamContentSize":1024,"request_X-Request-Id":"req-1","downstream_X-WireWarp-Cache-Status":"HIT"}`,
+		`-- cursor: s=json-cursor`,
+	}, "\n")
+
+	events, cursor := parseTraefikJSONAccessEvents(raw)
+
+	if cursor != "s=json-cursor" {
+		t.Fatalf("cursor: got %q", cursor)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events: got %d", len(events))
+	}
+	evt := events[0]
+	if evt["host"] != "app.example.com" || evt["path"] != "/assets/app.css" {
+		t.Fatalf("unexpected request identity: %#v", evt)
+	}
+	if evt["client_ip"] != "203.0.113.20" || evt["cache_status"] != "hit" {
+		t.Fatalf("unexpected client/cache fields: %#v", evt)
+	}
+	if evt["action"] != "pass" || evt["status_code"] != 200 {
+		t.Fatalf("unexpected action/status: %#v", evt)
+	}
+	if _, ok := evt["body"]; ok {
+		t.Fatalf("request body must never be emitted: %#v", evt)
+	}
+}
+
 func TestShouldAdvanceTraefikCursorWaitsForSuccessfulEventEmit(t *testing.T) {
 	if !shouldAdvanceTraefikEventsCursor(0, false) {
 		t.Fatal("empty reads should advance the cursor")

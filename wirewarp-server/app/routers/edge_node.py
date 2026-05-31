@@ -34,6 +34,7 @@ from app.services.edge_ops import (
     edge_feature_disabled_detail,
     edge_unavailable_reason,
 )
+from app.services.agent_commands import send_command
 from app.services.edge_runtime import desired_state_snapshot, rendered_edge_config, stable_json
 
 router = APIRouter()
@@ -179,7 +180,13 @@ async def purge_node_cache(
     snapshot = await db.scalar(select(EdgeCacheSnapshot).where(EdgeCacheSnapshot.agent_id == agent_id))
     if not (snapshot and snapshot.installed and snapshot.running and snapshot.phase == "healthy"):
         raise HTTPException(status_code=409, detail={"code": "edge_cache_unavailable", "reason": "purge_requires_healthy_backend"})
-    return {"status": "queued", "scope": body.scope}
+    sent, command_id = await send_command(
+        agent_id=str(agent_id),
+        command_type="edge_cache_purge",
+        params=body.model_dump(exclude_none=True),
+        db=db,
+    )
+    return {"status": "queued", "scope": body.scope, "sent": sent, "command_id": command_id}
 
 
 @router.post("/{agent_id}/edge/cache/install", status_code=202)

@@ -33,6 +33,7 @@ VALID_COMMAND_TYPES = {
     "crowdsec_appsec_enable",
     "edge_desired_state",
     "edge_disable",
+    "edge_cache_purge",
 }
 
 

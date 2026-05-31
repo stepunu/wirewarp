@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from app.models.edge_access_event import EdgeAccessEvent
+from app.websocket.handlers import dispatch
 
 
 pytestmark = pytest.mark.asyncio
@@ -79,6 +80,39 @@ async def test_access_events_filter_by_node_host_status_and_action(client, db, f
     assert len(body["items"]) == 1
     assert body["items"][0]["path"] == "/.env"
     assert body["items"][0]["action"] == "block"
+
+
+async def test_websocket_edge_access_events_persist_and_query(client, db, factories):
+    server, route = await _server_route(client, db, factories)
+
+    await dispatch(
+        str(server.agent_id),
+        {
+            "type": "edge_access_events",
+            "events": [
+                {
+                    "route_id": route["id"],
+                    "request_id": "req-json",
+                    "occurred_at": datetime.now(timezone.utc).isoformat(),
+                    "host": "app.example.com",
+                    "path": "/api",
+                    "method": "POST",
+                    "status_code": 201,
+                    "client_ip": "203.0.113.20",
+                    "action": "pass",
+                    "source": "traefik",
+                    "latency_ms": 42,
+                    "cache_status": "bypass",
+                }
+            ],
+        },
+        db,
+    )
+
+    resp = await client.get(f"/api/nodes/{server.agent_id}/edge/access-events?method=POST")
+    assert resp.status_code == 200
+    assert resp.json()["items"][0]["request_id"] == "req-json"
+    assert resp.json()["items"][0]["cache_status"] == "bypass"
 
 
 async def test_cache_headers_only_is_allowed_but_real_purge_requires_backend(client, db, factories):
