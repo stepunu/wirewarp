@@ -12,6 +12,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -269,12 +270,24 @@ func (c *Client) connect(ctx context.Context) error {
 	defer pinger.Stop()
 
 	recvErr := make(chan error, 1)
+	pongCh := make(chan string, 4)
 	go func() {
 		for {
 			var raw json.RawMessage
 			if err := wsjson.Read(ctx, conn, &raw); err != nil {
 				recvErr <- err
 				return
+			}
+			var envelope struct {
+				Type  string `json:"type"`
+				Nonce string `json:"nonce"`
+			}
+			if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Type == "agent_pong" {
+				select {
+				case pongCh <- envelope.Nonce:
+				default:
+				}
+				continue
 			}
 			var cmd executor.Command
 			if err := json.Unmarshal(raw, &cmd); err != nil {
@@ -311,7 +324,7 @@ func (c *Client) connect(ctx context.Context) error {
 				lastLAN = lan
 			}
 		case <-pinger.C:
-			if err := pingControlConnection(ctx, conn, pingTimeout); err != nil {
+			if err := pingControlConnection(ctx, send, pongCh, pingTimeout); err != nil {
 				return err
 			}
 		}
@@ -322,10 +335,30 @@ func configureConnection(conn *websocket.Conn) {
 	conn.SetReadLimit(maxControlFrameBytes)
 }
 
-func pingControlConnection(ctx context.Context, conn *websocket.Conn, timeout time.Duration) error {
+var pingCounter atomic.Uint64
+
+func pingControlConnection(
+	ctx context.Context,
+	send func(any) error,
+	pongs <-chan string,
+	timeout time.Duration,
+) error {
 	pingCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return conn.Ping(pingCtx)
+	nonce := fmt.Sprintf("%d-%d", time.Now().UnixNano(), pingCounter.Add(1))
+	if err := send(map[string]string{"type": "agent_ping", "nonce": nonce}); err != nil {
+		return err
+	}
+	for {
+		select {
+		case <-pingCtx.Done():
+			return fmt.Errorf("control ping timeout: %w", pingCtx.Err())
+		case pong := <-pongs:
+			if pong == nonce {
+				return nil
+			}
+		}
+	}
 }
 
 // extractIPs reads `public_ips` out of a heartbeat for diff comparison.

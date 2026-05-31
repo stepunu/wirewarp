@@ -2,7 +2,7 @@ package websocket
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -61,44 +61,47 @@ func TestConfigureConnectionAllowsLargeControlFrames(t *testing.T) {
 	}
 }
 
-func TestPingControlConnectionSucceedsWhenPeerReads(t *testing.T) {
+func TestPingControlConnectionSendsPingAndAcceptsMatchingPong(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	serverErr := make(chan error, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := nwebsocket.Accept(w, r, nil)
-		if err != nil {
-			serverErr <- err
-			return
+	pongs := make(chan string, 1)
+	var sent map[string]string
+	send := func(v any) error {
+		var ok bool
+		sent, ok = v.(map[string]string)
+		if !ok {
+			t.Fatalf("unexpected ping payload type: %T", v)
 		}
-		defer conn.Close(nwebsocket.StatusNormalClosure, "")
-		var raw json.RawMessage
-		err = wsjson.Read(ctx, conn, &raw)
-		if err != nil && ctx.Err() == nil && nwebsocket.CloseStatus(err) != nwebsocket.StatusNormalClosure {
-			serverErr <- err
-		}
-	}))
-	defer server.Close()
-
-	url := "ws" + strings.TrimPrefix(server.URL, "http")
-	conn, _, err := nwebsocket.Dial(ctx, url, nil)
-	if err != nil {
-		t.Fatalf("dial websocket: %v", err)
+		pongs <- sent["nonce"]
+		return nil
 	}
-	defer conn.CloseNow()
-	clientReadErr := make(chan error, 1)
-	go drainWebSocket(ctx, conn, clientReadErr)
 
-	if err := pingControlConnection(ctx, conn, time.Second); err != nil {
+	if err := pingControlConnection(ctx, send, pongs, time.Second); err != nil {
 		t.Fatalf("ping control connection: %v", err)
 	}
-	_ = conn.Close(nwebsocket.StatusNormalClosure, "")
+	if sent["type"] != "agent_ping" {
+		t.Fatalf("unexpected ping type: %q", sent["type"])
+	}
+	if sent["nonce"] == "" {
+		t.Fatal("expected non-empty ping nonce")
+	}
+}
 
-	select {
-	case err := <-serverErr:
-		t.Fatalf("server read failed: %v", err)
-	default:
+func TestPingControlConnectionIgnoresStalePong(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	pongs := make(chan string, 2)
+	pongs <- "stale"
+	send := func(v any) error {
+		sent := v.(map[string]string)
+		pongs <- sent["nonce"]
+		return nil
+	}
+
+	if err := pingControlConnection(ctx, send, pongs, time.Second); err != nil {
+		t.Fatalf("ping control connection: %v", err)
 	}
 }
 
@@ -106,43 +109,20 @@ func TestPingControlConnectionFailsWhenPeerDoesNotPong(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	serverCtx, stopServer := context.WithCancel(context.Background())
-	accepted := make(chan *nwebsocket.Conn, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := nwebsocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		accepted <- conn
-		<-serverCtx.Done()
-		conn.CloseNow()
-	}))
+	send := func(v any) error { return nil }
 
-	url := "ws" + strings.TrimPrefix(server.URL, "http")
-	conn, _, err := nwebsocket.Dial(ctx, url, nil)
-	if err != nil {
-		t.Fatalf("dial websocket: %v", err)
+	if err := pingControlConnection(ctx, send, make(chan string), 20*time.Millisecond); err == nil {
+		t.Fatal("expected ping timeout without application pong")
 	}
-	defer conn.CloseNow()
-	clientReadErr := make(chan error, 1)
-	go drainWebSocket(ctx, conn, clientReadErr)
-	<-accepted
-
-	if err := pingControlConnection(ctx, conn, 50*time.Millisecond); err == nil {
-		t.Fatal("expected ping timeout when peer does not read pong")
-	}
-	stopServer()
-	server.Close()
 }
 
-func drainWebSocket(ctx context.Context, conn *nwebsocket.Conn, errs chan<- error) {
-	for {
-		_, _, err := conn.Read(ctx)
-		if err != nil {
-			if ctx.Err() == nil && nwebsocket.CloseStatus(err) != nwebsocket.StatusNormalClosure {
-				errs <- err
-			}
-			return
-		}
+func TestPingControlConnectionReturnsSendError(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	want := errors.New("write failed")
+	send := func(v any) error { return want }
+
+	if err := pingControlConnection(ctx, send, make(chan string), time.Second); !errors.Is(err, want) {
+		t.Fatalf("expected send error %v, got %v", want, err)
 	}
 }

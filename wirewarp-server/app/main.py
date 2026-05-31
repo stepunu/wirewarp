@@ -374,6 +374,11 @@ async def agent_websocket(websocket: WebSocket):
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            if msg.get("type") == "agent_ping":
+                await websocket.send_text(
+                    json.dumps({"type": "agent_pong", "nonce": msg.get("nonce", "")})
+                )
+                continue
             async with SessionLocal() as db:
                 await dispatch(agent_id, msg, db)
 

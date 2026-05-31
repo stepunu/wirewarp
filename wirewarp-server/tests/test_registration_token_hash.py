@@ -3,11 +3,14 @@ persists, agent registration verifies via hash."""
 from __future__ import annotations
 
 import json
+import uuid
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
 
+from app.auth import create_agent_token
+from app.models.agent import Agent
 from app.models.registration_token import RegistrationToken
 from app.services.secrets import hash_token
 
@@ -150,3 +153,53 @@ async def test_ws_register_rejects_unknown_token(client, fake_manager, session_m
     await main_module.agent_websocket(ws)
     assert received[0]["type"] == "error"
     assert "Invalid" in received[0]["message"] or "expired" in received[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_ws_agent_ping_gets_application_pong(db, fake_manager, session_maker):
+    from fastapi import WebSocketDisconnect
+    from app import main as main_module
+
+    main_module.SessionLocal = session_maker
+
+    agent = Agent(
+        id=uuid.uuid4(),
+        name="ping-agent",
+        type="server",
+        status="disconnected",
+    )
+    db.add(agent)
+    await db.commit()
+    token = create_agent_token(str(agent.id))
+
+    received: list[dict] = []
+    payloads = [
+        json.dumps({"type": "auth", "jwt": token}),
+        json.dumps({"type": "agent_ping", "nonce": "n-1"}),
+    ]
+
+    class FakeWS:
+        async def accept(self):
+            return None
+
+        async def receive_text(self):
+            if not payloads:
+                raise WebSocketDisconnect(code=1000)
+            return payloads.pop(0)
+
+        async def send_text(self, msg):
+            received.append(json.loads(msg))
+
+        async def close(self, code: int = 1000):
+            pass
+
+        @property
+        def query_params(self):
+            return {}
+
+    with patch.object(main_module, "send_command") as cmd:
+        cmd.return_value = (False, "noop")
+        await main_module.agent_websocket(FakeWS())
+
+    assert {"type": "authenticated"} in received
+    assert {"type": "agent_pong", "nonce": "n-1"} in received
