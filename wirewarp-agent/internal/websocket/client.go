@@ -35,8 +35,9 @@ const (
 	// up on the dashboard within a tick, cheap enough that scraping
 	// /proc/net/nf_conntrack at this rate is unmeasurable on a quiet box.
 	watcherInterval = 2 * time.Second
-	pingInterval    = 15 * time.Second
-	pingTimeout     = 10 * time.Second
+	pingInitialWait = 90 * time.Second
+	pingInterval    = 60 * time.Second
+	pingTimeout     = 30 * time.Second
 	maxBackoff      = 60 * time.Second
 	initialBackoff  = 1 * time.Second
 	// Edge desired-state frames can include full rendered Traefik/Nginx config
@@ -266,7 +267,7 @@ func (c *Client) connect(ctx context.Context) error {
 	defer ticker.Stop()
 	watcher := time.NewTicker(watcherInterval)
 	defer watcher.Stop()
-	pinger := time.NewTicker(pingInterval)
+	pinger := time.NewTimer(pingInitialWait)
 	defer pinger.Stop()
 
 	recvErr := make(chan error, 1)
@@ -327,6 +328,7 @@ func (c *Client) connect(ctx context.Context) error {
 			if err := pingControlConnection(ctx, send, pongCh, pingTimeout); err != nil {
 				return err
 			}
+			pinger.Reset(pingInterval)
 		}
 	}
 }

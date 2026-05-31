@@ -138,7 +138,13 @@ export function EditProtectionDialog({
   const [rateLimitBurst, setRateLimitBurst] = useState<string>(cfg?.rate_limit_burst ? String(cfg.rate_limit_burst) : '')
   const [antibot, setAntibot] = useState<boolean>(cfg?.antibot ?? false)
   const [authMode, setAuthMode] = useState<AuthMode>(cfg?.auth_mode ?? 'none')
+  const [ipAllow, setIpAllow] = useState<string>(cfg?.ip_allow?.join(', ') ?? '')
+  const [ipDeny, setIpDeny] = useState<string>(cfg?.ip_deny?.join(', ') ?? '')
   const [geoBlock, setGeoBlock] = useState<string>(cfg?.geo_block?.join(', ') ?? '')
+  const listOrNull = (value: string) => {
+    const entries = value.split(',').map((s) => s.trim()).filter(Boolean)
+    return entries.length ? entries : null
+  }
 
   const update = useMutation({
     mutationFn: () =>
@@ -148,7 +154,9 @@ export function EditProtectionDialog({
         rate_limit_burst: rateLimitBurst ? Number(rateLimitBurst) : null,
         antibot,
         auth_mode: authMode,
-        geo_block: geoBlock ? geoBlock.split(',').map((s) => s.trim()).filter(Boolean) : null,
+        ip_allow: listOrNull(ipAllow),
+        ip_deny: listOrNull(ipDeny),
+        geo_block: listOrNull(geoBlock),
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sites'] })
@@ -215,6 +223,22 @@ export function EditProtectionDialog({
             <option value="basic">Basic auth</option>
             <option value="forward">Forward auth</option>
           </Select>
+        </Field>
+        <Field label="IP allow" hint="Comma-separated CIDRs. Empty allows all clients unless deny rules match.">
+          <Input
+            value={ipAllow}
+            onChange={(e) => setIpAllow(e.target.value)}
+            placeholder="203.0.113.10/32, 198.51.100.0/24"
+            mono
+          />
+        </Field>
+        <Field label="IP deny" hint="Comma-separated CIDRs blocked before the request reaches the origin.">
+          <Input
+            value={ipDeny}
+            onChange={(e) => setIpDeny(e.target.value)}
+            placeholder="0.0.0.0/0"
+            mono
+          />
         </Field>
         <Field label="Geo-block" hint="Comma-separated ISO 3166-1 alpha-2 country codes to block">
           <Input
