@@ -286,6 +286,20 @@ export interface SystemSettingsUpdate {
 }
 
 export type NodeRole = 'server' | 'gateway' | 'client'
+export type EdgeMode = 'tcp_udp_only' | 'security_edge'
+export type EdgeState = 'enabled' | 'disabled'
+export type EdgeInstallPhase = 'disabled' | 'pending' | 'healthy' | 'degraded' | 'unknown'
+
+export interface EdgeComponent {
+  component: string
+  desired: 'enabled' | 'disabled' | string
+  installed: boolean
+  running: boolean
+  phase: 'healthy' | 'degraded' | 'pending' | 'disabled' | 'unknown' | string
+  version: string | null
+  last_error: string | null
+  updated_at: string | null
+}
 
 export interface Node {
   agent_id: string
@@ -299,7 +313,11 @@ export interface Node {
   tunnel_server_id: string | null
   tunnel_client_id: string | null
   is_gateway: boolean
-  edge_phase: 'healthy' | 'degraded' | 'pending' | 'unknown' | null
+  edge_phase: 'healthy' | 'degraded' | 'pending' | 'disabled' | 'unknown' | null
+  edge_mode: EdgeMode | null
+  edge_state: EdgeState | null
+  edge_install_phase: EdgeInstallPhase | null
+  edge_components: Record<string, EdgeComponent>
 }
 
 export type VpnProtocol = 'tcp' | 'udp' | 'icmp' | 'any'
@@ -387,10 +405,14 @@ export type AuthMode = 'none' | 'basic' | 'forward'
 export type TlsSource = 'letsencrypt' | 'selfsigned' | 'none'
 export type ServiceKind = 'raw' | 'http'
 export type SecurityEventSource = 'crowdsec' | 'appsec' | 'traefik'
+export type EdgePolicy = Record<string, unknown>
 
 export interface EdgeRouteConfig {
   id: string
   port_forward_id: string
+  profile_id?: string | null
+  priority?: number
+  policy?: EdgePolicy
   waf_mode: WafMode
   rate_limit_rps: number | null
   rate_limit_burst: number | null
@@ -486,6 +508,231 @@ export interface SiteUpdate {
   upstream_insecure_skip_verify?: boolean
 }
 
+export interface NodeEdgeCapabilities {
+  agent_id: string
+  mode: EdgeMode
+  state: EdgeState
+  install_phase: EdgeInstallPhase
+  last_error: string | null
+  unavailable_reason: string | null
+  components: Record<string, EdgeComponent>
+}
+
+export interface NodeEdgeActionResult {
+  sent: boolean
+  command_id: string | null
+  edge: NodeEdgeCapabilities
+}
+
+export interface EdgeProfile {
+  id: string
+  name: string
+  slug: string
+  description: string | null
+  scope: string
+  agent_id: string | null
+  policy: EdgePolicy
+  created_at: string
+  updated_at: string
+}
+
+export interface EdgeProfileUpsert {
+  name: string
+  slug?: string | null
+  description?: string | null
+  scope?: string
+  agent_id?: string | null
+  policy?: EdgePolicy
+}
+
+export interface EdgeNodePolicy {
+  agent_id: string
+  default_profile_id: string | null
+  client_ip_strategy: string
+  trusted_proxy_cidrs: string[]
+  cloudflare_mode: string
+  access_log_retention_hours: number
+  security_event_retention_days: number
+  policy: EdgePolicy
+  effective: EdgePolicy
+}
+
+export interface EdgeNodePolicyUpdate {
+  default_profile_id?: string | null
+  client_ip_strategy?: string | null
+  trusted_proxy_cidrs?: string[] | null
+  cloudflare_mode?: string | null
+  access_log_retention_hours?: number | null
+  security_event_retention_days?: number | null
+  policy?: EdgePolicy | null
+}
+
+export interface EdgeRoute {
+  id: string
+  node_id: string
+  server_id: string
+  attachment_id: string
+  domain: string | null
+  enabled: boolean
+  priority: number
+  profile_id: string | null
+  destination_ip: string
+  destination_port: number
+  description: string | null
+  policy: EdgePolicy
+  effective: EdgePolicy
+  created_at: string
+}
+
+export interface EdgeRouteUpsert {
+  attachment_id?: string | null
+  enabled?: boolean | null
+  priority?: number | null
+  profile_id?: string | null
+  profile?: string | null
+  destination_ip?: string | null
+  destination_port?: number | null
+  description?: string | null
+  policy?: EdgePolicy | null
+  upstream_scheme?: 'http' | 'https' | null
+  upstream_insecure_skip_verify?: boolean | null
+}
+
+export interface EdgeEffectivePolicy {
+  route_id: string
+  desired: EdgePolicy
+  effective: EdgePolicy
+  sources: Record<string, EdgePolicy>
+}
+
+export interface EdgePathRule {
+  id: string
+  route_id: string
+  name: string
+  match: EdgePolicy
+  priority: number
+  enabled: boolean
+  policy: EdgePolicy
+  effective: EdgePolicy
+  created_at: string
+  updated_at: string
+}
+
+export interface EdgePathRuleCreate {
+  name: string
+  match: EdgePolicy
+  priority?: number
+  enabled?: boolean
+  policy?: EdgePolicy
+}
+
+export interface EdgeAccessEvent {
+  id: number
+  agent_id: string
+  route_id: string | null
+  request_id: string | null
+  occurred_at: string
+  host: string | null
+  path: string | null
+  method: string | null
+  status_code: number | null
+  client_ip: string | null
+  client_country: string | null
+  client_asn: string | null
+  user_agent: string | null
+  referer: string | null
+  action: string
+  source: string
+  latency_ms: number | null
+  cache_status: string | null
+  upstream_url: string | null
+  upstream_status: number | null
+  bytes_in: number | null
+  bytes_out: number | null
+  matched_rule: string | null
+  sampled: boolean
+}
+
+export interface EdgeAccessEventList {
+  items: EdgeAccessEvent[]
+  next_cursor: number | null
+}
+
+export interface EdgeCacheState {
+  available: boolean
+  reason: string | null
+  backend: Record<string, unknown> | null
+  policy: EdgePolicy
+}
+
+export interface EdgeCachePatch {
+  mode: string
+  browser_ttl_seconds?: number | null
+  edge_ttl_seconds?: number | null
+  cache_status_header?: boolean | null
+}
+
+export interface EdgeCachePurgeRequest {
+  scope?: string
+  route_id?: string | null
+  host?: string | null
+  path?: string | null
+  prefix?: string | null
+}
+
+export interface EdgeFragment {
+  id: string
+  agent_id: string
+  route_id: string | null
+  name: string
+  fragment_type: string
+  content: EdgePolicy
+  enabled: boolean
+  validation_state: string
+  last_error: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface EdgeFragmentCreate {
+  name: string
+  fragment_type: string
+  content: EdgePolicy
+  route_id?: string | null
+  enabled?: boolean
+}
+
+export interface EdgeRenderedConfig {
+  desired_hash: string
+  static_hash: string | null
+  dynamic_hash: string | null
+  cache_hash: string | null
+  dynamic: EdgePolicy
+}
+
+export interface EdgeConfigVersion {
+  id: string
+  agent_id: string
+  desired_hash: string
+  rendered_static_hash: string | null
+  rendered_dynamic_hash: string | null
+  rendered_cache_hash: string | null
+  created_at: string
+  applied_at: string | null
+  agent_result: string | null
+}
+
+export interface EdgeDesiredStateResponse {
+  dry_run: boolean
+  changed: boolean
+  validation_errors: EdgePolicy[]
+  diff: string | null
+  profiles: EdgePolicy[]
+  routes: EdgePolicy[]
+  effective: EdgePolicy
+  reconcile_sent: boolean
+}
+
 export interface SecurityEvent {
   id: number
   agent_id: string
@@ -560,7 +807,13 @@ export interface TraefikStatus {
 
 export interface NodeEdge {
   agent_id: string
-  phase: 'healthy' | 'degraded' | 'pending' | 'unknown'
+  mode: EdgeMode
+  state: EdgeState
+  phase: 'healthy' | 'degraded' | 'pending' | 'disabled' | 'unknown'
+  install_phase: EdgeInstallPhase
+  last_error: string | null
+  unavailable_reason: string | null
+  components: Record<string, EdgeComponent>
   policy: ServerEdgePolicy
   crowdsec: CrowdSecStatus
   traefik: TraefikStatus

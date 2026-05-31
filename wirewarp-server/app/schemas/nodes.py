@@ -3,10 +3,21 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.schemas.crowdsec import CrowdSecSnapshotRead
 from app.schemas.security import ServerEdgePolicyRead, SiteRead, TraefikStatusRead
+
+
+class EdgeComponentRead(BaseModel):
+    component: str
+    desired: str = "disabled"
+    installed: bool = False
+    running: bool = False
+    phase: str = "disabled"
+    version: str | None = None
+    last_error: str | None = None
+    updated_at: datetime | None = None
 
 
 class NodeRead(BaseModel):
@@ -22,17 +33,10 @@ class NodeRead(BaseModel):
     tunnel_client_id: uuid.UUID | None = None
     is_gateway: bool = False
     edge_phase: str | None = None
-
-
-class EdgeComponentRead(BaseModel):
-    component: str
-    desired: str = "disabled"
-    installed: bool = False
-    running: bool = False
-    phase: str = "disabled"
-    version: str | None = None
-    last_error: str | None = None
-    updated_at: datetime | None = None
+    edge_mode: str | None = None
+    edge_state: str | None = None
+    edge_install_phase: str | None = None
+    edge_components: dict[str, EdgeComponentRead] = Field(default_factory=dict)
 
 
 class NodeEdgeCapabilitiesRead(BaseModel):

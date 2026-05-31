@@ -42,6 +42,13 @@ def test_static_config_pins_available_denyip_plugin_version() -> None:
     }
 
 
+def test_static_config_emits_json_access_logs_for_edge_feed() -> None:
+    cfg = build_traefik_static_config()
+
+    assert cfg["accessLog"]["format"] == "json"
+    assert cfg["accessLog"]["fields"]["headers"]["defaultMode"] == "drop"
+
+
 def test_dynamic_config_omits_empty_middlewares_section() -> None:
     assert _build_http_config({}, {}, {}) == {}
 

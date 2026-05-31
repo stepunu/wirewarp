@@ -141,7 +141,15 @@ def build_traefik_static_config(
     cfg: dict = {
         "global": {"checkNewVersion": False, "sendAnonymousUsage": False},
         "log": {"level": "INFO"},
-        "accessLog": {},
+        "accessLog": {
+            "format": "json",
+            "fields": {
+                "defaultMode": "keep",
+                "headers": {
+                    "defaultMode": "drop",
+                },
+            },
+        },
         "api": {"dashboard": False},
         "entryPoints": {
             "web": {

@@ -364,6 +364,7 @@ input, select, textarea { font: inherit; color: inherit; }
   color: var(--fg-2);
   font-size: var(--t-md);
   margin-top: 4px;
+  overflow-wrap: anywhere;
 }
 .page-actions { display: flex; gap: 8px; align-items: center; }
 
@@ -537,6 +538,8 @@ option, optgroup {
   border-bottom: 1px solid var(--border-soft);
   display: flex; align-items: center; justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
   font-size: var(--t-md);
   font-weight: 500;
 }
@@ -974,7 +977,14 @@ option, optgroup {
 .gridcols-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .gridcols-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
 .gridcols-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-.tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border-soft); margin-bottom: 16px; }
+.tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 16px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
 .tab {
   background: transparent;
   border: none;
@@ -984,6 +994,7 @@ option, optgroup {
   font-weight: 500;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
+  flex: 0 0 auto;
 }
 .tab.active { color: var(--fg-0); border-bottom-color: var(--accent); }
 .tab:hover { color: var(--fg-0); }
@@ -1253,6 +1264,11 @@ option, optgroup {
   /* Opt-in: tables in `.tbl-cards` (or default `.tbl`) become row-cards.
      Inner detail tables wrapped in `.tbl-hscroll` keep the table layout
      and scroll horizontally. */
+  .tbl:not(.tbl-keep),
+  .tbl:not(.tbl-keep) tbody {
+    display: block;
+    width: 100%;
+  }
   .tbl:not(.tbl-keep) thead { display: none; }
   .tbl:not(.tbl-keep) tbody tr {
     display: block;
@@ -1262,7 +1278,7 @@ option, optgroup {
   .tbl:not(.tbl-keep) tbody tr:last-child { border-bottom: none; }
   .tbl:not(.tbl-keep) tbody td {
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-start;
     align-items: center;
     gap: 12px;
     padding: 4px 0;
@@ -1436,4 +1452,3 @@ option, optgroup {
     border-radius: 0 0 2px 2px;
   }
 }
-

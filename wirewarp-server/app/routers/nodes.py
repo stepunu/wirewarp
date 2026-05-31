@@ -82,6 +82,11 @@ async def _node_read(agent: Agent, db: AsyncSession) -> NodeRead:
     client = await db.scalar(select(TunnelClient).where(TunnelClient.agent_id == agent.id))
     cs = await db.scalar(select(CrowdSecSnapshot).where(CrowdSecSnapshot.agent_id == agent.id))
     tk = await db.scalar(select(TraefikSnapshot).where(TraefikSnapshot.agent_id == agent.id))
+    edge_components = (
+        await _component_state_map(server, db, crowdsec=cs, traefik=tk)
+        if server is not None
+        else {}
+    )
     return NodeRead(
         agent_id=agent.id,
         name=agent.name,
@@ -95,6 +100,10 @@ async def _node_read(agent: Agent, db: AsyncSession) -> NodeRead:
         tunnel_client_id=client.id if client else None,
         is_gateway=bool(client and client.is_gateway),
         edge_phase=_node_edge_phase(server, cs, tk) if server else None,
+        edge_mode=server.edge_mode if server else None,
+        edge_state=server.edge_state if server else None,
+        edge_install_phase=server.edge_install_phase if server else None,
+        edge_components=edge_components,
     )
 
 

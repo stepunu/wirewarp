@@ -20,6 +20,29 @@ function roleIcon(role: NodeRole) {
   return <Ic.client s={14} />
 }
 
+function ComponentHealthBadges({ node }: { node: Node }) {
+  const components = node.edge_components ?? {}
+  const visible = ['traefik', 'crowdsec', 'appsec', 'nginx_cache']
+    .map((name) => components[name])
+    .filter((component): component is NonNullable<typeof component> => Boolean(component))
+
+  if (node.role !== 'server') return <span className="scheme">—</span>
+  if (visible.length === 0) return <span className="scheme">no edge components</span>
+
+  return (
+    <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
+      {visible.map((component) => (
+        <Badge
+          key={component.component}
+          tone={component.running ? 'ok' : component.desired === 'enabled' ? 'warn' : 'neutral'}
+        >
+          {component.component.replace('_', '-')}
+        </Badge>
+      ))}
+    </div>
+  )
+}
+
 export default function Nodes() {
   const qc = useQueryClient()
   const push = useToast()
@@ -176,7 +199,8 @@ export default function Nodes() {
               <th>Name</th>
               <th style={{ width: 110 }}>Role</th>
               <th>Host</th>
-              <th style={{ width: 120 }}>Edge</th>
+              <th style={{ width: 190 }}>Edge</th>
+              <th style={{ width: 260 }}>Components</th>
               <th style={{ width: 120 }}>Last seen</th>
               {canMutate && <th style={{ width: 100 }} />}
             </tr>
@@ -184,7 +208,7 @@ export default function Nodes() {
           <tbody>
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={canMutate ? 7 : 5}>
+                <td colSpan={canMutate ? 8 : 6}>
                   <div className="tbl-empty">
                     <h3>{q.isLoading ? 'Loading...' : 'No nodes'}</h3>
                   </div>
@@ -253,13 +277,22 @@ function NodeRow({
       </td>
       <td>
         {node.role === 'server' ? (
-          <Badge tone={node.edge_phase === 'healthy' ? 'ok' : node.edge_phase === 'degraded' ? 'warn' : 'neutral'}>
-            {node.edge_phase || 'pending'}
-          </Badge>
+          <div className="col" style={{ gap: 4 }}>
+            <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
+              <Badge tone={node.edge_mode === 'security_edge' ? 'accent' : 'neutral'}>
+                {node.edge_mode === 'security_edge' ? 'security edge' : 'tcp/udp only'}
+              </Badge>
+              <Badge tone={node.edge_state === 'enabled' ? 'ok' : 'neutral'}>
+                {node.edge_state || 'disabled'}
+              </Badge>
+            </div>
+            <span className="scheme">{node.edge_phase || node.edge_install_phase || 'pending'}</span>
+          </div>
         ) : (
           <span className="scheme">—</span>
         )}
       </td>
+      <td><ComponentHealthBadges node={node} /></td>
       <td className="mono" style={{ color: 'var(--fg-2)' }}>{relTime(node.last_seen)}</td>
       {canMutate && (
         <td>

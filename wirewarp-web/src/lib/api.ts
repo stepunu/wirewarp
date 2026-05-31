@@ -43,6 +43,15 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json()
 }
 
+function qs(params: Record<string, string | number | boolean | null | undefined>): string {
+  const q = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value != null && value !== '') q.set(key, String(value))
+  }
+  const s = q.toString()
+  return s ? `?${s}` : ''
+}
+
 // Auth
 export const auth = {
   login: (username: string, password: string) =>
@@ -108,9 +117,127 @@ export const nodes = {
   list: () => request<import('./types').Node[]>('/nodes'),
   get: (id: string) => request<import('./types').Node>(`/nodes/${id}`),
   edge: (id: string) => request<import('./types').NodeEdge>(`/nodes/${id}/edge`),
+  edgeCapabilities: (id: string) =>
+    request<import('./types').NodeEdgeCapabilities>(`/nodes/${id}/edge/capabilities`),
+  updateEdgeCapabilities: (
+    id: string,
+    data: { mode?: import('./types').EdgeMode; state?: import('./types').EdgeState; components?: Record<string, string> },
+  ) =>
+    request<import('./types').NodeEdgeCapabilities>(`/nodes/${id}/edge/capabilities`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  installEdge: (id: string) =>
+    request<import('./types').NodeEdgeActionResult>(`/nodes/${id}/edge/install`, { method: 'POST' }),
+  enableEdge: (id: string) =>
+    request<import('./types').NodeEdgeActionResult>(`/nodes/${id}/edge/enable`, { method: 'POST' }),
+  disableEdge: (id: string) =>
+    request<import('./types').NodeEdgeActionResult>(`/nodes/${id}/edge/disable`, { method: 'POST' }),
   reconcileEdge: (id: string) =>
     request<{ command_id: string; sent: boolean }>(`/nodes/${id}/edge/reconcile`, {
       method: 'POST',
+    }),
+  edgePolicy: (id: string) =>
+    request<import('./types').EdgeNodePolicy>(`/nodes/${id}/edge/policy`),
+  updateEdgePolicy: (id: string, data: import('./types').EdgeNodePolicyUpdate) =>
+    request<import('./types').EdgeNodePolicy>(`/nodes/${id}/edge/policy`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  edgeEffective: (id: string) =>
+    request<import('./types').EdgeNodePolicy>(`/nodes/${id}/edge/effective`),
+  edgeRoutes: (id: string) =>
+    request<import('./types').EdgeRoute[]>(`/nodes/${id}/edge/routes`),
+  createEdgeRoute: (id: string, data: import('./types').EdgeRouteUpsert) =>
+    request<import('./types').EdgeRoute>(`/nodes/${id}/edge/routes`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  upsertEdgeRouteByDomain: (id: string, domain: string, data: import('./types').EdgeRouteUpsert) =>
+    request<import('./types').EdgeRoute>(`/nodes/${id}/edge/routes/by-domain/${encodeURIComponent(domain)}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  edgeAccessEvents: (
+    id: string,
+    params: {
+      host?: string
+      status?: number
+      action?: string
+      client_ip?: string
+      method?: string
+      path_prefix?: string
+      limit?: number
+    } = {},
+  ) =>
+    request<import('./types').EdgeAccessEventList>(`/nodes/${id}/edge/access-events${qs(params)}`),
+  edgeCache: (id: string) =>
+    request<import('./types').EdgeCacheState>(`/nodes/${id}/edge/cache`),
+  updateEdgeCache: (id: string, data: import('./types').EdgeCachePatch) =>
+    request<import('./types').EdgeCacheState>(`/nodes/${id}/edge/cache`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  purgeEdgeCache: (id: string, data: import('./types').EdgeCachePurgeRequest) =>
+    request<{ status: string; scope: string; sent: boolean; command_id: string | null }>(
+      `/nodes/${id}/edge/cache/purge`,
+      { method: 'POST', body: JSON.stringify(data) },
+    ),
+  installEdgeCache: (id: string) =>
+    request<{ sent: boolean; command_id: string | null }>(`/nodes/${id}/edge/cache/install`, { method: 'POST' }),
+  reconcileEdgeCache: (id: string) =>
+    request<{ sent: boolean; command_id: string | null }>(`/nodes/${id}/edge/cache/reconcile`, { method: 'POST' }),
+  edgeCacheStats: (id: string) =>
+    request<{ backend: Record<string, unknown> | null; available: boolean; policy: Record<string, unknown> }>(
+      `/nodes/${id}/edge/cache/stats`,
+    ),
+  testEdgeCache: (id: string) =>
+    request<{ status: string }>(`/nodes/${id}/edge/cache/test`, { method: 'POST' }),
+  edgeRendered: (id: string) =>
+    request<import('./types').EdgeRenderedConfig>(`/nodes/${id}/edge/rendered`),
+  validateEdge: (id: string) =>
+    request<{ valid: boolean; errors: Record<string, unknown>[]; warnings: Record<string, unknown>[] }>(
+      `/nodes/${id}/edge/validate`,
+      { method: 'POST' },
+    ),
+  edgeVersions: (id: string) =>
+    request<import('./types').EdgeConfigVersion[]>(`/nodes/${id}/edge/versions`),
+  rollbackEdgeVersion: (id: string, versionId: string) =>
+    request<{ sent: boolean; command_id: string | null; version_id: string }>(
+      `/nodes/${id}/edge/versions/${versionId}/rollback`,
+      { method: 'POST' },
+    ),
+  edgeFragments: (id: string) =>
+    request<import('./types').EdgeFragment[]>(`/nodes/${id}/edge/fragments`),
+  createEdgeFragment: (id: string, data: import('./types').EdgeFragmentCreate) =>
+    request<import('./types').EdgeFragment>(`/nodes/${id}/edge/fragments`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  edgeDesiredState: (id: string) =>
+    request<import('./types').EdgeDesiredStateResponse>(`/nodes/${id}/edge/desired-state`),
+  putEdgeDesiredState: (
+    id: string,
+    data: Record<string, unknown>,
+    params: { dry_run?: boolean; apply?: boolean; prune?: boolean; return_diff?: boolean } = {},
+  ) =>
+    request<import('./types').EdgeDesiredStateResponse>(
+      `/nodes/${id}/edge/desired-state${qs(params)}`,
+      { method: 'PUT', body: JSON.stringify(data) },
+    ),
+  previewTraefikImport: (id: string, data: Omit<import('./types').TraefikImportRequest, 'server_id'> & { server_id?: string }) =>
+    request<import('./types').TraefikImportPreview>(`/nodes/${id}/edge/import/traefik/preview`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  applyTraefikImport: (
+    id: string,
+    data: Omit<import('./types').TraefikImportRequest, 'server_id'> & { server_id?: string },
+    mode: 'apply' | 'upsert' = 'apply',
+  ) =>
+    request<import('./types').TraefikImportResult>(`/nodes/${id}/edge/import/traefik/${mode}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
     }),
 }
 
@@ -532,6 +659,81 @@ export const security = {
     const qs = q.toString()
     return request<import('./types').CertEntry[]>(`/security/certs${qs ? `?${qs}` : ''}`)
   },
+}
+
+// Route-shaped Security Edge APIs
+export const edge = {
+  profiles: () => request<import('./types').EdgeProfile[]>('/edge/profiles'),
+  createProfile: (data: import('./types').EdgeProfileUpsert) =>
+    request<import('./types').EdgeProfile>('/edge/profiles', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  profile: (idOrSlug: string) =>
+    request<import('./types').EdgeProfile>(`/edge/profiles/${encodeURIComponent(idOrSlug)}`),
+  putProfile: (idOrSlug: string, data: import('./types').EdgeProfileUpsert) =>
+    request<import('./types').EdgeProfile>(`/edge/profiles/${encodeURIComponent(idOrSlug)}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  deleteProfile: (idOrSlug: string) =>
+    request<void>(`/edge/profiles/${encodeURIComponent(idOrSlug)}`, { method: 'DELETE' }),
+  route: (routeId: string) =>
+    request<import('./types').EdgeRoute>(`/edge/routes/${routeId}`),
+  updateRoute: (routeId: string, data: import('./types').EdgeRouteUpsert) =>
+    request<import('./types').EdgeRoute>(`/edge/routes/${routeId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  deleteRoute: (routeId: string) =>
+    request<void>(`/edge/routes/${routeId}`, { method: 'DELETE' }),
+  routeEffective: (routeId: string) =>
+    request<import('./types').EdgeEffectivePolicy>(`/edge/routes/${routeId}/effective`),
+  validateRoute: (routeId: string) =>
+    request<{ valid: boolean; warnings: Record<string, unknown>[] }>(`/edge/routes/${routeId}/validate`, {
+      method: 'POST',
+    }),
+  pathRules: (routeId: string) =>
+    request<import('./types').EdgePathRule[]>(`/edge/routes/${routeId}/path-rules`),
+  createPathRule: (routeId: string, data: import('./types').EdgePathRuleCreate) =>
+    request<import('./types').EdgePathRule>(`/edge/routes/${routeId}/path-rules`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  accessEvents: (
+    params: {
+      node_id?: string
+      route_id?: string
+      host?: string
+      status?: number
+      action?: string
+      client_ip?: string
+      method?: string
+      limit?: number
+    } = {},
+  ) => request<import('./types').EdgeAccessEventList>(`/edge/access-events${qs(params)}`),
+  accessEvent: (eventId: number) =>
+    request<import('./types').EdgeAccessEvent>(`/edge/access-events/${eventId}`),
+  fragment: (fragmentId: string) =>
+    request<import('./types').EdgeFragment>(`/edge/fragments/${fragmentId}`),
+  updateFragment: (fragmentId: string, data: import('./types').EdgeFragmentCreate) =>
+    request<import('./types').EdgeFragment>(`/edge/fragments/${fragmentId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  deleteFragment: (fragmentId: string) =>
+    request<void>(`/edge/fragments/${fragmentId}`, { method: 'DELETE' }),
+  validateFragment: (fragmentId: string) =>
+    request<{ valid: boolean; errors: Record<string, unknown>[] }>(`/edge/fragments/${fragmentId}/validate`, {
+      method: 'POST',
+    }),
+  routeCachePreview: (routeId: string) =>
+    request<{ route_id: string; cache: Record<string, unknown>; available: boolean }>(
+      `/edge/routes/${routeId}/cache/preview`,
+      { method: 'POST' },
+    ),
+  routeCachePurge: (routeId: string) =>
+    request<Record<string, unknown>>(`/edge/routes/${routeId}/cache/purge`, { method: 'POST' }),
 }
 
 // Audit log

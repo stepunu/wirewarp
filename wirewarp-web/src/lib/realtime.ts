@@ -22,7 +22,8 @@ type EventHandler = (payload: Record<string, unknown>) => void
 
 const eventToKeys: Record<string, string[][]> = {
   'agent.changed': [['agents'], ['nodes']],
-  'edge.changed': [['nodes'], ['node-edge'], ['security-overview'], ['sites'], ['server-edge-policy']],
+  'edge.changed': [['nodes'], ['node-edge'], ['edge-capabilities'], ['edge-policy'], ['edge-routes'], ['edge-cache'], ['edge-rendered'], ['edge-versions'], ['edge-fragments'], ['security-overview'], ['sites'], ['server-edge-policy'], ['edge-profiles']],
+  'edge.access': [['edge-access-events'], ['node-edge-access'], ['security-overview']],
   'tunnel_server.changed': [['tunnel-servers'], ['tunnel-server-ips'], ['tunnel-server-summary'], ['nodes']],
   'tunnel_client.changed': [['tunnel-clients'], ['tunnel-client-attachments'], ['tunnel-client-summary'], ['nodes']],
   'port_forward.changed': [['port-forwards']],

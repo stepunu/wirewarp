@@ -44,9 +44,29 @@ async def test_nodes_list_derives_server_gateway_client_roles(client, session_ma
     async with session_maker() as s:
         s.add_all([server_agent, gateway_agent, client_agent])
         await s.commit()
-        s.add(TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24"))
+        server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
+        _enable_security_edge(server)
+        s.add(server)
         s.add(TunnelClient(id=uuid.uuid4(), agent_id=gateway_agent.id, is_gateway=True, vm_network="192.168.1.0/24"))
         s.add(TunnelClient(id=uuid.uuid4(), agent_id=client_agent.id, is_gateway=False))
+        s.add(
+            CrowdSecSnapshot(
+                agent_id=server_agent.id,
+                installed=True,
+                running=True,
+                phase="healthy",
+                appsec_enabled=True,
+                bouncer_registered=True,
+            )
+        )
+        s.add(
+            TraefikSnapshot(
+                agent_id=server_agent.id,
+                installed=True,
+                running=True,
+                phase="healthy",
+            )
+        )
         await s.commit()
 
     resp = await client.get("/api/nodes")
@@ -54,7 +74,13 @@ async def test_nodes_list_derives_server_gateway_client_roles(client, session_ma
     assert resp.status_code == 200
     by_name = {row["name"]: row for row in resp.json()}
     assert by_name["edge-1"]["role"] == "server"
+    assert by_name["edge-1"]["edge_mode"] == "security_edge"
+    assert by_name["edge-1"]["edge_state"] == "enabled"
+    assert by_name["edge-1"]["edge_components"]["traefik"]["running"] is True
+    assert by_name["edge-1"]["edge_components"]["appsec"]["phase"] == "healthy"
     assert by_name["gw-1"]["role"] == "gateway"
+    assert by_name["gw-1"]["edge_mode"] is None
+    assert by_name["gw-1"]["edge_components"] == {}
     assert by_name["road-1"]["role"] == "client"
 
 
