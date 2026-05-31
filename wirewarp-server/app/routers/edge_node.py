@@ -49,6 +49,7 @@ from app.services.edge_resources import (
     route_edge_config,
     slugify,
 )
+from app.services.edge_cache_ops import nginx_cache_backend_available
 from app.services.edge_runtime import desired_state_snapshot, rendered_edge_config, stable_json
 
 router = APIRouter()
@@ -116,7 +117,7 @@ async def _cache_read(agent_id: uuid.UUID, db: AsyncSession) -> EdgeCacheRead:
     available = policy.get("mode") == "headers_only" or not real_cache
     reason = None
     if real_cache:
-        available = bool(snapshot and snapshot.installed and snapshot.running and snapshot.phase == "healthy")
+        available = await nginx_cache_backend_available(agent_id, db)
         reason = None if available else "nginx_cache_unavailable"
     return EdgeCacheRead(
         available=available,

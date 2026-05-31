@@ -161,6 +161,7 @@ async def test_edge_cache_status_enables_proxy_cache_desired_state_and_rendered_
     assert cache_config["enabled"] is True
     assert cache_config["mode"] == "proxy_cache"
     assert cache_config["routes"][0]["host"] == "app.example.com"
+
     assert cache_config["routes"][0]["origin_url"] == "http://192.168.1.10:8080"
 
     service = sent["params"]["traefik_dynamic_config"]["http"]["services"]["svc-app-example-com"]
@@ -214,6 +215,9 @@ async def test_edge_cache_proxy_cache_can_be_requested_before_backend_is_healthy
     assert cache_config["enabled"] is True
     assert cache_config["mode"] == "proxy_cache"
     assert cache_config["routes"][0]["host"] == "app.example.com"
+
+    service = sent["params"]["traefik_dynamic_config"]["http"]["services"]["svc-app-example-com"]
+    assert service["loadBalancer"]["servers"][0]["url"] == "http://192.168.1.10:8080"
 
 
 async def test_access_events_filter_by_route_country_and_time_range(client, db, factories):

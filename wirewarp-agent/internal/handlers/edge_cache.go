@@ -564,7 +564,19 @@ func intFromAny(value any, fallback int) int {
 }
 
 func resolveNginxBinary() string {
-	return resolveBin("nginx", "/usr/sbin/nginx", "/usr/bin/nginx", "/sbin/nginx")
+	return resolveOptionalBin("nginx", "/usr/sbin/nginx", "/usr/bin/nginx", "/sbin/nginx")
+}
+
+func resolveOptionalBin(name string, candidates ...string) string {
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	return ""
 }
 
 func parseNginxVersion(out []byte) string {

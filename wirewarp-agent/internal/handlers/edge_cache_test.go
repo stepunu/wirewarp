@@ -123,6 +123,23 @@ func TestParseNginxVersion(t *testing.T) {
 	}
 }
 
+func TestResolveOptionalBinReturnsEmptyWhenMissing(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing-nginx")
+	if got := resolveOptionalBin("wirewarp-definitely-missing-nginx", missing); got != "" {
+		t.Fatalf("missing optional binary should return empty, got %q", got)
+	}
+}
+
+func TestResolveOptionalBinUsesExistingCandidate(t *testing.T) {
+	candidate := filepath.Join(t.TempDir(), "nginx")
+	if err := os.WriteFile(candidate, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatalf("write candidate: %v", err)
+	}
+	if got := resolveOptionalBin("wirewarp-definitely-missing-nginx", candidate); got != candidate {
+		t.Fatalf("candidate path: want %q, got %q", candidate, got)
+	}
+}
+
 func TestHandleEdgeCacheTestProvesMissThenHitAndEmitsStatus(t *testing.T) {
 	var calls int
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

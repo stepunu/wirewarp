@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.edge_cache_snapshot import EdgeCacheSnapshot
 from app.models.edge_node_policy import EdgeNodePolicy
 from app.models.edge_route_config import EdgeRouteConfig
 from app.models.port_forward import PortForward
@@ -17,6 +18,7 @@ NGINX_CACHE_LISTEN = "127.0.0.1:18080"
 NGINX_CACHE_URL = f"http://{NGINX_CACHE_LISTEN}"
 DEFAULT_BYPASS_PATH_PREFIXES = ["/api", "/auth", "/login", "/admin", "/session"]
 NON_BACKEND_CACHE_MODES = {"off", "headers_only", ""}
+VALID_CACHE_PROOFS = {"miss_hit", "bypass"}
 
 
 async def load_node_cache_policy(
@@ -37,6 +39,25 @@ def normalize_cache_policy(policy: dict[str, Any] | None) -> dict[str, Any]:
 
 def cache_policy_uses_backend(policy: dict[str, Any] | None) -> bool:
     return normalize_cache_policy(policy).get("mode") not in NON_BACKEND_CACHE_MODES
+
+
+async def nginx_cache_backend_available(
+    agent_id: uuid.UUID | str,
+    db: AsyncSession,
+) -> bool:
+    snapshot = await db.scalar(
+        select(EdgeCacheSnapshot).where(
+            EdgeCacheSnapshot.agent_id == uuid.UUID(str(agent_id)),
+            EdgeCacheSnapshot.backend == "nginx_proxy_cache",
+        )
+    )
+    return bool(
+        snapshot
+        and snapshot.installed
+        and snapshot.running
+        and snapshot.phase == "healthy"
+        and snapshot.last_test_status in VALID_CACHE_PROOFS
+    )
 
 
 def route_cache_policy(

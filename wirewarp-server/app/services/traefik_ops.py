@@ -25,6 +25,7 @@ from app.models.tunnel_server import TunnelServer
 from app.services.edge_cache_ops import (
     load_node_cache_policy,
     nginx_cache_service_url,
+    nginx_cache_backend_available,
     route_uses_nginx_cache,
 )
 from app.services.secrets import get_captcha_secret_key, get_letsencrypt_cloudflare_api_token
@@ -293,6 +294,7 @@ async def build_traefik_dynamic_config(
     servers_transports: dict = {}
     acme_ready = await letsencrypt_resolver_ready(db)
     node_cache_policy = await load_node_cache_policy(server_agent_id, db)
+    cache_backend_available = await nginx_cache_backend_available(server_agent_id, db)
     letsencrypt_domains: list[str] = []
     letsencrypt_router_names: list[str] = []
     server_rate_limit = None
@@ -428,7 +430,7 @@ async def build_traefik_dynamic_config(
             **({"middlewares": router_middlewares} if router_middlewares else {}),
         }
 
-        if pf.domain and route_uses_nginx_cache(node_cache_policy, ec):
+        if pf.domain and cache_backend_available and route_uses_nginx_cache(node_cache_policy, ec):
             lb = {
                 "servers": [
                     {"url": nginx_cache_service_url(node_cache_policy)}
