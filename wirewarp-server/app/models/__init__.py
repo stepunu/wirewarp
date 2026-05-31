@@ -20,6 +20,9 @@ from app.models.crowdsec_snapshot import CrowdSecSnapshot
 from app.models.wg_traffic_sample import WgTrafficSample
 from app.models.edge_route_config import EdgeRouteConfig
 from app.models.edge_component_state import EdgeComponentState
+from app.models.edge_profile import EdgeProfile
+from app.models.edge_node_policy import EdgeNodePolicy
+from app.models.edge_path_rule import EdgePathRule
 from app.models.traefik_snapshot import TraefikSnapshot
 from app.models.security_event import SecurityEvent
 
@@ -46,6 +49,9 @@ __all__ = [
     "WgTrafficSample",
     "EdgeRouteConfig",
     "EdgeComponentState",
+    "EdgeProfile",
+    "EdgeNodePolicy",
+    "EdgePathRule",
     "TraefikSnapshot",
     "SecurityEvent",
 ]

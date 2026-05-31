@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from app.database import engine, Base, SessionLocal
 from app.realtime.bus import bus
 from app.realtime.events import emit_agent_changed
-from app.routers import auth, agents, tunnel_servers, tunnel_clients, tunnel_client_attachments, lan_clients, port_forwards, service_templates, settings, tunnel_server_ips, audit, users, oidc, ldap as ldap_router, vpn_endpoints, vpn_profiles, security, nodes
+from app.routers import auth, agents, tunnel_servers, tunnel_clients, tunnel_client_attachments, lan_clients, port_forwards, service_templates, settings, tunnel_server_ips, audit, users, oidc, ldap as ldap_router, vpn_endpoints, vpn_profiles, security, nodes, edge
 from app.websocket.hub import manager
 from app.websocket.handlers import dispatch
 from app.services.agent_commands import send_command
@@ -68,6 +68,7 @@ app.include_router(audit.router, prefix="/api/audit", tags=["audit"])
 app.include_router(vpn_endpoints.router, prefix="/api/vpn-endpoints", tags=["vpn"])
 app.include_router(vpn_profiles.router, prefix="/api/vpn-profiles", tags=["vpn"])
 app.include_router(security.router, prefix="/api/security", tags=["security"])
+app.include_router(edge.router, prefix="/api/edge", tags=["edge"])
 
 
 @app.get("/api/health")

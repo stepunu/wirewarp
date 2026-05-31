@@ -13,14 +13,22 @@ from app.database import get_db
 from app.models.agent import Agent
 from app.models.crowdsec_snapshot import CrowdSecSnapshot
 from app.models.edge_component_state import EdgeComponentState
+from app.models.edge_node_policy import EdgeNodePolicy
+from app.models.edge_profile import EdgeProfile
 from app.models.port_forward import PortForward
 from app.models.traefik_snapshot import TraefikSnapshot
 from app.models.tunnel_client import TunnelClient
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
 from app.models.user import User
-from app.realtime.events import emit_edge_changed
+from app.realtime.events import emit_edge_changed, emit_security_changed
 from app.schemas.crowdsec import CrowdSecSnapshotRead
+from app.schemas.edge import (
+    EdgeNodePolicyRead,
+    EdgeNodePolicyUpdate,
+    EdgeRouteRead,
+    EdgeRouteUpsert,
+)
 from app.schemas.nodes import (
     EdgeComponentRead,
     NodeEdgeActionResult,
@@ -48,6 +56,15 @@ from app.services.edge_ops import (
     set_component_desired,
 )
 from app.services.agent_commands import send_command
+from app.services.edge_port_conflicts import server_id_for_attachment
+from app.services.edge_resources import (
+    apply_policy_to_edge_config,
+    get_or_create_node_policy,
+    get_profile_by_id_or_slug,
+    node_policy_read,
+    route_edge_config,
+    route_read,
+)
 
 router = APIRouter()
 
@@ -260,6 +277,114 @@ async def _server_for_agent(agent_id: uuid.UUID, db: AsyncSession) -> TunnelServ
     return server
 
 
+async def _ensure_attachment_on_server(
+    attachment_id: uuid.UUID,
+    server: TunnelServer,
+    db: AsyncSession,
+) -> None:
+    attached_server_id = await server_id_for_attachment(db, attachment_id)
+    if attached_server_id is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    if attached_server_id != server.id:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "attachment_server_mismatch", "field": "attachment_id"},
+        )
+
+
+async def _upsert_node_route(
+    agent_id: uuid.UUID,
+    domain: str | None,
+    body: EdgeRouteUpsert,
+    db: AsyncSession,
+    actor: User,
+) -> PortForward:
+    server = await _server_for_agent(agent_id, db)
+    if edge_unavailable_reason(server):
+        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(server))
+
+    att_ids = (
+        await db.execute(
+            select(TunnelClientAttachment.id).where(
+                TunnelClientAttachment.tunnel_server_id == server.id
+            )
+        )
+    ).scalars().all()
+    route = None
+    if domain is not None and att_ids:
+        route = await db.scalar(
+            select(PortForward)
+            .options(selectinload(PortForward.edge_route_config))
+            .where(
+                PortForward.attachment_id.in_(att_ids),
+                PortForward.service_kind == "http",
+                PortForward.domain == domain,
+            )
+        )
+
+    if route is None:
+        if body.attachment_id is None:
+            raise HTTPException(status_code=400, detail={"code": "required", "field": "attachment_id"})
+        if body.destination_ip is None:
+            raise HTTPException(status_code=400, detail={"code": "required", "field": "destination_ip"})
+        if body.destination_port is None:
+            raise HTTPException(status_code=400, detail={"code": "required", "field": "destination_port"})
+        await _ensure_attachment_on_server(body.attachment_id, server, db)
+        route = PortForward(
+            id=uuid.uuid4(),
+            attachment_id=body.attachment_id,
+            protocol="tcp",
+            public_port=443,
+            destination_ip=body.destination_ip,
+            destination_port=body.destination_port,
+            description=body.description,
+            active=True if body.enabled is None else body.enabled,
+            service_kind="http",
+            domain=domain,
+        )
+        db.add(route)
+        await db.flush()
+    else:
+        if body.attachment_id is not None:
+            await _ensure_attachment_on_server(body.attachment_id, server, db)
+            route.attachment_id = body.attachment_id
+        if body.enabled is not None:
+            route.active = body.enabled
+        if body.destination_ip is not None:
+            route.destination_ip = body.destination_ip
+        if body.destination_port is not None:
+            route.destination_port = body.destination_port
+        if body.description is not None:
+            route.description = body.description
+
+    ec = await route_edge_config(db, route)
+    if body.profile_id is not None:
+        if await db.get(EdgeProfile, body.profile_id) is None:
+            raise HTTPException(status_code=404, detail="Edge profile not found")
+        ec.profile_id = body.profile_id
+    if body.profile is not None:
+        profile = await get_profile_by_id_or_slug(db, body.profile)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Edge profile not found")
+        ec.profile_id = profile.id
+    if body.priority is not None:
+        ec.priority = body.priority
+    if body.upstream_scheme is not None:
+        ec.upstream_scheme = body.upstream_scheme
+    if body.upstream_insecure_skip_verify is not None:
+        ec.upstream_insecure_skip_verify = body.upstream_insecure_skip_verify
+    if body.policy is not None:
+        apply_policy_to_edge_config(ec, body.policy)
+
+    await db.commit()
+    await db.refresh(route)
+    route.edge_route_config = ec  # type: ignore[assignment]
+    await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
+    emit_edge_changed()
+    emit_security_changed()
+    return route
+
+
 async def _apply_capabilities(
     server: TunnelServer,
     body: NodeEdgeCapabilitiesUpdate,
@@ -448,6 +573,119 @@ async def put_node_edge_capabilities(
     await db.refresh(server)
     emit_edge_changed()
     return await _capabilities_read(server, db)
+
+
+@router.get("/{agent_id}/edge/policy", response_model=EdgeNodePolicyRead)
+async def get_node_edge_policy(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    server = await _server_for_agent(agent_id, db)
+    policy = await get_or_create_node_policy(db, server.agent_id)
+    await db.commit()
+    return await node_policy_read(db, policy)
+
+
+@router.patch("/{agent_id}/edge/policy", response_model=EdgeNodePolicyRead)
+async def patch_node_edge_policy(
+    agent_id: uuid.UUID,
+    body: EdgeNodePolicyUpdate,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    server = await _server_for_agent(agent_id, db)
+    if edge_unavailable_reason(server):
+        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(server))
+    policy = await get_or_create_node_policy(db, server.agent_id)
+    fields = body.model_fields_set
+    if "default_profile_id" in fields:
+        if body.default_profile_id is not None and await db.get(EdgeProfile, body.default_profile_id) is None:
+            raise HTTPException(status_code=404, detail="Edge profile not found")
+        policy.default_profile_id = body.default_profile_id
+    for field in (
+        "client_ip_strategy",
+        "trusted_proxy_cidrs",
+        "cloudflare_mode",
+        "access_log_retention_hours",
+        "security_event_retention_days",
+    ):
+        if field in fields:
+            setattr(policy, field, getattr(body, field))
+    if "policy" in fields and body.policy is not None:
+        policy.policy_json = body.policy
+    await db.commit()
+    await db.refresh(policy)
+    await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
+    emit_edge_changed()
+    return await node_policy_read(db, policy)
+
+
+@router.get("/{agent_id}/edge/effective", response_model=EdgeNodePolicyRead)
+async def get_node_edge_effective(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    server = await _server_for_agent(agent_id, db)
+    policy = await get_or_create_node_policy(db, server.agent_id)
+    await db.commit()
+    return await node_policy_read(db, policy)
+
+
+@router.get("/{agent_id}/edge/routes", response_model=list[EdgeRouteRead])
+async def list_node_edge_routes(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    server = await _server_for_agent(agent_id, db)
+    att_ids = (
+        await db.execute(
+            select(TunnelClientAttachment.id).where(
+                TunnelClientAttachment.tunnel_server_id == server.id
+            )
+        )
+    ).scalars().all()
+    if not att_ids:
+        return []
+    rows = (
+        await db.execute(
+            select(PortForward)
+            .options(selectinload(PortForward.edge_route_config))
+            .where(
+                PortForward.attachment_id.in_(att_ids),
+                PortForward.service_kind == "http",
+            )
+            .order_by(PortForward.domain)
+        )
+    ).scalars().all()
+    return [await route_read(db, row, row.edge_route_config) for row in rows]
+
+
+@router.post("/{agent_id}/edge/routes", response_model=EdgeRouteRead, status_code=201)
+async def create_node_edge_route(
+    agent_id: uuid.UUID,
+    body: EdgeRouteUpsert,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    if not body.attachment_id:
+        raise HTTPException(status_code=400, detail={"code": "required", "field": "attachment_id"})
+    route = await _upsert_node_route(agent_id, None, body, db, actor)
+    return await route_read(db, route, route.edge_route_config)
+
+
+@router.put("/{agent_id}/edge/routes/by-domain/{domain}", response_model=EdgeRouteRead)
+async def upsert_node_edge_route_by_domain(
+    agent_id: uuid.UUID,
+    domain: str,
+    body: EdgeRouteUpsert,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    route = await _upsert_node_route(agent_id, domain, body, db, actor)
+    return await route_read(db, route, route.edge_route_config)
 
 
 @router.post("/{agent_id}/edge/install", response_model=NodeEdgeActionResult, status_code=202)
