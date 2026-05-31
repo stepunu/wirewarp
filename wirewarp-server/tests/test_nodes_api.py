@@ -302,6 +302,7 @@ async def test_edge_reconcile_dispatches_unified_desired_state(client, session_m
         "whitelist",
         "traefik_static_config",
         "traefik_dynamic_config",
+        "nginx_cache_config",
         "traefik_acme",
     }
     router = msg["params"]["traefik_dynamic_config"]["http"]["routers"]["app-example-com"]

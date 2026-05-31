@@ -49,5 +49,6 @@ func (h *ServerHandlers) edgeReconcileOnce(ctx context.Context) error {
 	}
 	h.pollAndEmitCrowdSec(ctx, true)
 	h.pollAndEmitTraefik(ctx, true)
+	h.pollAndEmitNginxCache(ctx, true)
 	return nil
 }

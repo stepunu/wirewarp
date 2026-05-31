@@ -37,7 +37,7 @@ async def rendered_edge_config(
     desired = await build_edge_desired_state(agent_id, db)
     dynamic = desired.get("traefik_dynamic_config") or {}
     static = desired.get("traefik_static_config") or {}
-    cache_config: dict[str, Any] = {}
+    cache_config = desired.get("nginx_cache_config") or {}
     desired_hash = digest(desired)
     dynamic_hash = digest(dynamic)
     static_hash = digest(static)
@@ -72,6 +72,7 @@ async def rendered_edge_config(
             "dynamic_hash": dynamic_hash,
             "cache_hash": cache_hash,
             "dynamic": dynamic,
+            "cache": cache_config,
         },
         existing,
     )

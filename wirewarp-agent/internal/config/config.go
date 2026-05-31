@@ -66,6 +66,7 @@ type EdgeDesiredState struct {
 	Whitelist            EdgeWhitelist  `yaml:"whitelist,omitempty"`
 	TraefikStaticConfig  map[string]any `yaml:"traefik_static_config,omitempty"`
 	TraefikDynamicConfig map[string]any `yaml:"traefik_dynamic_config,omitempty"`
+	NginxCacheConfig     map[string]any `yaml:"nginx_cache_config,omitempty"`
 }
 
 type EdgeWhitelist struct {

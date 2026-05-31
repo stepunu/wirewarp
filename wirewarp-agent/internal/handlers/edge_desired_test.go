@@ -145,6 +145,7 @@ func TestDesiredStateJSONShape(t *testing.T) {
 		"whitelist":{"ips":["1.2.3.4"],"cidrs":["10.21.0.0/24"]},
 		"traefik_static_config":{"entryPoints":{"web":{"address":":80"}}},
 		"traefik_dynamic_config":{"http":{"routers":{}}},
+		"nginx_cache_config":{"enabled":true,"mode":"proxy_cache","routes":[{"host":"app.example.com","origin_url":"http://10.21.0.2:8080"}]},
 		"traefik_acme":{"cloudflare_dns_api_token":"secret-token"}
 	}`)
 	var p EdgeDesiredStateParams
@@ -157,11 +158,15 @@ func TestDesiredStateJSONShape(t *testing.T) {
 	if p.TraefikACME.CloudflareDNSToken != "secret-token" {
 		t.Fatalf("acme token not decoded: %#v", p.TraefikACME)
 	}
+	if p.NginxCacheConfig["mode"] != "proxy_cache" {
+		t.Fatalf("nginx cache config not decoded: %#v", p.NginxCacheConfig)
+	}
 
 	persisted := config.EdgeDesiredState{
 		Whitelist:            config.EdgeWhitelist{IPs: p.Whitelist.IPs, CIDRs: p.Whitelist.CIDRs},
 		TraefikStaticConfig:  p.TraefikStaticConfig,
 		TraefikDynamicConfig: p.TraefikDynamicConfig,
+		NginxCacheConfig:     p.NginxCacheConfig,
 	}
 	data, err := json.Marshal(persisted)
 	if err != nil {

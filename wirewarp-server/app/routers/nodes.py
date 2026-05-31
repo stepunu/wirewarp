@@ -12,6 +12,7 @@ from app.auth import require_ops_role, require_role
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.crowdsec_snapshot import CrowdSecSnapshot
+from app.models.edge_cache_snapshot import EdgeCacheSnapshot
 from app.models.edge_component_state import EdgeComponentState
 from app.models.edge_node_policy import EdgeNodePolicy
 from app.models.edge_profile import EdgeProfile
@@ -190,6 +191,12 @@ async def _component_state_map(
         crowdsec = await db.scalar(select(CrowdSecSnapshot).where(CrowdSecSnapshot.agent_id == server.agent_id))
     if traefik is None:
         traefik = await db.scalar(select(TraefikSnapshot).where(TraefikSnapshot.agent_id == server.agent_id))
+    cache = await db.scalar(
+        select(EdgeCacheSnapshot).where(
+            EdgeCacheSnapshot.agent_id == server.agent_id,
+            EdgeCacheSnapshot.backend == "nginx_proxy_cache",
+        )
+    )
     rows = (
         await db.execute(
             select(EdgeComponentState).where(EdgeComponentState.agent_id == server.agent_id)
@@ -235,6 +242,13 @@ async def _component_state_map(
                 phase = "disabled"
             last_error = crowdsec.last_error or crowdsec.error
             updated_at = crowdsec.updated_at
+        elif component == "nginx_cache" and cache is not None:
+            installed = cache.installed
+            running = cache.running
+            phase = cache.phase or phase
+            version = cache.version
+            last_error = cache.last_error
+            updated_at = cache.updated_at
 
         if edge_unavailable_reason(server) and component not in desired_by_component:
             desired = "disabled"

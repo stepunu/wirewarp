@@ -190,7 +190,7 @@ async def patch_node_cache(
 ):
     server = await _server_for_agent(agent_id, db)
     _ensure_enabled(server)
-    if body.mode != "headers_only":
+    if body.mode not in {"off", "headers_only"}:
         snapshot = await db.scalar(select(EdgeCacheSnapshot).where(EdgeCacheSnapshot.agent_id == agent_id))
         if not (snapshot and snapshot.installed and snapshot.running and snapshot.phase == "healthy"):
             raise HTTPException(status_code=409, detail={"code": "edge_cache_unavailable", "reason": "nginx_cache_unavailable"})

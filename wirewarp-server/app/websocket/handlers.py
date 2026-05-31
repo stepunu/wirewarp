@@ -10,6 +10,7 @@ from app.models.agent import Agent
 from app.models.command_log import CommandLog
 from app.models.crowdsec_snapshot import CrowdSecSnapshot
 from app.models.edge_access_event import EdgeAccessEvent
+from app.models.edge_cache_snapshot import EdgeCacheSnapshot
 from app.models.gateway_lan_client import GatewayLanClient
 from app.models.heal_event import AgentHealEvent
 from app.models.metric import Metric
@@ -746,6 +747,56 @@ async def handle_edge_access_events(agent_id: str, msg: dict, db: AsyncSession) 
     emit_edge_access()
 
 
+async def handle_edge_cache_status(agent_id: str, msg: dict, db: AsyncSession) -> None:
+    backend = msg.get("backend") if isinstance(msg.get("backend"), str) else "nginx_proxy_cache"
+    if backend != "nginx_proxy_cache":
+        return
+
+    running = bool(msg.get("running", False))
+    installed = bool(msg.get("installed", running))
+    err = msg.get("error") if isinstance(msg.get("error"), str) else None
+    phase = msg.get("phase") if isinstance(msg.get("phase"), str) else component_phase(installed, running, err)
+    now = datetime.now(timezone.utc)
+    existing = await db.scalar(
+        select(EdgeCacheSnapshot).where(
+            EdgeCacheSnapshot.agent_id == agent_id,
+            EdgeCacheSnapshot.backend == backend,
+        )
+    )
+    values = {
+        "installed": installed,
+        "running": running,
+        "phase": phase,
+        "version": msg.get("version") if isinstance(msg.get("version"), str) else None,
+        "cache_path": msg.get("cache_path") if isinstance(msg.get("cache_path"), str) else None,
+        "max_size_bytes": _int_or_none(msg.get("max_size_bytes")),
+        "current_size_bytes": _int_or_none(msg.get("current_size_bytes")),
+        "keys_zone_size": msg.get("keys_zone_size") if isinstance(msg.get("keys_zone_size"), str) else None,
+        "last_config_hash": msg.get("last_config_hash") if isinstance(msg.get("last_config_hash"), str) else None,
+        "last_test_status": msg.get("last_test_status") if isinstance(msg.get("last_test_status"), str) else None,
+        "last_purge_result": msg.get("last_purge_result") if isinstance(msg.get("last_purge_result"), str) else None,
+        "last_error": err or (msg.get("last_error") if isinstance(msg.get("last_error"), str) else None),
+        "updated_at": now,
+    }
+    if existing is not None:
+        for key, value in values.items():
+            setattr(existing, key, value)
+    else:
+        db.add(
+            EdgeCacheSnapshot(
+                agent_id=agent_id,
+                backend=backend,
+                **values,
+            )
+        )
+
+    agent = await db.scalar(select(Agent).where(Agent.id == agent_id))
+    if agent:
+        agent.last_seen = now
+    await db.commit()
+    emit_edge_changed()
+
+
 def _int_or_none(value) -> int | None:  # noqa: ANN001
     if value is None or value == "":
         return None
@@ -783,4 +834,6 @@ async def dispatch(agent_id: str, msg: dict, db: AsyncSession) -> None:
         await handle_security_events(agent_id, msg, db)
     elif msg_type == "edge_access_events":
         await handle_edge_access_events(agent_id, msg, db)
+    elif msg_type == "edge_cache_status":
+        await handle_edge_cache_status(agent_id, msg, db)
     # Unknown message types are silently ignored

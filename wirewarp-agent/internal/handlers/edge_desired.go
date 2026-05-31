@@ -27,6 +27,7 @@ type EdgeDesiredStateParams struct {
 	Whitelist            CrowdSecInstallParams `json:"whitelist"`
 	TraefikStaticConfig  map[string]any        `json:"traefik_static_config"`
 	TraefikDynamicConfig map[string]any        `json:"traefik_dynamic_config"`
+	NginxCacheConfig     map[string]any        `json:"nginx_cache_config"`
 	TraefikACME          TraefikACMEParams     `json:"traefik_acme"`
 }
 
@@ -46,6 +47,7 @@ func (h *ServerHandlers) handleEdgeDesiredState(raw json.RawMessage) (string, er
 		},
 		TraefikStaticConfig:  p.TraefikStaticConfig,
 		TraefikDynamicConfig: p.TraefikDynamicConfig,
+		NginxCacheConfig:     p.NginxCacheConfig,
 	}
 	if h.cfg.EdgeBouncerKey == "" {
 		key, err := generateBouncerKey()
@@ -286,7 +288,13 @@ func (h *ServerHandlers) reconcileDesiredEdge(ctx context.Context) error {
 			firstErr = err
 		}
 	}
+	if h.cfg.EdgeDesired.NginxCacheConfig != nil {
+		if err := h.reconcileNginxCache(ctx, h.cfg.EdgeDesired.NginxCacheConfig); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	h.pollAndEmitCrowdSec(ctx, false)
 	h.pollAndEmitTraefik(ctx, false)
+	h.pollAndEmitNginxCache(ctx, false)
 	return firstErr
 }

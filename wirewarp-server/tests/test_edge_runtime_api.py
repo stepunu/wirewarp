@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.models.edge_access_event import EdgeAccessEvent
+from app.services.edge_runtime import digest
 from app.websocket.handlers import dispatch
 
 
@@ -113,6 +114,61 @@ async def test_websocket_edge_access_events_persist_and_query(client, db, factor
     assert resp.status_code == 200
     assert resp.json()["items"][0]["request_id"] == "req-json"
     assert resp.json()["items"][0]["cache_status"] == "bypass"
+
+
+async def test_edge_cache_status_enables_proxy_cache_desired_state_and_rendered_hash(
+    client, db, factories, fake_manager
+):
+    server, _route = await _server_route(client, db, factories)
+    fake_manager.online.add(str(server.agent_id))
+
+    await dispatch(
+        str(server.agent_id),
+        {
+            "type": "edge_cache_status",
+            "backend": "nginx_proxy_cache",
+            "installed": True,
+            "running": True,
+            "phase": "healthy",
+            "version": "1.24.0",
+            "cache_path": "/var/cache/wirewarp/nginx",
+            "current_size_bytes": 4096,
+            "max_size_bytes": 1073741824,
+            "last_test_status": "miss_hit",
+        },
+        db,
+    )
+
+    patched = await client.patch(
+        f"/api/nodes/{server.agent_id}/edge/cache",
+        json={
+            "mode": "proxy_cache",
+            "browser_ttl_seconds": 120,
+            "edge_ttl_seconds": 600,
+            "cache_status_header": True,
+        },
+    )
+
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["available"] is True
+    assert body["backend"]["phase"] == "healthy"
+    assert body["backend"]["last_test_status"] == "miss_hit"
+
+    sent = fake_manager.sent[-1]["message"]
+    assert sent["type"] == "edge_desired_state"
+    cache_config = sent["params"]["nginx_cache_config"]
+    assert cache_config["enabled"] is True
+    assert cache_config["mode"] == "proxy_cache"
+    assert cache_config["routes"][0]["host"] == "app.example.com"
+    assert cache_config["routes"][0]["origin_url"] == "http://192.168.1.10:8080"
+
+    service = sent["params"]["traefik_dynamic_config"]["http"]["services"]["svc-app-example-com"]
+    assert service["loadBalancer"]["servers"][0]["url"] == "http://127.0.0.1:18080"
+
+    rendered = await client.get(f"/api/nodes/{server.agent_id}/edge/rendered")
+    assert rendered.status_code == 200, rendered.text
+    assert rendered.json()["cache_hash"] != digest({})
 
 
 async def test_access_events_filter_by_route_country_and_time_range(client, db, factories):

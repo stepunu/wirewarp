@@ -15,6 +15,7 @@ from app.models.traefik_snapshot import TraefikSnapshot
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
 from app.services.crowdsec_ops import build_whitelist
+from app.services.edge_cache_ops import build_nginx_cache_config
 from app.services.traefik_ops import (
     build_traefik_dynamic_config,
     build_traefik_static_config,
@@ -150,6 +151,7 @@ async def build_edge_desired_state(
         "whitelist": await build_whitelist(agent_id, db),
         "traefik_static_config": build_traefik_static_config(letsencrypt=letsencrypt),
         "traefik_dynamic_config": await build_traefik_dynamic_config(agent_id, db),
+        "nginx_cache_config": await build_nginx_cache_config(agent_id, db),
         "traefik_acme": traefik_acme,
     }
 
