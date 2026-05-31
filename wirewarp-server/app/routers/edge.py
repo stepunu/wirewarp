@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -14,6 +15,7 @@ from app.models.edge_fragment import EdgeFragment
 from app.models.edge_path_rule import EdgePathRule
 from app.models.edge_profile import EdgeProfile
 from app.models.edge_route_config import EdgeRouteConfig
+from app.models.edge_upstream_pool import EdgeUpstreamPool
 from app.models.port_forward import PortForward
 from app.models.user import User
 from app.realtime.events import emit_edge_changed, emit_security_changed
@@ -29,6 +31,8 @@ from app.schemas.edge import (
     EdgeProfileUpsert,
     EdgeRouteRead,
     EdgeRouteUpsert,
+    EdgeUpstreamPoolRead,
+    EdgeUpstreamPoolUpsert,
 )
 from app.services.edge_ops import dispatch_edge_desired_state, dispatch_edge_for_attachment
 from app.services.edge_resources import (
@@ -44,6 +48,20 @@ from app.services.edge_resources import (
 router = APIRouter()
 
 
+def _upstream_pool_read(row: EdgeUpstreamPool) -> EdgeUpstreamPoolRead:
+    return EdgeUpstreamPoolRead(
+        id=row.id,
+        agent_id=row.agent_id,
+        name=row.name,
+        description=row.description,
+        servers=list(row.servers or []),
+        health_check=dict(row.health_check or {}),
+        policy=dict(row.policy_json or {}),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
 @router.get("/access-events", response_model=EdgeAccessEventList)
 async def list_access_events(
     node_id: uuid.UUID | None = None,
@@ -52,7 +70,11 @@ async def list_access_events(
     status: int | None = None,
     action: str | None = None,
     client_ip: str | None = None,
+    country: str | None = None,
     method: str | None = None,
+    path_prefix: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
     limit: int = 100,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_ops_role),
@@ -70,8 +92,16 @@ async def list_access_events(
         q = q.where(EdgeAccessEvent.action == action)
     if client_ip:
         q = q.where(EdgeAccessEvent.client_ip == client_ip)
+    if country:
+        q = q.where(EdgeAccessEvent.client_country == country.upper())
     if method:
-        q = q.where(EdgeAccessEvent.method == method)
+        q = q.where(EdgeAccessEvent.method == method.upper())
+    if path_prefix:
+        q = q.where(EdgeAccessEvent.path.startswith(path_prefix))
+    if since:
+        q = q.where(EdgeAccessEvent.occurred_at >= since)
+    if until:
+        q = q.where(EdgeAccessEvent.occurred_at <= until)
     rows = (
         await db.execute(q.order_by(EdgeAccessEvent.occurred_at.desc(), EdgeAccessEvent.id.desc()).limit(limit + 1))
     ).scalars().all()
@@ -174,6 +204,57 @@ async def delete_profile(
         raise HTTPException(status_code=404, detail="Edge profile not found")
     await db.delete(profile)
     await db.commit()
+
+
+@router.get("/upstream-pools/{pool_id}", response_model=EdgeUpstreamPoolRead)
+async def get_upstream_pool(
+    pool_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    row = await db.get(EdgeUpstreamPool, pool_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Edge upstream pool not found")
+    return _upstream_pool_read(row)
+
+
+@router.put("/upstream-pools/{pool_id}", response_model=EdgeUpstreamPoolRead)
+@router.patch("/upstream-pools/{pool_id}", response_model=EdgeUpstreamPoolRead)
+async def update_upstream_pool(
+    pool_id: uuid.UUID,
+    body: EdgeUpstreamPoolUpsert,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    row = await db.get(EdgeUpstreamPool, pool_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Edge upstream pool not found")
+    row.name = body.name
+    row.description = body.description
+    row.servers = body.servers
+    row.health_check = body.health_check
+    row.policy_json = body.policy
+    await db.commit()
+    await db.refresh(row)
+    await dispatch_edge_desired_state(row.agent_id, db, actor_user_id=actor.id)
+    emit_edge_changed()
+    return _upstream_pool_read(row)
+
+
+@router.delete("/upstream-pools/{pool_id}", status_code=204)
+async def delete_upstream_pool(
+    pool_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    row = await db.get(EdgeUpstreamPool, pool_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Edge upstream pool not found")
+    agent_id = row.agent_id
+    await db.delete(row)
+    await db.commit()
+    await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
+    emit_edge_changed()
 
 
 @router.get("/routes/{route_id}", response_model=EdgeRouteRead)
@@ -430,6 +511,73 @@ async def create_path_rule(
     await dispatch_edge_for_attachment(route.attachment_id, db, actor_user_id=actor.id)
     emit_edge_changed()
     return await _path_rule_read(db, route, row)
+
+
+@router.get("/path-rules/{rule_id}", response_model=EdgePathRuleRead)
+async def get_path_rule(
+    rule_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    row = await db.get(EdgePathRule, rule_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Edge path rule not found")
+    route = await db.scalar(
+        select(PortForward)
+        .options(selectinload(PortForward.edge_route_config))
+        .where(PortForward.id == row.route_id, PortForward.service_kind == "http")
+    )
+    if route is None:
+        raise HTTPException(status_code=404, detail="Edge route not found")
+    return await _path_rule_read(db, route, row)
+
+
+@router.put("/path-rules/{rule_id}", response_model=EdgePathRuleRead)
+@router.patch("/path-rules/{rule_id}", response_model=EdgePathRuleRead)
+async def update_path_rule(
+    rule_id: uuid.UUID,
+    body: EdgePathRuleCreate,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    row = await db.get(EdgePathRule, rule_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Edge path rule not found")
+    route = await db.scalar(
+        select(PortForward)
+        .options(selectinload(PortForward.edge_route_config))
+        .where(PortForward.id == row.route_id, PortForward.service_kind == "http")
+    )
+    if route is None:
+        raise HTTPException(status_code=404, detail="Edge route not found")
+    row.name = body.name
+    row.match = body.match
+    row.priority = body.priority
+    row.enabled = body.enabled
+    row.policy_json = body.policy
+    await db.commit()
+    await db.refresh(row)
+    await dispatch_edge_for_attachment(route.attachment_id, db, actor_user_id=actor.id)
+    emit_edge_changed()
+    return await _path_rule_read(db, route, row)
+
+
+@router.delete("/path-rules/{rule_id}", status_code=204)
+async def delete_path_rule(
+    rule_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    row = await db.get(EdgePathRule, rule_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Edge path rule not found")
+    route = await db.get(PortForward, row.route_id)
+    attachment_id = route.attachment_id if route is not None else None
+    await db.delete(row)
+    await db.commit()
+    if attachment_id is not None:
+        await dispatch_edge_for_attachment(attachment_id, db, actor_user_id=actor.id)
+    emit_edge_changed()
 
 
 async def _path_rule_read(

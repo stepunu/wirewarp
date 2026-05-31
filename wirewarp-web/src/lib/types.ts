@@ -626,6 +626,26 @@ export interface EdgePathRuleCreate {
   policy?: EdgePolicy
 }
 
+export interface EdgeUpstreamPool {
+  id: string
+  agent_id: string
+  name: string
+  description: string | null
+  servers: EdgePolicy[]
+  health_check: EdgePolicy
+  policy: EdgePolicy
+  created_at: string
+  updated_at: string
+}
+
+export interface EdgeUpstreamPoolUpsert {
+  name: string
+  description?: string | null
+  servers?: EdgePolicy[]
+  health_check?: EdgePolicy
+  policy?: EdgePolicy
+}
+
 export interface EdgeAccessEvent {
   id: number
   agent_id: string
@@ -729,6 +749,7 @@ export interface EdgeDesiredStateResponse {
   diff: string | null
   profiles: EdgePolicy[]
   routes: EdgePolicy[]
+  upstream_pools: EdgePolicy[]
   effective: EdgePolicy
   reconcile_sent: boolean
 }

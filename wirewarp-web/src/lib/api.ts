@@ -161,12 +161,16 @@ export const nodes = {
   edgeAccessEvents: (
     id: string,
     params: {
+      route_id?: string
       host?: string
       status?: number
       action?: string
       client_ip?: string
+      country?: string
       method?: string
       path_prefix?: string
+      since?: string
+      until?: string
       limit?: number
     } = {},
   ) =>
@@ -211,6 +215,13 @@ export const nodes = {
     request<import('./types').EdgeFragment[]>(`/nodes/${id}/edge/fragments`),
   createEdgeFragment: (id: string, data: import('./types').EdgeFragmentCreate) =>
     request<import('./types').EdgeFragment>(`/nodes/${id}/edge/fragments`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  edgeUpstreamPools: (id: string) =>
+    request<import('./types').EdgeUpstreamPool[]>(`/nodes/${id}/edge/upstream-pools`),
+  createEdgeUpstreamPool: (id: string, data: import('./types').EdgeUpstreamPoolUpsert) =>
+    request<import('./types').EdgeUpstreamPool>(`/nodes/${id}/edge/upstream-pools`, {
       method: 'POST',
       body: JSON.stringify(data),
     }),
@@ -700,6 +711,24 @@ export const edge = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  pathRule: (ruleId: string) =>
+    request<import('./types').EdgePathRule>(`/edge/path-rules/${ruleId}`),
+  updatePathRule: (ruleId: string, data: import('./types').EdgePathRuleCreate) =>
+    request<import('./types').EdgePathRule>(`/edge/path-rules/${ruleId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  deletePathRule: (ruleId: string) =>
+    request<void>(`/edge/path-rules/${ruleId}`, { method: 'DELETE' }),
+  upstreamPool: (poolId: string) =>
+    request<import('./types').EdgeUpstreamPool>(`/edge/upstream-pools/${poolId}`),
+  updateUpstreamPool: (poolId: string, data: import('./types').EdgeUpstreamPoolUpsert) =>
+    request<import('./types').EdgeUpstreamPool>(`/edge/upstream-pools/${poolId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  deleteUpstreamPool: (poolId: string) =>
+    request<void>(`/edge/upstream-pools/${poolId}`, { method: 'DELETE' }),
   accessEvents: (
     params: {
       node_id?: string
@@ -708,7 +737,11 @@ export const edge = {
       status?: number
       action?: string
       client_ip?: string
+      country?: string
       method?: string
+      path_prefix?: string
+      since?: string
+      until?: string
       limit?: number
     } = {},
   ) => request<import('./types').EdgeAccessEventList>(`/edge/access-events${qs(params)}`),

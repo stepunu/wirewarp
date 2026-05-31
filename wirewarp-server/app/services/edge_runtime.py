@@ -12,6 +12,8 @@ import yaml
 from app.models.edge_config_version import EdgeConfigVersion
 from app.models.edge_node_policy import EdgeNodePolicy
 from app.models.edge_profile import EdgeProfile
+from app.models.edge_route_config import EdgeRouteConfig
+from app.models.edge_upstream_pool import EdgeUpstreamPool
 from app.models.port_forward import PortForward
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
@@ -100,22 +102,41 @@ async def desired_state_snapshot(
                     .order_by(PortForward.domain)
                 )
             ).scalars().all()
-            routes = [
-                {
-                    "id": str(row.id),
-                    "domain": row.domain,
-                    "enabled": row.active,
-                    "destination_ip": row.destination_ip,
-                    "destination_port": row.destination_port,
-                }
-                for row in rows
-            ]
+            routes = []
+            for row in rows:
+                ec = await db.scalar(select(EdgeRouteConfig).where(EdgeRouteConfig.port_forward_id == row.id))
+                routes.append(
+                    {
+                        "id": str(row.id),
+                        "domain": row.domain,
+                        "enabled": row.active,
+                        "destination_ip": row.destination_ip,
+                        "destination_port": row.destination_port,
+                        "profile_id": str(ec.profile_id) if ec and ec.profile_id else None,
+                        "priority": ec.priority if ec else 0,
+                        "policy": ec.policy_json if ec else {},
+                    }
+                )
+    upstream_pools = (
+        await db.execute(select(EdgeUpstreamPool).where(EdgeUpstreamPool.agent_id == agent_id).order_by(EdgeUpstreamPool.name))
+    ).scalars().all()
     return {
         "profiles": [
             {"id": str(row.id), "slug": row.slug, "name": row.name, "policy": row.policy_json or {}}
             for row in profiles
         ],
         "routes": routes,
+        "upstream_pools": [
+            {
+                "id": str(row.id),
+                "name": row.name,
+                "description": row.description,
+                "servers": row.servers or [],
+                "health_check": row.health_check or {},
+                "policy": row.policy_json or {},
+            }
+            for row in upstream_pools
+        ],
         "effective": {
             "policy": policy.policy_json if policy is not None else {},
         },

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -13,6 +14,10 @@ from app.models.edge_cache_snapshot import EdgeCacheSnapshot
 from app.models.edge_config_version import EdgeConfigVersion
 from app.models.edge_fragment import EdgeFragment
 from app.models.edge_node_policy import EdgeNodePolicy
+from app.models.edge_profile import EdgeProfile
+from app.models.edge_upstream_pool import EdgeUpstreamPool
+from app.models.port_forward import PortForward
+from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
 from app.models.user import User
 from app.realtime.events import emit_edge_changed
@@ -27,6 +32,8 @@ from app.schemas.edge import (
     EdgeFragmentCreate,
     EdgeFragmentRead,
     EdgeRenderedRead,
+    EdgeUpstreamPoolRead,
+    EdgeUpstreamPoolUpsert,
 )
 from app.schemas.security import TraefikImportRequest
 from app.services.edge_ops import (
@@ -35,6 +42,12 @@ from app.services.edge_ops import (
     edge_unavailable_reason,
 )
 from app.services.agent_commands import send_command
+from app.services.edge_resources import (
+    apply_policy_to_edge_config,
+    get_profile_by_id_or_slug,
+    route_edge_config,
+    slugify,
+)
 from app.services.edge_runtime import desired_state_snapshot, rendered_edge_config, stable_json
 
 router = APIRouter()
@@ -69,6 +82,20 @@ def _cache_backend_read(snapshot: EdgeCacheSnapshot | None) -> dict | None:
     }
 
 
+def _upstream_pool_read(row: EdgeUpstreamPool) -> EdgeUpstreamPoolRead:
+    return EdgeUpstreamPoolRead(
+        id=row.id,
+        agent_id=row.agent_id,
+        name=row.name,
+        description=row.description,
+        servers=list(row.servers or []),
+        health_check=dict(row.health_check or {}),
+        policy=dict(row.policy_json or {}),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
 async def _node_cache_policy(agent_id: uuid.UUID, db: AsyncSession) -> dict:
     row = await db.get(EdgeNodePolicy, agent_id)
     policy = dict(row.policy_json or {}) if row is not None else {}
@@ -101,18 +128,24 @@ async def _cache_read(agent_id: uuid.UUID, db: AsyncSession) -> EdgeCacheRead:
 @router.get("/{agent_id}/edge/access-events", response_model=EdgeAccessEventList)
 async def node_access_events(
     agent_id: uuid.UUID,
+    route_id: uuid.UUID | None = None,
     host: str | None = None,
     status: int | None = None,
     action: str | None = None,
     client_ip: str | None = None,
+    country: str | None = None,
     method: str | None = None,
     path_prefix: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
     limit: int = Query(100, ge=1, le=1000),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_ops_role),
 ):
     await _server_for_agent(agent_id, db)
     q = select(EdgeAccessEvent).where(EdgeAccessEvent.agent_id == agent_id)
+    if route_id:
+        q = q.where(EdgeAccessEvent.route_id == route_id)
     if host:
         q = q.where(EdgeAccessEvent.host == host)
     if status is not None:
@@ -121,10 +154,16 @@ async def node_access_events(
         q = q.where(EdgeAccessEvent.action == action)
     if client_ip:
         q = q.where(EdgeAccessEvent.client_ip == client_ip)
+    if country:
+        q = q.where(EdgeAccessEvent.client_country == country.upper())
     if method:
-        q = q.where(EdgeAccessEvent.method == method)
+        q = q.where(EdgeAccessEvent.method == method.upper())
     if path_prefix:
         q = q.where(EdgeAccessEvent.path.startswith(path_prefix))
+    if since:
+        q = q.where(EdgeAccessEvent.occurred_at >= since)
+    if until:
+        q = q.where(EdgeAccessEvent.occurred_at <= until)
     rows = (
         await db.execute(q.order_by(EdgeAccessEvent.occurred_at.desc(), EdgeAccessEvent.id.desc()).limit(limit + 1))
     ).scalars().all()
@@ -227,6 +266,57 @@ async def cache_test(
     return {"status": "headers_only" if cache.policy.get("mode") == "headers_only" else "queued"}
 
 
+@router.get("/{agent_id}/edge/upstream-pools", response_model=list[EdgeUpstreamPoolRead])
+async def list_node_upstream_pools(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    await _server_for_agent(agent_id, db)
+    rows = (
+        await db.execute(
+            select(EdgeUpstreamPool)
+            .where(EdgeUpstreamPool.agent_id == agent_id)
+            .order_by(EdgeUpstreamPool.name)
+        )
+    ).scalars().all()
+    return [_upstream_pool_read(row) for row in rows]
+
+
+@router.post("/{agent_id}/edge/upstream-pools", response_model=EdgeUpstreamPoolRead, status_code=201)
+async def create_node_upstream_pool(
+    agent_id: uuid.UUID,
+    body: EdgeUpstreamPoolUpsert,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    server = await _server_for_agent(agent_id, db)
+    _ensure_enabled(server)
+    existing = await db.scalar(
+        select(EdgeUpstreamPool).where(
+            EdgeUpstreamPool.agent_id == agent_id,
+            EdgeUpstreamPool.name == body.name,
+        )
+    )
+    if existing is not None:
+        raise HTTPException(status_code=409, detail={"code": "edge_upstream_pool_exists", "field": "name"})
+    row = EdgeUpstreamPool(
+        id=uuid.uuid4(),
+        agent_id=agent_id,
+        name=body.name,
+        description=body.description,
+        servers=body.servers,
+        health_check=body.health_check,
+        policy_json=body.policy,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
+    emit_edge_changed()
+    return _upstream_pool_read(row)
+
+
 @router.get("/{agent_id}/edge/rendered", response_model=EdgeRenderedRead)
 async def get_rendered(
     agent_id: uuid.UUID,
@@ -324,6 +414,108 @@ async def create_fragment(
     return EdgeFragmentRead.model_validate(row)
 
 
+async def _apply_desired_state_body(
+    agent_id: uuid.UUID,
+    body: dict,
+    db: AsyncSession,
+) -> None:
+    profiles = body.get("profiles")
+    if isinstance(profiles, list):
+        for item in profiles:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("slug") or "Edge profile")
+            slug = str(item.get("slug") or slugify(name))
+            profile = await get_profile_by_id_or_slug(db, item.get("id") or slug)
+            if profile is None:
+                profile = EdgeProfile(id=uuid.uuid4(), name=name, slug=slug)
+                db.add(profile)
+            profile.name = name
+            profile.slug = slug
+            profile.description = item.get("description")
+            profile.scope = str(item.get("scope") or "global")
+            profile.agent_id = uuid.UUID(str(item["agent_id"])) if item.get("agent_id") else None
+            profile.policy_json = item.get("policy") if isinstance(item.get("policy"), dict) else {}
+
+    server = await _server_for_agent(agent_id, db)
+    att_ids = (
+        await db.execute(
+            select(TunnelClientAttachment.id).where(TunnelClientAttachment.tunnel_server_id == server.id)
+        )
+    ).scalars().all()
+    routes = body.get("routes")
+    if not isinstance(routes, list):
+        return
+    for item in routes:
+        if not isinstance(item, dict):
+            continue
+        route = None
+        if item.get("id"):
+            try:
+                route_id = uuid.UUID(str(item["id"]))
+            except ValueError:
+                route_id = None
+            if route_id is not None:
+                route = await db.get(PortForward, route_id)
+                if route is not None and route.attachment_id not in att_ids:
+                    raise HTTPException(status_code=400, detail={"code": "route_node_mismatch", "field": "id"})
+        if route is None and item.get("domain") and att_ids:
+            route = await db.scalar(
+                select(PortForward).where(
+                    PortForward.attachment_id.in_(att_ids),
+                    PortForward.service_kind == "http",
+                    PortForward.domain == str(item["domain"]),
+                )
+            )
+        if route is None:
+            attachment_id = item.get("attachment_id")
+            if not attachment_id:
+                continue
+            route = PortForward(
+                id=uuid.uuid4(),
+                attachment_id=uuid.UUID(str(attachment_id)),
+                protocol="tcp",
+                public_port=int(item.get("public_port") or 443),
+                destination_ip=str(item.get("destination_ip") or "127.0.0.1"),
+                destination_port=int(item.get("destination_port") or 80),
+                active=bool(item.get("enabled", True)),
+                service_kind="http",
+                domain=item.get("domain"),
+                description=item.get("description"),
+            )
+            db.add(route)
+            await db.flush()
+        if "domain" in item:
+            route.domain = item.get("domain")
+        if "enabled" in item:
+            route.active = bool(item.get("enabled"))
+        if "destination_ip" in item and item.get("destination_ip") is not None:
+            route.destination_ip = str(item["destination_ip"])
+        if "destination_port" in item and item.get("destination_port") is not None:
+            route.destination_port = int(item["destination_port"])
+        if "description" in item:
+            route.description = item.get("description")
+        ec = await route_edge_config(db, route)
+        if item.get("profile_id"):
+            profile = await db.get(EdgeProfile, uuid.UUID(str(item["profile_id"])))
+            if profile is None:
+                raise HTTPException(status_code=404, detail="Edge profile not found")
+            ec.profile_id = profile.id
+        elif item.get("profile"):
+            profile = await get_profile_by_id_or_slug(db, str(item["profile"]))
+            if profile is None:
+                raise HTTPException(status_code=404, detail="Edge profile not found")
+            ec.profile_id = profile.id
+        if "priority" in item and item.get("priority") is not None:
+            ec.priority = int(item["priority"])
+        if "upstream_scheme" in item and item.get("upstream_scheme"):
+            ec.upstream_scheme = str(item["upstream_scheme"])
+        if "upstream_insecure_skip_verify" in item:
+            ec.upstream_insecure_skip_verify = bool(item.get("upstream_insecure_skip_verify"))
+        if isinstance(item.get("policy"), dict):
+            apply_policy_to_edge_config(ec, item["policy"])
+
+
 @router.get("/{agent_id}/edge/desired-state", response_model=EdgeDesiredStateResponse)
 async def get_desired_state(
     agent_id: uuid.UUID,
@@ -359,11 +551,17 @@ async def put_desired_state(
             diff=diff,
             **before,
         )
+    await _apply_desired_state_body(agent_id, body, db)
+    await db.commit()
+    await dispatch_edge_desired_state(agent_id, db, actor_user_id=_.id)
+    emit_edge_changed()
+    after = await desired_state_snapshot(agent_id, db)
     return EdgeDesiredStateResponse(
         dry_run=False,
-        changed=False,
+        changed=stable_json(before) != stable_json(after),
         diff=diff,
-        **before,
+        reconcile_sent=True,
+        **after,
     )
 
 

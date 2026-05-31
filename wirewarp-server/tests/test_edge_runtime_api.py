@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -115,6 +115,58 @@ async def test_websocket_edge_access_events_persist_and_query(client, db, factor
     assert resp.json()["items"][0]["cache_status"] == "bypass"
 
 
+async def test_access_events_filter_by_route_country_and_time_range(client, db, factories):
+    server, route = await _server_route(client, db, factories)
+    now = datetime.now(timezone.utc)
+    db.add_all(
+        [
+            EdgeAccessEvent(
+                agent_id=server.agent_id,
+                route_id=route["id"],
+                occurred_at=now - timedelta(minutes=5),
+                host="app.example.com",
+                path="/login",
+                method="POST",
+                status_code=429,
+                client_ip="198.51.100.50",
+                client_country="US",
+                action="rate_limit",
+                source="traefik",
+            ),
+            EdgeAccessEvent(
+                agent_id=server.agent_id,
+                route_id=route["id"],
+                occurred_at=now - timedelta(days=3),
+                host="app.example.com",
+                path="/old",
+                method="GET",
+                status_code=200,
+                client_ip="198.51.100.51",
+                client_country="DE",
+                action="pass",
+                source="traefik",
+            ),
+        ]
+    )
+    await db.commit()
+
+    resp = await client.get(
+        "/api/edge/access-events",
+        params={
+            "route_id": route["id"],
+            "country": "US",
+            "since": (now - timedelta(hours=1)).isoformat(),
+            "until": (now + timedelta(minutes=1)).isoformat(),
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["items"]) == 1
+    assert body["items"][0]["path"] == "/login"
+    assert body["items"][0]["client_country"] == "US"
+
+
 async def test_cache_headers_only_is_allowed_but_real_purge_requires_backend(client, db, factories):
     server, _route = await _server_route(client, db, factories)
 
@@ -168,3 +220,120 @@ async def test_rendered_versions_fragments_and_desired_state_dry_run(client, db,
     assert dry_run.status_code == 200
     assert dry_run.json()["dry_run"] is True
     assert "dry.example.com" in dry_run.json()["diff"]
+
+
+async def test_path_rules_can_update_and_delete_by_id(client, db, factories):
+    server, route = await _server_route(client, db, factories)
+
+    created = await client.post(
+        f"/api/edge/routes/{route['id']}/path-rules",
+        json={
+            "name": "api",
+            "match": {"type": "prefix", "value": "/api"},
+            "priority": 10,
+            "policy": {"waf_mode": "observe"},
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    updated = await client.put(
+        f"/api/edge/path-rules/{created.json()['id']}",
+        json={
+            "name": "api",
+            "match": {"type": "prefix", "value": "/api/private"},
+            "priority": 30,
+            "enabled": False,
+            "policy": {"waf_mode": "block"},
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["priority"] == 30
+    assert updated.json()["enabled"] is False
+    assert updated.json()["effective"]["waf_mode"] == "block"
+
+    deleted = await client.delete(f"/api/edge/path-rules/{created.json()['id']}")
+    assert deleted.status_code == 204
+
+    listed = await client.get(f"/api/edge/routes/{route['id']}/path-rules")
+    assert listed.status_code == 200
+    assert listed.json() == []
+
+
+async def test_upstream_pool_crud_by_node_and_id(client, db, factories):
+    server, _route = await _server_route(client, db, factories)
+
+    created = await client.post(
+        f"/api/nodes/{server.agent_id}/edge/upstream-pools",
+        json={
+            "name": "app-pool",
+            "description": "primary app backends",
+            "servers": [
+                {"url": "http://10.21.0.20:8080", "weight": 1},
+                {"url": "http://10.21.0.21:8080", "weight": 2},
+            ],
+            "health_check": {"path": "/healthz", "interval_seconds": 15},
+            "policy": {"pass_host_header": True},
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["name"] == "app-pool"
+    assert len(created.json()["servers"]) == 2
+
+    listed = await client.get(f"/api/nodes/{server.agent_id}/edge/upstream-pools")
+    assert listed.status_code == 200
+    assert [row["name"] for row in listed.json()] == ["app-pool"]
+
+    updated = await client.put(
+        f"/api/edge/upstream-pools/{created.json()['id']}",
+        json={
+            "name": "app-pool",
+            "description": "updated",
+            "servers": [{"url": "http://10.21.0.22:8080", "weight": 1}],
+            "health_check": {"path": "/ready"},
+            "policy": {"pass_host_header": False},
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["description"] == "updated"
+    assert updated.json()["servers"][0]["url"] == "http://10.21.0.22:8080"
+
+    deleted = await client.delete(f"/api/edge/upstream-pools/{created.json()['id']}")
+    assert deleted.status_code == 204
+
+
+async def test_desired_state_apply_updates_routes_and_profiles(client, db, factories):
+    server, route = await _server_route(client, db, factories)
+
+    applied = await client.put(
+        f"/api/nodes/{server.agent_id}/edge/desired-state?return_diff=true",
+        json={
+            "profiles": [
+                {
+                    "slug": "api-profile",
+                    "name": "API profile",
+                    "policy": {"waf_mode": "observe"},
+                }
+            ],
+            "routes": [
+                {
+                    "id": route["id"],
+                    "domain": "app.example.com",
+                    "enabled": False,
+                    "destination_ip": "192.168.1.20",
+                    "destination_port": 9090,
+                    "profile": "api-profile",
+                    "policy": {"waf_mode": "observe"},
+                }
+            ],
+        },
+    )
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["changed"] is True
+    assert "192.168.1.20" in applied.json()["diff"]
+
+    fetched = await client.get(f"/api/edge/routes/{route['id']}")
+    assert fetched.status_code == 200
+    assert fetched.json()["enabled"] is False
+    assert fetched.json()["destination_ip"] == "192.168.1.20"
+    assert fetched.json()["destination_port"] == 9090
+    assert fetched.json()["effective"]["waf_mode"] == "observe"

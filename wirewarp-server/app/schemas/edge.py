@@ -109,6 +109,26 @@ class EdgePathRuleRead(BaseModel):
     updated_at: datetime
 
 
+class EdgeUpstreamPoolUpsert(BaseModel):
+    name: str
+    description: str | None = None
+    servers: list[dict[str, Any]] = Field(default_factory=list)
+    health_check: dict[str, Any] = Field(default_factory=dict)
+    policy: dict[str, Any] = Field(default_factory=dict)
+
+
+class EdgeUpstreamPoolRead(BaseModel):
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    name: str
+    description: str | None = None
+    servers: list[dict[str, Any]] = Field(default_factory=list)
+    health_check: dict[str, Any] = Field(default_factory=dict)
+    policy: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
 class EdgeAccessEventRead(BaseModel):
     id: int
     agent_id: uuid.UUID
@@ -218,5 +238,6 @@ class EdgeDesiredStateResponse(BaseModel):
     diff: str | None = None
     profiles: list[dict[str, Any]] = Field(default_factory=list)
     routes: list[dict[str, Any]] = Field(default_factory=list)
+    upstream_pools: list[dict[str, Any]] = Field(default_factory=list)
     effective: dict[str, Any] = Field(default_factory=dict)
     reconcile_sent: bool = False
