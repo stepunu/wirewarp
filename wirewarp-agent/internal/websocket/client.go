@@ -36,6 +36,9 @@ const (
 	watcherInterval = 2 * time.Second
 	maxBackoff      = 60 * time.Second
 	initialBackoff  = 1 * time.Second
+	// Edge desired-state frames can include full rendered Traefik/Nginx config
+	// for many routes. nhooyr defaults to 32 KiB, which is too small for that.
+	maxControlFrameBytes int64 = 4 << 20
 )
 
 type Client struct {
@@ -132,6 +135,7 @@ func (c *Client) connect(ctx context.Context) error {
 		return err
 	}
 	defer conn.CloseNow()
+	configureConnection(conn)
 
 	send := func(v any) error {
 		return wsjson.Write(ctx, conn, v)
@@ -306,6 +310,10 @@ func (c *Client) connect(ctx context.Context) error {
 	}
 }
 
+func configureConnection(conn *websocket.Conn) {
+	conn.SetReadLimit(maxControlFrameBytes)
+}
+
 // extractIPs reads `public_ips` out of a heartbeat for diff comparison.
 // Returns a sorted copy so equalSorted() works.
 func extractIPs(h map[string]any) []string {
@@ -341,7 +349,6 @@ func equalSorted(a, b []string) bool {
 	}
 	return true
 }
-
 
 // fetchPublicIP returns the machine's public IPv4 address.
 // Returns empty string on failure — non-fatal, agent still connects.
