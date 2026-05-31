@@ -7,7 +7,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = "0038_edge_upstream_pools"
-down_revision = "0037_edge_runtime_resources"
+down_revision = "0037"
 branch_labels = None
 depends_on = None
 
