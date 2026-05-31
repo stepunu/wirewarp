@@ -8,6 +8,28 @@ It exists to make future sessions repeat the same disciplined loop: rebase,
 implement, test, push, wait for CI/generated commits, rebuild, update agents, and
 verify live behavior.
 
+## Current Implementation Status
+
+The Node Edge parity slices are implemented on the
+`node-edge-cloudflare-parity` branch through:
+
+- Capability model, mode/state migrations, component desired state, and
+  install/enable/disable/reconcile APIs.
+- Route/profile/path/upstream resources, effective policy, rendered config
+  versions, fragments, Traefik import/diff, cache/access APIs, and full
+  desired-state snapshots.
+- Agent desired-state reconcile for Traefik, CrowdSec/AppSec, access logs, and
+  Nginx cache.
+- Live access event ingestion and dashboard invalidation.
+- Nginx `proxy_cache` rendering/status/test plus safe full-node or exact
+  host/path purge.
+- Unified Nodes UI with TCP/UDP-only and Security Edge states.
+
+The remaining work is operational: merge to `main`, wait for the main GitHub
+Actions image workflow, rebuild `192.168.20.116`, update connected agents, and
+capture live verification evidence. Broader cache purge scopes still need a
+cache index before they can be made destructive.
+
 ## Definition Of Done
 
 A slice is not done until all relevant items are true:
@@ -26,7 +48,7 @@ A slice is not done until all relevant items are true:
 
 Do not report a slice as complete from local tests alone when it affects the
 deployed control server, agent, edge routing, TLS, DNS, firewall, CrowdSec,
-Traefik, or future Nginx cache behavior.
+Traefik, or Nginx cache behavior.
 
 ## Standard Loop
 
@@ -110,11 +132,11 @@ git rebase origin/main
      origin health, TLS controls.
 
 7. **Nginx proxy cache**
-   - Add headers-only mode first.
-   - Add managed Nginx `proxy_cache` install/status/reconcile.
-   - Gate edge cache on real health checks.
-   - Prove `MISS -> HIT`, `BYPASS`, and purge behavior before exposing cache as
-     available.
+   - Headers/cache policy, managed Nginx `proxy_cache`
+     install/status/reconcile, and health-gated availability are implemented.
+   - Full-node and exact host/path purge are implemented without NGINX Plus.
+   - Remaining live gate: prove `MISS -> HIT`, `BYPASS`, and post-purge `MISS`
+     on a deployed node.
 
 8. **Traefik import and bulk desired state**
    - Add preview/apply/upsert import.
@@ -136,7 +158,7 @@ Use affected checks, not all checks every time:
 - WAF probe such as `/.env` returns the expected block status.
 - Rate limits produce expected throttling and dashboard/live-feed events.
 - Imported routes are reachable and idempotent on re-import.
-- Future cache route proves `MISS -> HIT`; auth/API path proves `BYPASS`; purge
+- Cache route proves `MISS -> HIT`; auth/API path proves `BYPASS`; purge
   causes a subsequent `MISS`.
 
 ## Final Response Requirements

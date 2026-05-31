@@ -1,9 +1,38 @@
 # Node Edge Console - Cloudflare-like control plane with API parity
 
-**Status**: Designed 2026-05-31. Supersedes and extends the Phase 12/13
-security-edge designs by turning the per-server node edge into a full control
-surface with policy inheritance, live request visibility, and first-class API
-automation for Ansible.
+**Status**: Implemented 2026-05-31 with remaining live-rollout gates. This
+supersedes and extends the Phase 12/13 security-edge designs by turning the
+per-server node edge into a full control surface with policy inheritance, live
+request visibility, and first-class API automation for Ansible.
+
+## Implementation Snapshot
+
+Implemented:
+
+- Per-node `tcp_udp_only` vs `security_edge` mode, enabled/disabled state,
+  component desired state, install/enable/disable/reconcile APIs, and
+  `edge_feature_disabled` errors for unsupported nodes.
+- Route/profile/path-rule/upstream-pool resources, effective-policy
+  inheritance, rendered config versions, fragments, Traefik import
+  preview/apply/upsert, and full desired-state snapshots.
+- Server desired-state dispatch only for `security_edge` + `enabled` nodes.
+- Agent desired-state reconcile for Traefik, CrowdSec/AppSec, access logs, and
+  local Nginx cache, plus reversible stop-only edge disable.
+- Live access feed from Traefik JSON logs through agent batches into
+  `edge_access_events` and dashboard `edge.access` invalidation.
+- Local Nginx `proxy_cache` behind Traefik with status snapshots, health-gated
+  availability, cache test command, and safe full-node/exact host-path purge.
+- Unified Nodes list/detail UI with TCP/UDP-only enable panel and Security Edge
+  tabs for routes, policies, access, cache, import/diff, and advanced config.
+
+Remaining gates:
+
+- Deploy the merged main image, update agents, and verify behavior on live
+  nodes.
+- Prove external HTTPS route, WAF block/observe, rate-limit events, imported
+  route reachability, cache `MISS -> HIT`, auth/API `BYPASS`, and post-purge
+  `MISS`.
+- Add a cache index before enabling broader host/prefix/route purge scopes.
 
 **Goal**: let operators choose whether a WireWarp server node is a simple
 WireGuard plus TCP/UDP forwarding host or a full security-edge host. When the

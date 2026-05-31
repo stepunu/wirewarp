@@ -1,6 +1,7 @@
 # Domain Model
 
 Generated on 2026-05-30 from non-gitignored files, excluding `docs/`.
+Updated on 2026-05-31 for the Node Edge / Cloudflare-parity implementation.
 
 ## Core Concepts
 
@@ -37,6 +38,37 @@ A user profile on a VPN endpoint. It has one tunnel IP, generated key material, 
 Security edge:
 The Traefik/CrowdSec integration for HTTP sites, WAF/appsec behavior, decisions, certificates, and security events.
 
+Node Edge capability:
+A tunnel server can be `tcp_udp_only` or `security_edge`. The default for new
+server nodes is `tcp_udp_only`; Security Edge is opt-in and has a separate
+`enabled` or `disabled` state. Disabling Security Edge is reversible and
+stop-only: WireWarp stops/disables Traefik, CrowdSec/AppSec, access logging, and
+Nginx cache services, but preserves route rows, generated configs, secrets,
+packages, and ACME state.
+
+Edge route/profile resources:
+HTTP edge behavior is modeled as node policies, reusable profiles, routes, path
+rules, upstream pools, fragments, rendered config versions, access events, and
+cache snapshots. Policy inheritance is:
+
+```text
+global edge defaults
+  -> node edge defaults
+  -> route profile
+  -> route override
+  -> path rule override
+```
+
+APIs return both stored desired values and effective inherited policy where that
+matters for UI and automation.
+
+Edge cache:
+The managed cache is local to each Security Edge VPS. Traffic flows
+`client -> Traefik security edge -> local Nginx proxy_cache -> origin over WireGuard`.
+The backend is marked available only after the agent proves `MISS -> HIT` or a
+valid `BYPASS`. Exact host/path and full-node purge helpers are implemented;
+host/prefix/route purge scopes require a cache index before they can be safe.
+
 ## Relationship Sketch
 
 ```text
@@ -53,6 +85,12 @@ TunnelServer
   -> PortForward*
   -> CrowdSecSnapshot
   -> TraefikSnapshot
+  -> EdgeComponentState*
+  -> EdgeNodePolicy
+  -> EdgeProfile*
+  -> EdgeUpstreamPool*
+  -> EdgeAccessEvent*
+  -> EdgeCacheSnapshot*
 
 TunnelClient
   -> TunnelClientAttachment*
@@ -69,6 +107,7 @@ VpnEndpoint
 
 PortForward
   -> EdgeRouteConfig, when service_kind=http
+  -> EdgePathRule*
 ```
 
 ## Registration And Authentication
@@ -89,6 +128,8 @@ Reconnect:
 1. Agent sends an `auth` message with its stored JWT.
 2. Server validates `typ=agent`, marks it connected, and replays desired state commands:
    - Server agents get active port forwards and peers.
+   - Security Edge server agents get `edge_desired_state` only when
+     `edge_mode=security_edge` and `edge_state=enabled`.
    - Client agents get attachment commands and VPN-related state.
 
 User auth uses local credentials, OIDC, or LDAP depending on settings. Roles include admin/operator/viewer-style operations plus `vpn_user` for self-service VPN access.
@@ -149,9 +190,16 @@ HTTP sites:
 
 - `service_kind=http`.
 - A `PortForward` stores the public port and target.
-- `EdgeRouteConfig` stores domains, TLS/ACME settings, middleware, auth, WAF, rate limits, IP allowlists, and other edge policy.
-- Server builds Traefik dynamic config and dispatches `traefik_sync_config`.
-- Traefik status and security events flow back through WebSocket messages.
+- `EdgeRouteConfig` stores domains, TLS/ACME settings, middleware, auth, WAF,
+  rate limits, IP allowlists, origin behavior, cache overrides, and other edge
+  policy.
+- Route-shaped APIs expose routes by ID and by domain, profiles, path rules,
+  upstream pools, import/diff, rendered/effective config, access events, cache
+  status/test/purge, and full desired-state snapshots.
+- Server builds deterministic Traefik static/dynamic config plus optional Nginx
+  cache config and dispatches `edge_desired_state`.
+- Traefik access logs and security/cache status flow back through WebSocket
+  messages and dashboard realtime invalidation.
 
 ## LAN Egress Pinning
 
@@ -193,7 +241,11 @@ Important command types:
 - LAN routing: `set_lan_egress`, `set_lan_snat`, `gateway_up`, `gateway_down`.
 - Agent lifecycle: `agent_update`.
 - VPN: `vpn_endpoint_up`, `vpn_endpoint_down`, `vpn_peer_add`, `vpn_peer_remove`, `vpn_peer_update_rules`.
-- Security edge: `crowdsec_install`, `crowdsec_sync_whitelist`, `traefik_install`, `traefik_sync_config`, `crowdsec_appsec_enable`.
+- Security edge compatibility: `crowdsec_install`, `crowdsec_sync_whitelist`,
+  `traefik_install`, `traefik_sync_config`, `crowdsec_appsec_enable`.
+- Node Edge: `edge_desired_state`, `edge_disable`, `edge_cache_purge`,
+  `edge_cache_test`. Install and enable flows update capability state, then
+  dispatch `edge_desired_state`.
 
 ## Realtime Events
 
@@ -214,6 +266,8 @@ Common event families:
 - `crowdsec.changed`
 - `traefik.changed`
 - `security.changed`
+- `edge.changed`
+- `edge.access`
 
 The realtime bus is bounded. If a dashboard subscriber falls behind, it gets a `desync` event and the frontend invalidates all main query groups.
 
@@ -233,5 +287,7 @@ Agents also emit:
 - CrowdSec status snapshots.
 - Traefik status snapshots.
 - Security events from decisions and edge signals.
+- Edge access events parsed from Traefik JSON access logs.
+- Edge cache snapshots from local Nginx proxy-cache status and health probes.
 
 The server stores peer snapshots and periodically samples traffic counters for charts.

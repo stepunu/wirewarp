@@ -1,7 +1,7 @@
 # WireWarp — System Architecture & Project Structure
 
-**Version:** 0.3 (Implementation snapshot)
-**Date:** 2026-05-30
+**Version:** 0.4 (Implementation snapshot)
+**Date:** 2026-05-31
 
 > This began as a planning document. It has been updated for the current
 > implementation where practical, but the concise source-of-truth snapshot
@@ -14,7 +14,8 @@
 WireWarp is a self-hosted WireGuard tunnel management platform. It consists of three components:
 
 1. **Control Server** — Web dashboard + API + database, runs on your home server
-2. **Tunnel Server Agent** — Runs on each VPS, manages WireGuard server + iptables
+2. **Tunnel Server Agent** — Runs on each VPS, manages WireGuard server,
+   iptables, and optional Security Edge services
 3. **Tunnel Client Agent** — Runs on each gateway LXC/VM, manages WireGuard client config
 
 Agents connect **outbound** to the control server via persistent WebSocket connections. The control server never initiates connections to agents — agents phone home.
@@ -48,6 +49,8 @@ Agents connect **outbound** to the control server via persistent WebSocket conne
 │  - iptables / DNAT  │                      │  - LAN forwarding    │
 │  - Public IP mgmt   │                      │  - Egress pins       │
 │  - Peer management  │                      │  - Reports status    │
+│  - Optional edge    │                      │                      │
+│    stack            │                      │                      │
 └─────────────────────┘                      └──────────────────────┘
 ```
 
@@ -87,9 +90,14 @@ Runs on each VPS that acts as a WireGuard endpoint. Single Go binary managed by 
   - Initialize WireGuard interface
   - Add / remove peers
   - Add / remove iptables DNAT rules
+  - Reconcile Security Edge desired state when enabled
+  - Stop Security Edge services on reversible disable
+  - Render and health-check local Nginx proxy cache when configured
   - Save iptables rules (netfilter-persistent)
 - Collect and report metrics (peer status, bandwidth, system stats)
 - Manage `/etc/wireguard/` config files
+- Optionally manage Traefik, CrowdSec/AppSec, Traefik JSON access logs, and
+  local Nginx `proxy_cache`
 
 **Stack:**
 - Go (single binary, ~10MB, <30MB RAM idle)
@@ -230,15 +238,54 @@ All control server ↔ agent communication happens over WebSocket using JSON mes
 
 ---
 
+## Node Edge / Security Edge
+
+Tunnel server nodes carry an explicit edge capability:
+
+- `tcp_udp_only`: WireGuard, attachments, raw TCP/UDP forwards, healing, and
+  route restore only.
+- `security_edge`: Traefik, CrowdSec/AppSec, live access events, route/profile
+  policy, rendered config history, and optional local Nginx cache.
+
+New server nodes default to `tcp_udp_only`. Existing nodes are migrated to
+`security_edge` only when they already have Traefik/CrowdSec snapshots, HTTP
+routes, or edge policy. Edge APIs are guarded; TCP/UDP-only or disabled nodes
+return machine-readable `edge_feature_disabled` errors.
+
+Security Edge disable is stop-only and reversible. The agent disables/stops
+Traefik, CrowdSec, and Nginx cache services, while preserving route definitions,
+generated configs, packages, secrets, and ACME state. Enabling later dispatches
+the saved desired state again.
+
+Policy resolves in this order:
+
+```text
+global edge defaults -> node defaults -> route profile -> route override -> path rule override
+```
+
+The public edge path for cached routes is:
+
+```text
+client -> Traefik security edge -> local Nginx proxy_cache -> origin over WireGuard
+```
+
+Nginx cache availability is gated by agent health proof: either `MISS -> HIT` or
+a valid `BYPASS`. Full-node and exact host/path purge are implemented; broader
+host/prefix/route purge scopes require a cache index.
+
+---
+
 ## Database Schema
 
 The current schema source of truth is the SQLAlchemy model set in
 `wirewarp-server/app/models/` plus Alembic migrations through
-`0030_security_events`. The SQL below is the original planning sketch and
+`0038_edge_upstream_pools`. The SQL below is the original planning sketch and
 is kept only as historical context; it omits later tables such as
 attachments, tunnel server IPs, users/roles, VPN endpoints/profiles,
 LAN clients, WireGuard peer snapshots, traffic samples, CrowdSec/Traefik
-snapshots, security events, and edge route config.
+snapshots, security events, Node Edge component state, profiles, policies, path
+rules, config versions, fragments, upstream pools, access events, cache
+snapshots, and edge route config.
 
 ```sql
 -- Agents (tunnel servers and clients)
@@ -370,6 +417,9 @@ wirewarp/
 │   │   │   ├── vpn_endpoints.py
 │   │   │   ├── vpn_profiles.py
 │   │   │   ├── security.py
+│   │   │   ├── nodes.py          # Unified node + edge capability APIs
+│   │   │   ├── edge.py           # Route/profile/path/upstream APIs
+│   │   │   ├── edge_node.py      # Node-scoped edge runtime APIs
 │   │   │   ├── settings.py
 │   │   │   └── audit.py
 │   │   ├── websocket/
@@ -382,15 +432,19 @@ wirewarp/
 │   │       ├── vpn_ops.py
 │   │       ├── traefik_ops.py
 │   │       ├── crowdsec_ops.py
+│   │       ├── edge_ops.py
+│   │       ├── edge_resources.py
+│   │       ├── edge_runtime.py
+│   │       ├── edge_cache_ops.py
 │   │       └── traffic_sampler.py
-│   ├── alembic/                  # DB migrations through 0030
+│   ├── alembic/                  # DB migrations through 0038
 │   ├── requirements.txt
 │   ├── Dockerfile
 │   └── docker-compose.yml        # Full stack (api + postgres + web)
 │
 ├── wirewarp-web/                 # Dashboard (React/TypeScript)
 │   ├── src/
-│   │   ├── pages/                # Dashboard, Agents, Tunnels, LAN,
+│   │   ├── pages/                # Dashboard, Nodes, Agents, Tunnels, LAN,
 │   │   │                         # PortForwards, VPN, Users, Security
 │   │   ├── components/           # Layout, UI primitives, tables, cards
 │   │   └── lib/
@@ -409,6 +463,8 @@ wirewarp/
 │   │   ├── websocket/            # Persistent WS connection + reconnect
 │   │   ├── executor/             # Command dispatcher
 │   │   ├── handlers/             # Server/client/VPN/edge/heal commands
+│   │   │                         # edge_desired, edge_lifecycle,
+│   │   │                         # edge_cache, server_edge_reconciler
 │   │   ├── wireguard/            # wg / wg-quick wrappers
 │   │   ├── iptables/             # iptables wrappers
 │   │   ├── lanscan/              # LAN client discovery
@@ -524,6 +580,11 @@ Back in Dashboard:
 - TLS verification uses the standard Go verifier unless `--insecure` is enabled.
 - Agent command whitelist — only specific operations allowed, no arbitrary remote shell.
 - The systemd service runs the agent with `CAP_NET_ADMIN` and `CAP_NET_RAW`; package install flows that need broader privileges escape through controlled `systemd-run` units.
+- Security Edge services are optional per server node. Disable is intentionally
+  non-destructive so certificates, generated config, package state, and route
+  definitions survive toggles.
+- Edge access events never include request bodies. Query/header capture follows
+  conservative API defaults.
 - Control server behind Traefik with rate limiting on the WebSocket endpoint
 
 ### Key Generation & Privacy Constraint

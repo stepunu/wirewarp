@@ -222,11 +222,12 @@ applied, tests green, `/rebuild`, manual gate verified, commit.
 ### 12.1 Security Overview + charting layer
 - [x] `wg_traffic_samples` append-only table sampled from `wg_peer_snapshots` + retention
 - [~] Aggregate endpoints over CrowdSec snapshots + traffic samples exist, but several access/visitor/HTTP series are placeholders
-- [~] `/security` Overview page, uPlot layer, KPI tiles, top attackers, and Security sidebar exist; real aggregate completeness still pending
+- [~] `/security` Overview page, uPlot layer, KPI tiles, top attackers, and Security sidebar exist; real aggregate completeness still pending. Node-scoped access data is now implemented in `edge_access_events`.
 - [ ] Gate: Overview renders real aggregates with a working time-range toggle
 
 ### 12.2 Events / Reports
 - [~] `security_events` table/API/feed exists; CrowdSec/Traefik normalization and drill-down payloads are still partial
+- [x] `edge_access_events` table/API/feed exists for Traefik JSON access logs with host/path/status/action/IP/country/method/route/time filters
 - [x] `/security/events` page exists
 - [ ] Gate: a triggered detection appears with full drill-down
 
@@ -235,15 +236,16 @@ applied, tests green, `/rebuild`, manual gate verified, commit.
 - [x] `port_forwards.service_kind` (http|raw) + `domain`; new `edge_route_config` table
 - [x] HTTP-service CRUD → Traefik routers (Host rule → upstream over tunnel); raw stays DNAT
 - [x] `/security/sites` page with run-mode + feature-toggle chips
+- [x] Route-shaped Node Edge APIs and UI exist as the preferred interface while legacy Sites APIs remain compatible
 - [ ] Gate: an HTTP service is reachable through Traefik+TLS; raw forward still works; Traefik survives agent restart from disk
 
 ### 12.4 WAF (CrowdSec AppSec via Traefik plugin)
 - [~] Agent: AppSec enable command and Traefik middleware rendering exist; collection/bouncer lifecycle needs more hardening
-- [x] Per-route WAF mode (off/observe/block) on `edge_route_config` + Sites run-mode
+- [x] Per-route WAF mode (off/observe/block) on `edge_route_config`, Sites run-mode, profiles/routes/path-policy resources, and Node Edge UI
 - [ ] Gate: simulated SQLi/XSS blocked (block) or logged (observe) → appears in Events
 
 ### 12.5 Protections (edge rules)
-- [~] Per-route middlewares exist for rate limit, IP allowlist, auth, WAF/bouncer paths; antibot/geo/dnsbl are not complete
+- [~] Per-route middlewares exist for rate limit, IP allowlist, auth, WAF/bouncer paths, headers/transforms, TLS/origin options, and inherited node/profile/path policy; antibot/geo/dnsbl remain partial/local-only
 - [x] `/security/protections` page exists
 - [ ] Gate: each toggle visibly takes effect on a test request
 
@@ -262,17 +264,32 @@ The edge is provisioned + healed automatically (no install clicks), and the
 dashboard reorganizes around one node-with-a-role model.
 
 ### 13.A Self-healing edge (agent reconciler + backend)
-- [ ] Promote the healer into a reconciler that drives CrowdSec/Traefik/AppSec to present+healthy on server-role agents (health checks every cycle; heavy actions only on drift)
-- [ ] Gentle-first escalation (restart → re-apply/re-register → purge+reinstall after K cycles), preserving acme.json + wg key
-- [ ] Degraded state + exponential backoff (cap ~30 min) on non-convergeable hosts; no reinstall thrash / LE rate-limit storms
-- [ ] Per-component health (`healthy/converging/repairing/degraded` + last_error) via crowdsec/traefik snapshots + heal_events; `emit_edge_changed()`
-- [ ] Remove operator install endpoints/buttons (keep handlers as internal reconciler calls); subsume the standalone pollers
-- [ ] Gates: fresh server agent self-provisions to edge:healthy with no action; killing crowdsec self-heals; non-Debian → degraded+backoff; Traefik reinstall preserves acme.json
+- [x] Add server `edge_mode`, `edge_state`, install phase, enabled/disabled audit timestamps, component desired state, and default migration behavior (`tcp_udp_only` unless existing edge state is detected)
+- [x] Add node edge capability APIs: get/put capabilities, install, enable, disable, reconcile; edge-only APIs return `edge_feature_disabled` when unsupported
+- [x] Dispatch `edge_desired_state` only for `security_edge` + `enabled`; TCP/UDP-only nodes skip Traefik/CrowdSec/AppSec/Nginx desired state
+- [x] Agent handles reversible `edge_disable` by stopping/disabling services while preserving files, packages, route rows, secrets, and ACME state
+- [x] Agent reconciles saved desired state for Traefik, CrowdSec/AppSec, access logs, and Nginx cache
+- [~] Per-component health is surfaced from CrowdSec/Traefik snapshots, component desired rows, and Nginx cache snapshots; richer degraded/backoff escalation still needs real-host hardening
+- [ ] Gates: fresh TCP/UDP-only server does not install edge services; enabling Security Edge installs/reconciles services; disabling stops services and preserves config; re-enable restores routes
 
 ### 13.B Unified console IA (frontend)
-- [ ] Nodes list replaces Agents + Tunnel servers + Tunnel clients (role filter; gateways visually distinct)
-- [ ] Role-adaptive node detail (server/gateway/client); merge Agent-detail + Tunnel-server-detail
-- [ ] Server node Security Edge section: read-only edge health panel + Sites merged with Protections (inline WAF/rate-limit/auth/geo/ACL; ip_allow/deny inputs; new site defaults to observe)
-- [ ] Security Overview overhaul (hybrid): per-node edge health + all-sites roll-up, all clickable through to owning node
-- [ ] Remove `/security/sites` + `/security/protections` standalone pages and all install buttons
-- [ ] Gates: one Nodes list with gateway treatment; per-node edge health + inline site config; Overview drills into nodes
+- [x] Nodes list exists with role filter, gateway treatment, mode/state badges, and component health summary
+- [x] Role-adaptive node detail exists with Overview, Routes, Security, Rate Limits, Access, TLS, Origin, Headers & Transforms, Cache, Import/Diff, Advanced, plus existing Forwards/Peers/Activity/Audit surfaces
+- [x] TCP/UDP-only server nodes show a concise Security Edge enable panel instead of broken route/cache/WAF controls
+- [x] Security Edge node tabs manage route/profile/path policy, upstream pools, access feed, cache status/test/purge, import/diff, and rendered config
+- [~] Legacy `/security/sites` and `/security/protections` pages remain for compatibility; Node Edge is the preferred route/profile surface
+- [ ] Gates: browser QA on desktop/mobile for TCP/UDP-only enable panel, Security Edge tabs, live feed filtering, import/diff, and cache unavailable/available states
+
+### 13.C Node Edge API parity
+- [x] Profiles CRUD, node policy, effective policy, routes by ID/domain, path rules, upstream pools, fragments, rendered/effective config, config versions, access events, cache status/stats/purge/test, Traefik import preview/apply/upsert, and full desired-state snapshots exist
+- [x] Secrets remain write-only with `*_set` readback fields where exposed
+- [x] `dry_run`, `apply=false`, `prune`, and `return_diff` are supported on the bulk/import surfaces implemented for UI and automation
+- [~] Compatibility with existing `port_forwards` + `edge_route_configs` is preserved; Ansible examples/docs are still pending
+
+### 13.D Local Nginx cache
+- [x] Add headers/cache policy to node and route policy
+- [x] Render managed Nginx `proxy_cache` backend, install/reload service, report status snapshots, and route Traefik to `127.0.0.1:18080` when cache is active
+- [x] Gate cache availability on `MISS -> HIT` or valid `BYPASS`
+- [x] Implement cache test command and safe full-node/exact host-path purge helper without NGINX Plus
+- [~] Host/prefix/route purge scopes return unsupported until a cache index exists
+- [ ] Gates: live route proves `MISS -> HIT`; auth/API path proves `BYPASS`; purge causes next request to `MISS`

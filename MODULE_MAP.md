@@ -1,13 +1,14 @@
 # Module Map
 
 Generated on 2026-05-30 from non-gitignored files, excluding `docs/`.
+Updated on 2026-05-31 for the Node Edge / Cloudflare-parity implementation.
 
 ## Root
 
 - `README.md` - user-facing overview, features, quick start, and stack notes.
 - `ARCHITECTURE.md` - older architecture/planning document. Useful for intent, but verify against code.
 - `CLAUDE.md` - agent/developer guidance and project conventions. Some implementation details are stale.
-- `tasks.md` - roadmap-style task list. Phase 12 and Phase 13 look like the current pending work.
+- `tasks.md` - roadmap-style task list. Phase 12 and Phase 13 now reflect the implemented Node Edge surface plus remaining live-verification and cache-index work.
 - `.github/workflows/tests.yml` - CI for server tests, Go checks, and frontend build.
 - `.github/workflows/docker-image.yml` - builds the static agent artifact, commits it, and publishes the server image.
 - `.claude/commands/rebuild.md` - deployment command notes for rebuilding the control server container.
@@ -40,7 +41,8 @@ Core models:
 - `app/models/gateway_lan_client.py` - discovered/pinned LAN clients.
 - `app/models/vpn_endpoint.py`, `vpn_profile.py`, `vpn_permission.py` - road-warrior VPN state.
 - `app/models/system_settings.py` - singleton system settings.
-- `app/models/crowdsec_snapshot.py`, `traefik_snapshot.py`, `security_event.py`, `edge_route_config.py` - security edge state.
+- `app/models/crowdsec_snapshot.py`, `traefik_snapshot.py`, `security_event.py`, `edge_route_config.py` - legacy and compatibility security edge state.
+- `app/models/edge_component_state.py`, `edge_node_policy.py`, `edge_profile.py`, `edge_path_rule.py`, `edge_config_version.py`, `edge_access_event.py`, `edge_cache_snapshot.py`, `edge_fragment.py`, `edge_upstream_pool.py` - Node Edge capability, policy, routing, access-feed, cache, and rendered-config state.
 - `app/models/heal_event.py` - agent self-healing events.
 - `app/models/wg_peer_snapshot.py`, `wg_traffic_sample.py` - WireGuard peer snapshots and traffic samples.
 
@@ -53,6 +55,9 @@ API routers:
 - `app/routers/tunnel_client_attachments.py` - attach/detach clients to servers.
 - `app/routers/lan_clients.py` - discovered LAN clients, pinning, egress routes, SNAT.
 - `app/routers/port_forwards.py` - raw TCP/UDP forwards and HTTP edge forwards.
+- `app/routers/nodes.py` - unified node inventory/detail plus node-scoped edge capabilities, policy, routes, install/enable/disable/reconcile actions.
+- `app/routers/edge_node.py` - node-scoped edge runtime resources: access events, cache status/stats/purge/test, upstream pools, desired/rendered config, import, versions, fragments.
+- `app/routers/edge.py` - global/route-shaped edge resources: profiles, routes by ID, path rules, fragments, access events, route cache actions, upstream pool updates.
 - `app/routers/service_templates.py` - reusable service presets.
 - `app/routers/vpn_endpoints.py` - VPN endpoint CRUD and per-user permissions.
 - `app/routers/vpn_profiles.py` - admin and self-service VPN profiles.
@@ -68,6 +73,11 @@ Services:
 - `app/services/vpn_ops.py` - VPN endpoint/profile config generation and agent command dispatch.
 - `app/services/traefik_ops.py` - desired Traefik static/dynamic config generation and sync dispatch.
 - `app/services/crowdsec_ops.py` - desired CrowdSec whitelist generation and sync dispatch.
+- `app/services/edge_ops.py` - Security Edge capability guardrails, component desired state, full desired-state rendering, and edge command dispatch.
+- `app/services/edge_resources.py` - profiles, node policy, effective-policy inheritance, route/path helpers, and policy writes.
+- `app/services/edge_runtime.py` - rendered/effective config snapshots, config version rows, and desired-state document assembly.
+- `app/services/edge_cache_ops.py` - node/route cache policy normalization and Nginx cache desired-state rendering.
+- `app/services/traefik_importer.py` - Traefik import preview/apply/upsert mapping.
 - `app/services/dns_sync.py` - Cloudflare DNS sync for LAN egress/service changes.
 - `app/services/service_templates.py` - service template defaults and matching.
 - `app/services/traffic_sampler.py` - background sampling of WireGuard peer counters.
@@ -75,16 +85,16 @@ Services:
 WebSocket and realtime:
 
 - `app/websocket/hub.py` - connected agent registry and send helpers.
-- `app/websocket/handlers.py` - heartbeat, command result, metrics, healing, CrowdSec, Traefik, and security event handlers.
+- `app/websocket/handlers.py` - heartbeat, command result, metrics, healing, CrowdSec, Traefik, security event, edge access event, and edge cache status handlers.
 - `app/websocket/schemas.py` - WebSocket message payload schemas.
 - `app/realtime/bus.py` - bounded fanout bus for dashboard clients.
 - `app/realtime/events.py` - typed dashboard event emitters.
 
 Schema and tests:
 
-- `alembic/versions/*.py` - migration chain through `0030_security_events`.
+- `alembic/versions/*.py` - migration chain through `0038_edge_upstream_pools`.
 - `tests/conftest.py` - SQLite async test harness, dependency overrides, fake WebSocket manager, factories.
-- `tests/test_*.py` - focused backend coverage for auth, tunnels, LAN, VPN, port forwards, security edge, websocket handlers, and migrations-adjacent behavior.
+- `tests/test_*.py` - focused backend coverage for auth, tunnels, LAN, VPN, port forwards, security edge, Node Edge capability/routes/runtime/access/cache APIs, websocket handlers, and migrations-adjacent behavior.
 
 ## Agent: `wirewarp-agent`
 
@@ -109,6 +119,10 @@ Command handlers:
 - `internal/handlers/vpn.go` - VPN endpoint and peer lifecycle.
 - `internal/handlers/traefik.go` - Traefik install/sync/status, appsec enable, security events.
 - `internal/handlers/crowdsec.go` and `crowdsec_install.go` - CrowdSec install, status polling, whitelist sync.
+- `internal/handlers/edge_desired.go` - server Security Edge desired-state persistence and reconciliation across Traefik, CrowdSec/AppSec, access logs, and Nginx cache.
+- `internal/handlers/edge_lifecycle.go` - reversible install/enable/disable helpers that stop services without deleting generated state.
+- `internal/handlers/edge_cache.go` - managed Nginx `proxy_cache` config rendering, status collection, health probes, cache test command, and safe purge helpers.
+- `internal/handlers/server_edge_reconciler.go` - server-mode edge reconcile/status polling loop.
 - `cmd/agent/main.go` - also contains the current self-update handler.
 - `internal/handlers/routing_restore.go` - restore saved routing after reboot.
 - `internal/handlers/client_heal.go`, `server_heal.go`, `heal.go` - recurring self-healing and event reporting.
@@ -151,14 +165,15 @@ API and state:
 Pages:
 
 - `src/pages/Dashboard.tsx` - operational summary.
-- `src/pages/Agents.tsx` and `AgentDetail.tsx` - node inventory and detail.
+- `src/pages/Agents.tsx` and `AgentDetail.tsx` - legacy agent inventory/detail.
+- `src/pages/Nodes.tsx` and `NodeDetail.tsx` - unified node console with role-aware tabs, Security Edge capability panel, routes, policies, access feed, cache, import/diff, and advanced config views.
 - `src/pages/TunnelServers.tsx`, `TunnelServerDetail.tsx` - server operations, status, peers, edge controls.
 - `src/pages/TunnelClients.tsx`, `TunnelClientDetail.tsx` - gateway clients, attachments, LAN context.
 - `src/pages/LanClients.tsx` - discovered LAN devices, pinning, egress, service exposure.
 - `src/pages/PortForwards.tsx` - raw and HTTP service forwarding.
 - `src/pages/VpnEndpoints.tsx` and `MyVpn.tsx` - admin VPN endpoints and user VPN config download.
 - `src/pages/Users.tsx`, `Settings.tsx`, `Login.tsx` - admin and auth UI.
-- `src/pages/Security*.tsx` - security overview, events, sites, protections, bans, certs.
+- `src/pages/Security*.tsx` - security overview, events, sites, protections, bans, certs. These remain compatible while Node Edge route/profile controls become the preferred surface.
 
 Components:
 

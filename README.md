@@ -14,6 +14,9 @@ Managing WireGuard across a homelab — multiple VPS exit nodes, gateway LXCs, p
 - **Multi-server gateways** — one gateway client can peer with N tunnel servers simultaneously; each attachment gets its own `wgN` interface, fwmark, and routing table.
 - **Multi-IP per tunnel server** — bind port forwards to a specific public IP; DNAT rules disambiguate by destination IP.
 - **Port forwarding** — TCP/UDP DNAT with templates (DayZ, Minecraft, Web, RDP). Live iptables preview.
+- **Optional Security Edge per server node** — new server nodes default to
+  `tcp_udp_only`; operators can enable `security_edge` later for Traefik,
+  CrowdSec/AppSec, live access logs, route/profile controls, and local cache.
 - **VPN endpoints + per-user permissions** — admins configure a VPN endpoint on a gateway client; users get device profiles + QR code at `/vpn`. Per-(user, endpoint) firewall rules.
 - **LAN client discovery + DNS sync** — gateway agents scrape conntrack for LAN hosts; DNS records sync to Cloudflare automatically when egress IP changes (or surface a manual-update notice).
 
@@ -23,6 +26,12 @@ Managing WireGuard across a homelab — multiple VPS exit nodes, gateway LXCs, p
 - **wg-easy-style peer tables** — every WireGuard interface (mesh `wg0/wgN` + road-warrior `wg-vpnN`) ships per-peer RX/TX, endpoint, allowed IPs, persistent-keepalive, and a handshake-recency status dot. Same component on tunnel-server detail, tunnel-client detail, and `VPN endpoints`.
 - **Heal events feed** — when the agent's 60s self-healer re-installs missing routing state, the event lands in `agent_heal_events`; the agent detail page grows a warn badge with the count of last-24h drift incidents.
 - **CrowdSec status card** — tunnel-server detail surfaces `cscli` version, active decisions, top scenarios, top banned IPs. Polled every 5 min by the agent.
+- **Node Edge access feed** — Security Edge nodes emit Traefik JSON access logs
+  through the agent, store them in `edge_access_events`, and update the node
+  console in realtime with filters for host, path, status, action, client IP,
+  country, method, route, and time range.
+- **Nginx cache status** — local `proxy_cache` nodes report backend health,
+  size, config hash, `MISS -> HIT` or `BYPASS` probes, and purge results.
 - **Real-time updates** — dashboard state is primarily invalidated through `/ws/dashboard`; selected security/status views keep short scoped polling or a fallback poll for offline WebSocket recovery.
 
 ### Resilience
@@ -35,7 +44,25 @@ Managing WireGuard across a homelab — multiple VPS exit nodes, gateway LXCs, p
 
 ### Security
 
-- **CrowdSec one-click install** — admin opens the tunnel-server detail page → CrowdSec card → "Install CrowdSec". The agent runs the apt install, registers with the CrowdSec Central API (free community blocklist), installs `crowdsecurity/linux`, and writes an auto-whitelist parser covering every IP and subnet known to the control server (other agents' public IPs, mesh + VPN subnets, gateway LAN subnets, every discovered LAN client). Whitelist re-syncs on hash drift via the same 5-min poll cycle, so adding a LAN client auto-allows it within minutes.
+- **Security Edge capability model** — per-node APIs expose
+  `/api/nodes/{agent_id}/edge/capabilities`, install, enable, disable, and
+  reconcile actions. Edge-only APIs return `edge_feature_disabled` when a node
+  is TCP/UDP-only or disabled.
+- **Reversible edge disable** — disabling Security Edge stops/disables Traefik,
+  CrowdSec/AppSec, access logging, and Nginx cache without deleting generated
+  configs, route rows, packages, secrets, or ACME state. Re-enable reconciles
+  the saved desired state.
+- **Route/profile policy APIs** — HTTP routes can be managed by ID or domain
+  with reusable profiles, node defaults, path rules, upstream pools, rendered
+  config previews, config versions, Traefik import/diff, fragments, and
+  Ansible-friendly desired-state snapshots.
+- **CrowdSec and AppSec** — Security Edge nodes reconcile CrowdSec whitelist
+  state, Traefik middleware, and WAF observe/block settings from control-plane
+  policy.
+- **Local proxy cache** — Traefik remains the public edge and can route selected
+  HTTP traffic to a local Nginx `proxy_cache`, which then reaches the origin over
+  WireGuard. Cache availability is health-gated; full-node and exact host/path
+  purge are implemented, while wider purge scopes wait for a cache index.
 - **Sensitive-port advisory** — the "New port forward" dialog runs the chosen (protocol, port) through a server-side classifier and renders a tip card before submit. Catalogue covers SSH, Telnet, MySQL, Postgres, MongoDB, Redis, Memcached, Elasticsearch, CouchDB, RDP, VNC, Webmin, mail submission, admin HTTP. Tip copy stays narrow on purpose — recommends host-local mitigations (CrowdSec, fail2ban, hide behind WireWarp), no third-party CDN / edge service.
 - **Auth** — local users (bcrypt), OIDC (Google/GitHub/generic), and LDAP. Roles: `admin`, `operator`, `viewer`, plus a `vpn_user` role whose only access is `/vpn`.
 - **Audit log** — every dispatched command logged with actor, type, and details. Visible in dashboard.
@@ -65,7 +92,9 @@ Managing WireGuard across a homelab — multiple VPS exit nodes, gateway LXCs, p
 │  Agent       │  │                  │
 │  (WireGuard  │  │  (WireGuard      │
 │   + iptables │  │   + policy       │
-│   DNAT)      │  │   routing)       │
+│   DNAT       │  │   routing)       │
+│   + optional │  │                  │
+│   edge stack)│  │                  │
 └──────────────┘  └──────────────────┘
 ```
 
@@ -156,7 +185,21 @@ Save/create the attachment → control server orchestrates the handshake automat
 
 **Port Forwards → New Forward**: pick attachment, public IP (multi-IP setups), protocol, ports. Use a template for common setups. Live iptables preview shows you the rule that will be installed.
 
-### 7. Issue VPN profiles to users (optional)
+### 7. Enable Security Edge routes (optional)
+
+Open **Nodes -> [server] -> Settings** and enable **Security Edge** when the VPS
+should terminate HTTP(S) routes. The node console then exposes Routes, Security,
+Rate Limits, Access, TLS, Origin, Headers & Transforms, Cache, Import/Diff, and
+Advanced tabs. TCP/UDP-only nodes keep raw forwards and show a concise enable
+panel instead of inactive edge controls.
+
+Cache flow is local to that VPS:
+
+```text
+client -> Traefik security edge -> local Nginx proxy_cache -> origin over WireGuard
+```
+
+### 8. Issue VPN profiles to users (optional)
 
 **VPN Endpoints → New Endpoint** on a gateway client → **Permissions** to grant access per user. End-users log in and visit `/vpn` to download their `.conf` or scan a QR code from a phone.
 
@@ -271,12 +314,17 @@ wirewarp/
 │   │   │                     #   crowdsec_snapshots    (per-agent)
 │   │   │                     #   traefik_snapshots     (edge proxy status)
 │   │   │                     #   security_events       (edge/security feed)
+│   │   │                     #   edge_* resources      (node edge policy,
+│   │   │                     #     access events, cache, versions, fragments)
 │   │   ├── schemas/          # Pydantic request/response schemas
 │   │   ├── routers/          # REST API. Per-entity dashboards live at
 │   │   │                     #   /tunnel-servers/{id}/{summary,wg-peers,crowdsec,crowdsec/install}
 │   │   │                     #   /tunnel-clients/{id}/{summary,wg-peers}
 │   │   │                     #   /vpn-endpoints/{id}/wg-peers
 │   │   │                     #   /agents/{id}/heal-events
+│   │   │                     #   /nodes/*              (unified node console)
+│   │   │                     #   /nodes/{id}/edge/*    (node edge APIs)
+│   │   │                     #   /edge/*               (route/profile APIs)
 │   │   │                     #   /port-forwards/classify  (sensitive-service)
 │   │   │                     #   /security/*              (overview, events, sites)
 │   │   ├── websocket/        # WS hub + dispatch (heartbeat, command_result,
@@ -286,12 +334,13 @@ wirewarp/
 │   │   └── services/         # Command dispatch, network alloc, dns_sync,
 │   │                         #   port_security, crowdsec_ops, traefik_ops,
 │   │                         #   vpn_ops, traffic_sampler, secrets
-│   ├── alembic/              # Migrations 0001 ... 0030_security_events
+│   ├── alembic/              # Migrations 0001 ... 0038_edge_upstream_pools
 │   ├── Dockerfile            # Multi-stage build (frontend + backend)
 │   └── docker-compose.yml
 ├── wirewarp-web/             # React dashboard
 │   └── src/
 │       ├── pages/            # Login, Dashboard, Agents, AgentDetail,
+│       │                     #   Nodes, NodeDetail,
 │       │                     #   TunnelServers, TunnelServerDetail,
 │       │                     #   TunnelClients, TunnelClientDetail,
 │       │                     #   PortForwards, VpnEndpoints, MyVpn,
@@ -309,6 +358,10 @@ wirewarp/
 │       │                     #   LAN client scrape) + Emit() unsolicited push
 │       ├── executor/         # Command dispatcher
 │       ├── handlers/         # Server + client command handlers, plus
+│       │                     #   edge_desired.go      (Security Edge desired state)
+│       │                     #   edge_lifecycle.go    (install/enable/disable helpers)
+│       │                     #   edge_cache.go        (Nginx proxy cache)
+│       │                     #   server_edge_reconciler.go
 │       │                     #   client_heal.go      (60s drift heal)
 │       │                     #   server_heal.go      (server-side heal)
 │       │                     #   crowdsec.go         (5min cscli poll)
