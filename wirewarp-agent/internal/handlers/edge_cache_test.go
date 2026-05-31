@@ -1,10 +1,15 @@
 package handlers
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/wirewarp/agent/internal/config"
 )
 
 func TestEdgeCachePurgeKeyIsDeterministic(t *testing.T) {
@@ -115,5 +120,64 @@ func TestRenderNginxCacheConfigIncludesProxyCacheDirectives(t *testing.T) {
 func TestParseNginxVersion(t *testing.T) {
 	if got := parseNginxVersion([]byte("nginx version: nginx/1.24.0\n")); got != "1.24.0" {
 		t.Fatalf("version: want 1.24.0, got %q", got)
+	}
+}
+
+func TestHandleEdgeCacheTestProvesMissThenHitAndEmitsStatus(t *testing.T) {
+	var calls int
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("X-WireWarp-Cache-Status", "MISS")
+		} else {
+			w.Header().Set("X-WireWarp-Cache-Status", "HIT")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(origin.Close)
+
+	cfg := map[string]any{
+		"enabled": true,
+		"mode":    "proxy_cache",
+		"listen":  strings.TrimPrefix(origin.URL, "http://"),
+		"routes": []any{
+			map[string]any{
+				"host":       "app.example.com",
+				"origin_url": "http://10.21.0.2:8080",
+			},
+		},
+	}
+	h := &ServerHandlers{
+		cfg: &config.Config{EdgeDesired: &config.EdgeDesiredState{NginxCacheConfig: cfg}},
+	}
+	var emitted []map[string]any
+	emit := func(eventType string, payload map[string]any) error {
+		if eventType != "edge_cache_status" {
+			t.Fatalf("event type: want edge_cache_status, got %s", eventType)
+		}
+		emitted = append(emitted, payload)
+		return nil
+	}
+	h.SetEmit(emit)
+
+	out, err := h.handleEdgeCacheTest(json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("handle cache test: %v", err)
+	}
+	if !strings.Contains(out, "miss_hit") {
+		t.Fatalf("output should include proof status, got %q", out)
+	}
+	if len(emitted) != 1 {
+		t.Fatalf("expected one cache status emit, got %d", len(emitted))
+	}
+	if emitted[0]["phase"] != "healthy" || emitted[0]["last_test_status"] != "miss_hit" {
+		t.Fatalf("unexpected emitted payload: %#v", emitted[0])
+	}
+}
+
+func TestHandleEdgeCacheTestRequiresDesiredCacheConfig(t *testing.T) {
+	h := &ServerHandlers{cfg: &config.Config{}}
+	if _, err := h.handleEdgeCacheTest(json.RawMessage(`{}`)); err == nil {
+		t.Fatalf("expected missing desired cache config to fail")
 	}
 }

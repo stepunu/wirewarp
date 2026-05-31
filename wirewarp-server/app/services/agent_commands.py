@@ -34,6 +34,7 @@ VALID_COMMAND_TYPES = {
     "edge_desired_state",
     "edge_disable",
     "edge_cache_purge",
+    "edge_cache_test",
 }
 
 

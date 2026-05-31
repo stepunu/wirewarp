@@ -31,6 +31,10 @@ type EdgeCachePurgeParams struct {
 	Prefix string `json:"prefix"`
 }
 
+type EdgeCacheTestParams struct {
+	ProbePath string `json:"probe_path"`
+}
+
 type EdgeCachePurgeResult struct {
 	Removed     int
 	Key         string
@@ -73,6 +77,68 @@ func (h *ServerHandlers) handleEdgeCachePurge(raw json.RawMessage) (string, erro
 	message := fmt.Sprintf("cache purge completed: scope=%s removed=%d%s", p.Scope, result.Removed, keyPart)
 	h.emitNginxCachePurgeResult(message)
 	return message, nil
+}
+
+func (h *ServerHandlers) handleEdgeCacheTest(raw json.RawMessage) (string, error) {
+	if h == nil || h.cfg == nil || h.cfg.EdgeDesired == nil || h.cfg.EdgeDesired.NginxCacheConfig == nil {
+		return "", fmt.Errorf("nginx cache desired state is not available")
+	}
+	cfg := h.cfg.EdgeDesired.NginxCacheConfig
+	if !nginxCacheEnabled(cfg) {
+		return "", fmt.Errorf("nginx cache is not enabled")
+	}
+	var p EdgeCacheTestParams
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return "", fmt.Errorf("parse params: %w", err)
+		}
+	}
+	if p.ProbePath != "" {
+		cfg = withCacheProbePath(cfg, p.ProbePath)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	status, err := runNginxCacheHealthProbe(ctx, cfg)
+	payload := map[string]any{
+		"backend":          "nginx_proxy_cache",
+		"installed":        true,
+		"running":          err == nil,
+		"phase":            "healthy",
+		"cache_path":       nginxString(cfg, "cache_path", nginxCacheDefaultDir),
+		"last_test_status": status,
+	}
+	if err != nil {
+		payload["phase"] = "degraded"
+		payload["running"] = false
+		payload["error"] = err.Error()
+		payload["last_error"] = err.Error()
+		h.tryEmitNginxCache(payload)
+		return "", err
+	}
+	h.tryEmitNginxCache(payload)
+	return fmt.Sprintf("cache test passed: %s", status), nil
+}
+
+func withCacheProbePath(cfg map[string]any, probePath string) map[string]any {
+	next := make(map[string]any, len(cfg))
+	for k, v := range cfg {
+		next[k] = v
+	}
+	routes, ok := cfg["routes"].([]any)
+	if !ok || len(routes) == 0 {
+		return next
+	}
+	copied := append([]any(nil), routes...)
+	if first, ok := copied[0].(map[string]any); ok {
+		route := make(map[string]any, len(first)+1)
+		for k, v := range first {
+			route[k] = v
+		}
+		route["probe_path"] = probePath
+		copied[0] = route
+		next["routes"] = copied
+	}
+	return next
 }
 
 func edgeCachePurgeKey(host, path string) string {

@@ -170,6 +170,12 @@ async def test_edge_cache_status_enables_proxy_cache_desired_state_and_rendered_
     assert rendered.status_code == 200, rendered.text
     assert rendered.json()["cache_hash"] != digest({})
 
+    fake_manager.sent.clear()
+    tested = await client.post(f"/api/nodes/{server.agent_id}/edge/cache/test")
+    assert tested.status_code == 200, tested.text
+    assert tested.json()["status"] == "queued"
+    assert fake_manager.sent[-1]["message"]["type"] == "edge_cache_test"
+
 
 async def test_access_events_filter_by_route_country_and_time_range(client, db, factories):
     server, route = await _server_route(client, db, factories)

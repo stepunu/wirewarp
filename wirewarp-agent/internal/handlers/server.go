@@ -124,6 +124,7 @@ func (h *ServerHandlers) Register(exec *executor.Executor) {
 	exec.Register("edge_desired_state", h.handleEdgeDesiredState)
 	exec.Register("edge_disable", h.handleEdgeDisable)
 	exec.Register("edge_cache_purge", h.handleEdgeCachePurge)
+	exec.Register("edge_cache_test", h.handleEdgeCacheTest)
 }
 
 // --- command handlers ---

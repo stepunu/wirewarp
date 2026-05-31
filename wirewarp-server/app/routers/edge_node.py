@@ -263,7 +263,15 @@ async def cache_test(
     cache = await _cache_read(agent_id, db)
     if not cache.available:
         raise HTTPException(status_code=409, detail={"code": "edge_cache_unavailable", "reason": cache.reason})
-    return {"status": "headers_only" if cache.policy.get("mode") == "headers_only" else "queued"}
+    if cache.policy.get("mode") == "headers_only":
+        return {"status": "headers_only"}
+    sent, command_id = await send_command(
+        agent_id=str(agent_id),
+        command_type="edge_cache_test",
+        params={},
+        db=db,
+    )
+    return {"status": "queued", "sent": sent, "command_id": command_id}
 
 
 @router.get("/{agent_id}/edge/upstream-pools", response_model=list[EdgeUpstreamPoolRead])
