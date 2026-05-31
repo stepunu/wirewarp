@@ -186,6 +186,36 @@ async def test_edge_cache_status_enables_proxy_cache_desired_state_and_rendered_
     assert fake_manager.sent[-1]["message"]["params"]["host"] == "app.example.com"
 
 
+async def test_edge_cache_proxy_cache_can_be_requested_before_backend_is_healthy(
+    client, db, factories, fake_manager
+):
+    server, _route = await _server_route(client, db, factories)
+    fake_manager.online.add(str(server.agent_id))
+
+    patched = await client.patch(
+        f"/api/nodes/{server.agent_id}/edge/cache",
+        json={
+            "mode": "proxy_cache",
+            "browser_ttl_seconds": 120,
+            "edge_ttl_seconds": 600,
+            "cache_status_header": True,
+        },
+    )
+
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["policy"]["mode"] == "proxy_cache"
+    assert body["available"] is False
+    assert body["reason"] == "nginx_cache_unavailable"
+
+    sent = fake_manager.sent[-1]["message"]
+    assert sent["type"] == "edge_desired_state"
+    cache_config = sent["params"]["nginx_cache_config"]
+    assert cache_config["enabled"] is True
+    assert cache_config["mode"] == "proxy_cache"
+    assert cache_config["routes"][0]["host"] == "app.example.com"
+
+
 async def test_access_events_filter_by_route_country_and_time_range(client, db, factories):
     server, route = await _server_route(client, db, factories)
     now = datetime.now(timezone.utc)

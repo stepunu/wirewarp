@@ -40,6 +40,7 @@ from app.services.edge_ops import (
     dispatch_edge_desired_state,
     edge_feature_disabled_detail,
     edge_unavailable_reason,
+    set_component_desired,
 )
 from app.services.agent_commands import send_command
 from app.services.edge_resources import (
@@ -190,10 +191,8 @@ async def patch_node_cache(
 ):
     server = await _server_for_agent(agent_id, db)
     _ensure_enabled(server)
-    if body.mode not in {"off", "headers_only"}:
-        snapshot = await db.scalar(select(EdgeCacheSnapshot).where(EdgeCacheSnapshot.agent_id == agent_id))
-        if not (snapshot and snapshot.installed and snapshot.running and snapshot.phase == "healthy"):
-            raise HTTPException(status_code=409, detail={"code": "edge_cache_unavailable", "reason": "nginx_cache_unavailable"})
+    if body.mode not in {"off", "headers_only", "proxy_cache"}:
+        raise HTTPException(status_code=400, detail={"code": "invalid_edge_cache_mode", "field": "mode"})
     policy = await db.get(EdgeNodePolicy, agent_id)
     if policy is None:
         policy = EdgeNodePolicy(agent_id=agent_id)
@@ -201,6 +200,11 @@ async def patch_node_cache(
     node_policy = dict(policy.policy_json or {})
     node_policy["cache"] = body.model_dump(exclude_none=True)
     policy.policy_json = node_policy
+    await set_component_desired(
+        agent_id,
+        db,
+        {"nginx_cache": "enabled" if body.mode == "proxy_cache" else "disabled"},
+    )
     await db.commit()
     await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
     emit_edge_changed()
