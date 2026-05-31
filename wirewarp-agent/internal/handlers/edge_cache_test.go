@@ -144,18 +144,23 @@ func TestResolveOptionalBinUsesExistingCandidate(t *testing.T) {
 
 func TestDisableNginxDefaultSitesPreservesDefaultConfig(t *testing.T) {
 	root := t.TempDir()
-	defaultSite := filepath.Join(root, "default")
+	includedDir := filepath.Join(root, "sites-enabled")
+	if err := os.MkdirAll(includedDir, 0755); err != nil {
+		t.Fatalf("mkdir included dir: %v", err)
+	}
+	defaultSite := filepath.Join(includedDir, "default")
 	if err := os.WriteFile(defaultSite, []byte("listen 80;\n"), 0644); err != nil {
 		t.Fatalf("write default site: %v", err)
 	}
+	disabledDir := filepath.Join(root, "wirewarp-disabled")
 
-	if err := disableNginxDefaultSites(defaultSite); err != nil {
+	if err := disableNginxDefaultSitesToDir(disabledDir, defaultSite); err != nil {
 		t.Fatalf("disable default site: %v", err)
 	}
 	if _, err := os.Stat(defaultSite); !os.IsNotExist(err) {
 		t.Fatalf("default site should be disabled, stat err=%v", err)
 	}
-	disabled := defaultSite + ".wirewarp-disabled"
+	disabled := filepath.Join(disabledDir, "default")
 	body, err := os.ReadFile(disabled)
 	if err != nil {
 		t.Fatalf("read disabled default site: %v", err)

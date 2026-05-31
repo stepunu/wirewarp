@@ -26,7 +26,9 @@ const (
 
 var nginxDefaultSitePaths = []string{
 	"/etc/nginx/sites-enabled/default",
+	"/etc/nginx/sites-enabled/default.wirewarp-disabled",
 	"/etc/nginx/conf.d/default.conf",
+	"/etc/nginx/conf.d/default.conf.wirewarp-disabled",
 }
 
 type EdgeCachePurgeParams struct {
@@ -578,8 +580,15 @@ func resolveNginxBinary() string {
 }
 
 func disableNginxDefaultSites(paths ...string) error {
+	return disableNginxDefaultSitesToDir("/etc/nginx/wirewarp-disabled", paths...)
+}
+
+func disableNginxDefaultSitesToDir(disabledDir string, paths ...string) error {
 	if len(paths) == 0 {
 		paths = nginxDefaultSitePaths
+	}
+	if err := os.MkdirAll(disabledDir, 0755); err != nil {
+		return err
 	}
 	for _, path := range paths {
 		if _, err := os.Lstat(path); os.IsNotExist(err) {
@@ -587,7 +596,7 @@ func disableNginxDefaultSites(paths ...string) error {
 		} else if err != nil {
 			return err
 		}
-		disabled := path + ".wirewarp-disabled"
+		disabled := filepath.Join(disabledDir, filepath.Base(path))
 		if _, err := os.Lstat(disabled); os.IsNotExist(err) {
 			if err := os.Rename(path, disabled); err != nil {
 				return err
