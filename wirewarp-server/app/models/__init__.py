@@ -23,6 +23,10 @@ from app.models.edge_component_state import EdgeComponentState
 from app.models.edge_profile import EdgeProfile
 from app.models.edge_node_policy import EdgeNodePolicy
 from app.models.edge_path_rule import EdgePathRule
+from app.models.edge_access_event import EdgeAccessEvent
+from app.models.edge_cache_snapshot import EdgeCacheSnapshot
+from app.models.edge_fragment import EdgeFragment
+from app.models.edge_config_version import EdgeConfigVersion
 from app.models.traefik_snapshot import TraefikSnapshot
 from app.models.security_event import SecurityEvent
 
@@ -52,6 +56,10 @@ __all__ = [
     "EdgeProfile",
     "EdgeNodePolicy",
     "EdgePathRule",
+    "EdgeAccessEvent",
+    "EdgeCacheSnapshot",
+    "EdgeFragment",
+    "EdgeConfigVersion",
     "TraefikSnapshot",
     "SecurityEvent",
 ]

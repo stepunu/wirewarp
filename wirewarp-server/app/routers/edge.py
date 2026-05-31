@@ -9,6 +9,8 @@ from sqlalchemy.orm import selectinload
 
 from app.auth import require_ops_role, require_role
 from app.database import get_db
+from app.models.edge_access_event import EdgeAccessEvent
+from app.models.edge_fragment import EdgeFragment
 from app.models.edge_path_rule import EdgePathRule
 from app.models.edge_profile import EdgeProfile
 from app.models.edge_route_config import EdgeRouteConfig
@@ -16,7 +18,11 @@ from app.models.port_forward import PortForward
 from app.models.user import User
 from app.realtime.events import emit_edge_changed, emit_security_changed
 from app.schemas.edge import (
+    EdgeAccessEventList,
+    EdgeAccessEventRead,
     EdgeEffectivePolicyRead,
+    EdgeFragmentCreate,
+    EdgeFragmentRead,
     EdgePathRuleCreate,
     EdgePathRuleRead,
     EdgeProfileRead,
@@ -24,7 +30,7 @@ from app.schemas.edge import (
     EdgeRouteRead,
     EdgeRouteUpsert,
 )
-from app.services.edge_ops import dispatch_edge_for_attachment
+from app.services.edge_ops import dispatch_edge_desired_state, dispatch_edge_for_attachment
 from app.services.edge_resources import (
     apply_policy_to_edge_config,
     get_profile_by_id_or_slug,
@@ -36,6 +42,53 @@ from app.services.edge_resources import (
 )
 
 router = APIRouter()
+
+
+@router.get("/access-events", response_model=EdgeAccessEventList)
+async def list_access_events(
+    node_id: uuid.UUID | None = None,
+    route_id: uuid.UUID | None = None,
+    host: str | None = None,
+    status: int | None = None,
+    action: str | None = None,
+    client_ip: str | None = None,
+    method: str | None = None,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    q = select(EdgeAccessEvent)
+    if node_id:
+        q = q.where(EdgeAccessEvent.agent_id == node_id)
+    if route_id:
+        q = q.where(EdgeAccessEvent.route_id == route_id)
+    if host:
+        q = q.where(EdgeAccessEvent.host == host)
+    if status is not None:
+        q = q.where(EdgeAccessEvent.status_code == status)
+    if action:
+        q = q.where(EdgeAccessEvent.action == action)
+    if client_ip:
+        q = q.where(EdgeAccessEvent.client_ip == client_ip)
+    if method:
+        q = q.where(EdgeAccessEvent.method == method)
+    rows = (
+        await db.execute(q.order_by(EdgeAccessEvent.occurred_at.desc(), EdgeAccessEvent.id.desc()).limit(limit + 1))
+    ).scalars().all()
+    next_cursor = rows[-1].id if len(rows) > limit else None
+    return EdgeAccessEventList(items=[EdgeAccessEventRead.model_validate(row) for row in rows[:limit]], next_cursor=next_cursor)
+
+
+@router.get("/access-events/{event_id}", response_model=EdgeAccessEventRead)
+async def get_access_event(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    row = await db.get(EdgeAccessEvent, event_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Access event not found")
+    return EdgeAccessEventRead.model_validate(row)
 
 
 @router.get("/profiles", response_model=list[EdgeProfileRead])
@@ -205,6 +258,72 @@ async def delete_route(
     emit_security_changed()
 
 
+@router.get("/fragments/{fragment_id}", response_model=EdgeFragmentRead)
+async def get_fragment(
+    fragment_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    row = await db.get(EdgeFragment, fragment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Edge fragment not found")
+    return EdgeFragmentRead.model_validate(row)
+
+
+@router.put("/fragments/{fragment_id}", response_model=EdgeFragmentRead)
+@router.patch("/fragments/{fragment_id}", response_model=EdgeFragmentRead)
+async def update_fragment(
+    fragment_id: uuid.UUID,
+    body: EdgeFragmentCreate,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    row = await db.get(EdgeFragment, fragment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Edge fragment not found")
+    row.name = body.name
+    row.fragment_type = body.fragment_type
+    row.content = body.content
+    row.route_id = body.route_id
+    row.enabled = body.enabled
+    row.validation_state = "valid" if isinstance(body.content, dict) else "invalid"
+    row.last_error = None if row.validation_state == "valid" else "Fragment content must be an object."
+    await db.commit()
+    await db.refresh(row)
+    await dispatch_edge_desired_state(row.agent_id, db, actor_user_id=actor.id)
+    emit_edge_changed()
+    return EdgeFragmentRead.model_validate(row)
+
+
+@router.delete("/fragments/{fragment_id}", status_code=204)
+async def delete_fragment(
+    fragment_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    row = await db.get(EdgeFragment, fragment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Edge fragment not found")
+    agent_id = row.agent_id
+    await db.delete(row)
+    await db.commit()
+    await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
+    emit_edge_changed()
+
+
+@router.post("/fragments/{fragment_id}/validate")
+async def validate_fragment(
+    fragment_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    row = await db.get(EdgeFragment, fragment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Edge fragment not found")
+    valid = isinstance(row.content, dict) and row.fragment_type in {"middleware", "service", "router", "tls", "transport"}
+    return {"valid": valid, "errors": [] if valid else [{"code": "invalid_fragment"}]}
+
+
 @router.get("/routes/{route_id}/effective", response_model=EdgeEffectivePolicyRead)
 async def get_route_effective(
     route_id: uuid.UUID,
@@ -231,6 +350,32 @@ async def validate_route(
     if route is None or route.service_kind != "http":
         raise HTTPException(status_code=404, detail="Edge route not found")
     return {"valid": True, "warnings": []}
+
+
+@router.post("/routes/{route_id}/cache/preview")
+async def preview_route_cache(
+    route_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_ops_role),
+):
+    route = await db.get(PortForward, route_id)
+    if route is None or route.service_kind != "http":
+        raise HTTPException(status_code=404, detail="Edge route not found")
+    ec = await route_edge_config(db, route)
+    policy = dict(ec.policy_json or {})
+    return {"route_id": route_id, "cache": policy.get("cache", {"mode": "off"}), "available": True}
+
+
+@router.post("/routes/{route_id}/cache/purge")
+async def purge_route_cache(
+    route_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("admin")),
+):
+    route = await db.get(PortForward, route_id)
+    if route is None or route.service_kind != "http":
+        raise HTTPException(status_code=404, detail="Edge route not found")
+    raise HTTPException(status_code=409, detail={"code": "edge_cache_unavailable", "reason": "purge_requires_healthy_backend"})
 
 
 @router.get("/routes/{route_id}/path-rules", response_model=list[EdgePathRuleRead])
