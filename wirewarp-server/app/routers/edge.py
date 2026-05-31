@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 from app.auth import require_ops_role, require_role
 from app.database import get_db
 from app.models.edge_access_event import EdgeAccessEvent
+from app.models.edge_cache_snapshot import EdgeCacheSnapshot
 from app.models.edge_fragment import EdgeFragment
 from app.models.edge_path_rule import EdgePathRule
 from app.models.edge_profile import EdgeProfile
@@ -34,7 +35,12 @@ from app.schemas.edge import (
     EdgeUpstreamPoolRead,
     EdgeUpstreamPoolUpsert,
 )
-from app.services.edge_ops import dispatch_edge_desired_state, dispatch_edge_for_attachment
+from app.services.agent_commands import send_command
+from app.services.edge_ops import (
+    dispatch_edge_desired_state,
+    dispatch_edge_for_attachment,
+    site_server_context,
+)
 from app.services.edge_resources import (
     apply_policy_to_edge_config,
     get_profile_by_id_or_slug,
@@ -456,7 +462,24 @@ async def purge_route_cache(
     route = await db.get(PortForward, route_id)
     if route is None or route.service_kind != "http":
         raise HTTPException(status_code=404, detail="Edge route not found")
-    raise HTTPException(status_code=409, detail={"code": "edge_cache_unavailable", "reason": "purge_requires_healthy_backend"})
+    _server_id, agent_id = await site_server_context(route, db)
+    if agent_id is None:
+        raise HTTPException(status_code=404, detail="Edge route owner not found")
+    snapshot = await db.scalar(
+        select(EdgeCacheSnapshot).where(
+            EdgeCacheSnapshot.agent_id == agent_id,
+            EdgeCacheSnapshot.backend == "nginx_proxy_cache",
+        )
+    )
+    if not (snapshot and snapshot.installed and snapshot.running and snapshot.phase == "healthy"):
+        raise HTTPException(status_code=409, detail={"code": "edge_cache_unavailable", "reason": "purge_requires_healthy_backend"})
+    sent, command_id = await send_command(
+        agent_id=str(agent_id),
+        command_type="edge_cache_purge",
+        params={"scope": "route", "route_id": str(route_id), "host": route.domain},
+        db=db,
+    )
+    return {"status": "queued", "route_id": route_id, "sent": sent, "command_id": command_id}
 
 
 @router.get("/routes/{route_id}/path-rules", response_model=list[EdgePathRuleRead])

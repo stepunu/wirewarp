@@ -119,7 +119,7 @@ async def test_websocket_edge_access_events_persist_and_query(client, db, factor
 async def test_edge_cache_status_enables_proxy_cache_desired_state_and_rendered_hash(
     client, db, factories, fake_manager
 ):
-    server, _route = await _server_route(client, db, factories)
+    server, route = await _server_route(client, db, factories)
     fake_manager.online.add(str(server.agent_id))
 
     await dispatch(
@@ -175,6 +175,15 @@ async def test_edge_cache_status_enables_proxy_cache_desired_state_and_rendered_
     assert tested.status_code == 200, tested.text
     assert tested.json()["status"] == "queued"
     assert fake_manager.sent[-1]["message"]["type"] == "edge_cache_test"
+
+    fake_manager.sent.clear()
+    route_purge = await client.post(f"/api/edge/routes/{route['id']}/cache/purge")
+    assert route_purge.status_code == 200, route_purge.text
+    assert route_purge.json()["status"] == "queued"
+    assert fake_manager.sent[-1]["message"]["type"] == "edge_cache_purge"
+    assert fake_manager.sent[-1]["message"]["params"]["scope"] == "route"
+    assert fake_manager.sent[-1]["message"]["params"]["route_id"] == route["id"]
+    assert fake_manager.sent[-1]["message"]["params"]["host"] == "app.example.com"
 
 
 async def test_access_events_filter_by_route_country_and_time_range(client, db, factories):
