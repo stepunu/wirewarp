@@ -103,6 +103,8 @@ func TestRenderNginxCacheConfigIncludesProxyCacheDirectives(t *testing.T) {
 	}
 	for _, want := range []string{
 		"proxy_cache_path /var/cache/wirewarp/nginx",
+		"server_names_hash_bucket_size 128;",
+		"server_names_hash_max_size 4096;",
 		"keys_zone=wirewarp_cache:64m",
 		"listen 127.0.0.1:18080;",
 		"server_name app.example.com;",
@@ -137,6 +139,29 @@ func TestResolveOptionalBinUsesExistingCandidate(t *testing.T) {
 	}
 	if got := resolveOptionalBin("wirewarp-definitely-missing-nginx", candidate); got != candidate {
 		t.Fatalf("candidate path: want %q, got %q", candidate, got)
+	}
+}
+
+func TestDisableNginxDefaultSitesPreservesDefaultConfig(t *testing.T) {
+	root := t.TempDir()
+	defaultSite := filepath.Join(root, "default")
+	if err := os.WriteFile(defaultSite, []byte("listen 80;\n"), 0644); err != nil {
+		t.Fatalf("write default site: %v", err)
+	}
+
+	if err := disableNginxDefaultSites(defaultSite); err != nil {
+		t.Fatalf("disable default site: %v", err)
+	}
+	if _, err := os.Stat(defaultSite); !os.IsNotExist(err) {
+		t.Fatalf("default site should be disabled, stat err=%v", err)
+	}
+	disabled := defaultSite + ".wirewarp-disabled"
+	body, err := os.ReadFile(disabled)
+	if err != nil {
+		t.Fatalf("read disabled default site: %v", err)
+	}
+	if string(body) != "listen 80;\n" {
+		t.Fatalf("disabled default site content changed: %q", string(body))
 	}
 }
 
