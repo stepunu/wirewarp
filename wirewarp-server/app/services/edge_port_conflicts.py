@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.port_forward import PortForward
 from app.models.tunnel_client_attachment import TunnelClientAttachment
+from app.models.tunnel_server import TunnelServer
 
 
 EDGE_ENTRYPOINT_PORTS = (80, 443)
@@ -36,8 +37,20 @@ async def find_active_http_site_on_server(
     *,
     exclude_port_forward_id: uuid.UUID | None = None,
 ) -> PortForward | None:
-    attachment_ids = select(TunnelClientAttachment.id).where(
-        TunnelClientAttachment.tunnel_server_id == server_id
+    # An http edge site only counts as a conflict when edge is actually
+    # running on the server. `disable_node_edge` flips
+    # tunnel_servers.edge_state to 'disabled' and stops Traefik on the
+    # agent, but leaves per-row `active=true` on service_kind='http'
+    # forwards — without the edge_state filter, raw 80/443 forwards
+    # would be forever blocked by stale-active sites on a node where
+    # edge is off.
+    attachment_ids = (
+        select(TunnelClientAttachment.id)
+        .join(TunnelServer, TunnelServer.id == TunnelClientAttachment.tunnel_server_id)
+        .where(
+            TunnelClientAttachment.tunnel_server_id == server_id,
+            TunnelServer.edge_state == "enabled",
+        )
     )
     q = select(PortForward).where(
         PortForward.attachment_id.in_(attachment_ids),

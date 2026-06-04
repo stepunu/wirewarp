@@ -74,6 +74,49 @@ async def test_create_raw_edge_forward_rejects_active_security_site(client, db, 
     assert not [s for s in fake_manager.sent if s["message"]["type"] == "iptables_add_forward"]
 
 
+async def test_create_raw_edge_forward_allowed_when_edge_disabled(client, db, factories, fake_manager):
+    server = await factories.make_server(
+        db,
+        primary_ip="1.2.3.4",
+        edge_mode="security_edge",
+        edge_state="enabled",
+        edge_install_phase="healthy",
+    )
+    cli = await factories.make_client(db)
+    att = await factories.make_attachment(db, client=cli, server=server)
+    fake_manager.online.add(str(server.agent_id))
+
+    site = await client.post(
+        "/api/security/sites",
+        json={
+            "attachment_id": str(att.id),
+            "domain": "app.example.com",
+            "destination_ip": "192.168.1.10",
+            "destination_port": 8080,
+        },
+    )
+    assert site.status_code == 201, site.text
+
+    # Operator disables edge on the node. The http edge site row stays
+    # active=true in the DB, but Traefik is no longer running on the
+    # server — so a raw 80/443 forward must now be accepted.
+    server.edge_state = "disabled"
+    await db.commit()
+
+    res = await client.post(
+        "/api/port-forwards",
+        json={
+            "attachment_id": str(att.id),
+            "protocol": "tcp",
+            "public_port": 443,
+            "destination_ip": att.tunnel_ip,
+            "destination_port": 443,
+        },
+    )
+
+    assert res.status_code == 201, res.text
+
+
 async def test_create_forward_404_when_attachment_missing(client, db, factories, fake_manager):
     res = await client.post(
         "/api/port-forwards",
