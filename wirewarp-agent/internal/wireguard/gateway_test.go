@@ -23,4 +23,32 @@ func TestGatewayLANMasqueradeRuleCoversAllTunnelIngress(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("gateway LAN masquerade rule\nwant %#v\n got %#v", want, got)
 	}
+	if !shouldApplyGatewayLANMasquerade(cfg) {
+		t.Fatalf("expected non-public tunnel mark %s to allow LAN masquerade", cfg.Fwmark)
+	}
+}
+
+func TestGatewayLANMasqueradeSkippedForPublicInboundTunnelMark(t *testing.T) {
+	cfg := GatewayConfig{
+		TunnelIface: "wg0",
+		LANIface:    "eth0",
+		Fwmark:      "0x101",
+		WGSubnet:    "10.21.0.0/24",
+	}
+
+	if shouldApplyGatewayLANMasquerade(cfg) {
+		t.Fatalf("expected public inbound tunnel mark %s to skip LAN masquerade", cfg.Fwmark)
+	}
+}
+
+func TestPublicInboundTunnelMarkAcceptsDecimalConfigValue(t *testing.T) {
+	cfg := GatewayConfig{
+		TunnelIface: "wg0",
+		LANIface:    "eth0",
+		Fwmark:      "257",
+	}
+
+	if shouldApplyGatewayLANMasquerade(cfg) {
+		t.Fatalf("expected decimal public inbound tunnel mark %s to skip LAN masquerade", cfg.Fwmark)
+	}
 }

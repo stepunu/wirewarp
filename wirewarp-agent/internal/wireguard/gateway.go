@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
 const rtTablesPath = "/etc/iproute2/rt_tables"
+const publicInboundTunnelFwmark int64 = 0x101
 
 // GatewayConfig holds all the parameters needed to configure per-attachment
 // policy routing on a gateway client. Each attachment owns one set of
@@ -283,9 +285,9 @@ func applyAttachmentNAT(cfg GatewayConfig) error {
 	if err := iptE("-P", "FORWARD", "ACCEPT"); err != nil {
 		return err
 	}
-	// MASQUERADE all tunnel-ingress traffic forwarded onto the LAN. Without
-	// this, LAN hosts whose default gateway is not the WireWarp gateway reply
-	// through the normal LAN router and public DNAT connections hang.
+	// Do not SNAT public DNAT flows forwarded from the primary VPS tunnel to
+	// LAN services. The original client IP must reach the service/edge so
+	// internal-only allowlists cannot be bypassed by seeing the gateway's LAN IP.
 	if cfg.LANIface != "" && cfg.TunnelIface != "" {
 		// Remove the older, too-narrow rule. It only matched source addresses
 		// inside the WireGuard subnet, so internet-sourced DNAT traffic kept
@@ -297,11 +299,15 @@ func applyAttachmentNAT(cfg GatewayConfig) error {
 		// reliably match the input interface, so current rules key off CONNMARK.
 		ipt("-t", "nat", "-D", "POSTROUTING", "-i", cfg.TunnelIface, "-o", cfg.LANIface, "-j", "MASQUERADE")
 		rule := gatewayLANMasqueradeRule(cfg)
-		if err := iptCheckOrInsert(
-			iptablesAction(rule, "-C"),
-			iptablesAction(rule, "-A"),
-		); err != nil {
-			return err
+		if !shouldApplyGatewayLANMasquerade(cfg) {
+			deleteIPTablesRule(rule)
+		} else {
+			if err := iptCheckOrInsert(
+				iptablesAction(rule, "-C"),
+				iptablesAction(rule, "-A"),
+			); err != nil {
+				return err
+			}
 		}
 	}
 	if cfg.IsGateway && dockerUserChainExists() {
@@ -317,6 +323,15 @@ func applyAttachmentNAT(cfg GatewayConfig) error {
 	return nil
 }
 
+func shouldApplyGatewayLANMasquerade(cfg GatewayConfig) bool {
+	return !isPublicInboundTunnelFwmark(cfg.Fwmark)
+}
+
+func isPublicInboundTunnelFwmark(fwmark string) bool {
+	mark, err := strconv.ParseInt(strings.TrimSpace(fwmark), 0, 64)
+	return err == nil && mark == publicInboundTunnelFwmark
+}
+
 func gatewayLANMasqueradeRule(cfg GatewayConfig) []string {
 	return []string{
 		"-t", "nat", "POSTROUTING",
@@ -324,6 +339,15 @@ func gatewayLANMasqueradeRule(cfg GatewayConfig) []string {
 		"-o", cfg.LANIface,
 		"-j", "MASQUERADE",
 	}
+}
+
+func deleteIPTablesRule(rule []string) bool {
+	removed := false
+	args := iptablesAction(rule, "-D")
+	for exec.Command("iptables", args...).Run() == nil {
+		removed = true
+	}
+	return removed
 }
 
 func iptablesAction(rule []string, action string) []string {

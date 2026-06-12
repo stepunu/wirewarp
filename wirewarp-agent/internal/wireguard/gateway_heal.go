@@ -109,10 +109,16 @@ func HealAttachment(cfg GatewayConfig) (healed []string, firstErr error) {
 			"-i", cfg.TunnelIface, "-o", cfg.LANIface, "-j", "MASQUERADE",
 		).Run()
 		rule := gatewayLANMasqueradeRule(cfg)
-		checkArgs := iptablesAction(rule, "-C")
-		insertArgs := iptablesAction(rule, "-A")
-		if exec.Command("iptables", checkArgs...).Run() != nil {
-			record("nat-masquerade", iptE(insertArgs...))
+		if !shouldApplyGatewayLANMasquerade(cfg) {
+			if deleteIPTablesRule(rule) {
+				healed = append(healed, "nat-masquerade-removed")
+			}
+		} else {
+			checkArgs := iptablesAction(rule, "-C")
+			insertArgs := iptablesAction(rule, "-A")
+			if exec.Command("iptables", checkArgs...).Run() != nil {
+				record("nat-masquerade", iptE(insertArgs...))
+			}
 		}
 	}
 
