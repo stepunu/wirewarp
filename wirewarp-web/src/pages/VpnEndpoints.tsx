@@ -69,7 +69,7 @@ export default function VpnEndpoints() {
               <th>Gateway</th>
               <th>Interface</th>
               <th>Listen port</th>
-              <th>VPN /24</th>
+              <th>Routes</th>
               <th>Public endpoint</th>
               <th>Peers</th>
               <th>Enabled</th>
@@ -197,7 +197,13 @@ function EndpointRow({
       <td data-label="gateway"><strong>{gatewayName}</strong></td>
       <td data-label="interface"><code>{endpoint.wg_interface}</code></td>
       <td data-label="port"><code>{endpoint.listen_port}</code></td>
-      <td data-label="network"><code>{endpoint.vpn_network}</code></td>
+      <td data-label="routes">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <code>{endpoint.vpn_network}</code>
+          {endpoint.remote_subnets.map((subnet) => <code key={subnet}>{subnet}</code>)}
+          {endpoint.remote_subnets.length === 0 && <span className="sub">no remote routes</span>}
+        </div>
+      </td>
       <td data-label="public"><code>{endpoint.public_endpoint}</code></td>
       <td data-label="peers">
         <Button size="sm" variant="ghost" onClick={onPeers} title="Manage permissions">
@@ -209,8 +215,8 @@ function EndpointRow({
       </td>
       <td data-label="created">{relTime(endpoint.created_at)}</td>
       <td data-label="">
-        <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-          <Button size="sm" variant="ghost" onClick={onPeers}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, width: 116 }}>
+          <Button size="sm" variant="ghost" onClick={onPeers} style={{ gridColumn: '1 / -1' }}>
             Permissions
           </Button>
           <Button size="sm" variant="ghost" onClick={onEdit}>
@@ -248,6 +254,7 @@ function CreateEndpointCard({
   const [listenPort, setListenPort] = useState(51821)
   const [wgInterface, setWgInterface] = useState('wg-vpn0')
   const [dnsServers, setDnsServers] = useState('')
+  const [remoteSubnets, setRemoteSubnets] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -268,6 +275,7 @@ function CreateEndpointCard({
         dns_servers: dnsServers
           ? dnsServers.split(',').map((s) => s.trim()).filter(Boolean)
           : null,
+        remote_subnets: parseSubnetList(remoteSubnets),
       })
       onCreated()
       setOpen(false)
@@ -276,6 +284,7 @@ function CreateEndpointCard({
       setListenPort(51821)
       setWgInterface('wg-vpn0')
       setDnsServers('')
+      setRemoteSubnets('')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Create failed')
     } finally {
@@ -302,7 +311,11 @@ function CreateEndpointCard({
         <Field label="Gateway" hint="Only `is_gateway` clients without an existing endpoint are listed.">
           <select
             value={tunnelClientId}
-            onChange={(e) => setTunnelClientId(e.target.value)}
+            onChange={(e) => {
+              const id = e.target.value
+              setTunnelClientId(id)
+              setRemoteSubnets(eligible.find((gateway) => gateway.id === id)?.vm_network ?? '')
+            }}
             required
             className="select"
           >
@@ -337,6 +350,18 @@ function CreateEndpointCard({
             onChange={(e) => setListenPort(parseInt(e.target.value, 10) || 0)}
             min={1}
             max={65535}
+          />
+        </Field>
+        <Field
+          label="Remote routes"
+          hint="IPv4 hosts or CIDRs, separated by commas or new lines. Split profiles route every listed network."
+        >
+          <textarea
+            className="textarea input-mono"
+            value={remoteSubnets}
+            onChange={(e) => setRemoteSubnets(e.target.value)}
+            placeholder="192.168.1.0/24&#10;192.168.20.0/24"
+            rows={3}
           />
         </Field>
         <Field
@@ -390,6 +415,9 @@ function EditEndpointRow({
   const [dnsServers, setDnsServers] = useState(
     (endpoint.dns_servers ?? []).join(', '),
   )
+  const [remoteSubnets, setRemoteSubnets] = useState(
+    endpoint.remote_subnets.join('\n'),
+  )
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -403,6 +431,7 @@ function EditEndpointRow({
         dns_servers: dnsServers
           ? dnsServers.split(',').map((s) => s.trim()).filter(Boolean)
           : null,
+        remote_subnets: parseSubnetList(remoteSubnets),
       })
       onSaved()
     } catch (err) {
@@ -414,46 +443,54 @@ function EditEndpointRow({
 
   return (
     <tr>
-      <td data-label="gateway"><strong>{gatewayName}</strong></td>
-      <td data-label="interface"><code>{endpoint.wg_interface}</code></td>
-      <td data-label="port">
-        <Input
-          mono
-          type="number"
-          min={1}
-          max={65535}
-          value={listenPort}
-          onChange={(e) => setListenPort(parseInt(e.target.value, 10) || 0)}
-          style={{ width: 90 }}
-        />
-      </td>
-      <td data-label="network"><code>{endpoint.vpn_network}</code></td>
-      <td data-label="public">
-        <Input
-          mono
-          value={publicEndpoint}
-          onChange={(e) => setPublicEndpoint(e.target.value)}
-          placeholder="ddns.example.com:51821"
-          style={{ width: '100%' }}
-        />
-      </td>
-      <td data-label="dns" colSpan={3}>
-        <Input
-          mono
-          value={dnsServers}
-          onChange={(e) => setDnsServers(e.target.value)}
-          placeholder="192.168.1.5, home.example.com, infra.example.com"
-          style={{ width: '100%' }}
-          title="DNS servers + match domains (comma-separated)"
-        />
+      <td colSpan={9} style={{ padding: 16 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+          <Field label="Gateway"><strong>{gatewayName}</strong></Field>
+          <Field label="Interface"><code>{endpoint.wg_interface}</code></Field>
+          <Field label="Listen port">
+            <Input
+              mono
+              type="number"
+              min={1}
+              max={65535}
+              value={listenPort}
+              onChange={(e) => setListenPort(parseInt(e.target.value, 10) || 0)}
+            />
+          </Field>
+          <Field label="Public endpoint">
+            <Input
+              mono
+              value={publicEndpoint}
+              onChange={(e) => setPublicEndpoint(e.target.value)}
+              placeholder="ddns.example.com:51821"
+            />
+          </Field>
+          <Field label={`Remote routes · VPN ${endpoint.vpn_network}`}>
+            <textarea
+              className="textarea input-mono"
+              value={remoteSubnets}
+              onChange={(e) => setRemoteSubnets(e.target.value)}
+              rows={3}
+            />
+          </Field>
+          <Field label="DNS servers + match domains">
+            <Input
+              mono
+              value={dnsServers}
+              onChange={(e) => setDnsServers(e.target.value)}
+              placeholder="192.168.1.5, home.example.com"
+            />
+          </Field>
+        </div>
+        <div style={{ marginTop: 8, color: 'var(--warn)', fontSize: 11 }}>
+          Route-list changes make managed split profiles stale.
+        </div>
         {error && (
-          <div style={{ marginTop: 4, color: 'var(--err)', fontSize: 11 }}>
+          <div style={{ marginTop: 8, color: 'var(--err)', fontSize: 11 }}>
             {error}
           </div>
         )}
-      </td>
-      <td data-label="">
-        <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 12 }}>
           <Button size="sm" variant="ghost" onClick={onCancel} disabled={busy}>
             Cancel
           </Button>
@@ -471,3 +508,9 @@ function EditEndpointRow({
   )
 }
 
+function parseSubnetList(value: string): string[] {
+  return value
+    .split(/[\s,]+/)
+    .map((subnet) => subnet.trim())
+    .filter(Boolean)
+}

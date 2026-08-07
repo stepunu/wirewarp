@@ -4,6 +4,7 @@ import { vpnEndpoints as vpnEndpointsApi } from '../lib/api'
 import { Button, Field, Input, Select, Sheet } from './ui'
 import type {
   VpnEndpoint,
+  VpnGatewaySync,
   VpnPermission,
   VpnPermissionInput,
   VpnProtocol,
@@ -43,11 +44,9 @@ export function VpnPermissionsSheet({
           <span className="scheme">{endpoint.public_endpoint}</span>
         </div>
         <p className="sub" style={{ marginTop: 4 }}>
-          Per-user rules on this endpoint. Each rule grants the user's
-          devices access to a destination on the gateway's LAN. Set
-          permissions BEFORE the user creates a profile — the rules are
-          inherited at profile-create time and pushed to the gateway's
-          iptables on save.
+          Permissions control gateway access by destination, protocol, and port.
+          They do not change client routes. Split profiles route the endpoint's
+          configured remote networks, then these rules decide what traffic passes.
         </p>
         {sheetQ.isLoading && <p className="sub">Loading…</p>}
         {sheetQ.data?.length === 0 && (
@@ -85,7 +84,7 @@ function UserPermissionsEditor({
     fromExisting(row.permissions),
   )
   const [dirty, setDirty] = useState(false)
-  const [saved, setSaved] = useState<null | 'ok' | 'err'>(null)
+  const [saved, setSaved] = useState<VpnGatewaySync | 'err' | null>(null)
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -105,17 +104,17 @@ function UserPermissionsEditor({
       }
       return vpnEndpointsApi.setUserPermissions(endpoint.id, row.user_id, expanded)
     },
-    onSuccess: () => {
-      setSaved('ok')
+    onSuccess: (result) => {
+      setSaved(result.gateway_sync)
       setDirty(false)
       qc.invalidateQueries({ queryKey: ['vpn-endpoint-permissions', endpoint.id] })
-      setTimeout(() => setSaved(null), 2000)
     },
     onError: () => setSaved('err'),
   })
 
   function patch(idx: number, p: Partial<VpnPermissionInput>) {
     setRules((rs) => rs.map((r, i) => (i === idx ? { ...r, ...p } : r)))
+    setSaved(null)
     setDirty(true)
   }
   function addRule() {
@@ -123,10 +122,12 @@ function UserPermissionsEditor({
       ...rs,
       { destination: '', protocol: 'any', port_range_start: null, port_range_end: null },
     ])
+    setSaved(null)
     setDirty(true)
   }
   function removeRule(idx: number) {
     setRules((rs) => rs.filter((_, i) => i !== idx))
+    setSaved(null)
     setDirty(true)
   }
 
@@ -173,9 +174,19 @@ function UserPermissionsEditor({
           marginTop: 12,
         }}
       >
-        {saved === 'ok' && (
+        {saved === 'dispatched' && (
           <span style={{ color: 'var(--ok)', fontSize: 11 }}>
-            saved · gateway updated
+            saved, update sent
+          </span>
+        )}
+        {saved === 'pending' && (
+          <span style={{ color: 'var(--warn)', fontSize: 11 }}>
+            saved, pending gateway reconnect
+          </span>
+        )}
+        {saved === 'not_required' && (
+          <span style={{ color: 'var(--ok)', fontSize: 11 }}>
+            saved, no profiles to update
           </span>
         )}
         {saved === 'err' && (

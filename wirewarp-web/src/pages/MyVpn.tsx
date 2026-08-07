@@ -5,7 +5,7 @@ import {
   vpnEndpoints as vpnEndpointsApi,
   vpnProfiles as vpnProfilesApi,
 } from '../lib/api'
-import { Button, Field, Input, Select, relTime } from '../components/ui'
+import { Badge, Button, Field, Input, Select, relTime } from '../components/ui'
 import { useRole } from '../hooks/useRole'
 import type {
   VpnEndpoint,
@@ -102,6 +102,7 @@ export default function MyVpn() {
               <th>Endpoint</th>
               <th>Tunnel IP</th>
               <th>Mode</th>
+              <th>Route config</th>
               <th>Last handshake</th>
               <th></th>
             </tr>
@@ -130,7 +131,7 @@ export default function MyVpn() {
             ))}
             {profiles.length === 0 && (
               <tr>
-                <td colSpan={6} style={{ textAlign: 'center', color: 'var(--fg-3)', padding: 24 }}>
+                <td colSpan={7} style={{ textAlign: 'center', color: 'var(--fg-3)', padding: 24 }}>
                   No profiles yet — create one above.
                 </td>
               </tr>
@@ -163,13 +164,14 @@ function ProfileRow({
       </td>
       <td><code>{profile.tunnel_ip}</code></td>
       <td>{profile.tunnel_mode}</td>
+      <td><RouteStatus status={profile.config_route_status} /></td>
       <td>
         {profile.last_handshake_at ? relTime(profile.last_handshake_at) : 'never'}
       </td>
       <td>
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-          <Button size="sm" variant="ghost" onClick={onRegenerate}>
-            Regenerate
+          <Button size="sm" variant={profile.config_route_status === 'stale' ? 'primary' : 'ghost'} onClick={onRegenerate}>
+            {profile.config_route_status === 'stale' ? 'Regenerate routes' : 'Regenerate keys'}
           </Button>
           <Button size="sm" variant="danger" onClick={onDelete}>
             Delete
@@ -178,6 +180,13 @@ function ProfileRow({
       </td>
     </tr>
   )
+}
+
+function RouteStatus({ status }: { status: VpnProfile['config_route_status'] }) {
+  if (status === 'current') return <Badge tone="ok">current</Badge>
+  if (status === 'stale') return <Badge tone="warn">stale</Badge>
+  if (status === 'legacy') return <Badge tone="neutral">legacy</Badge>
+  return <Badge tone="neutral">not applicable</Badge>
 }
 
 function CreateProfileCard({
@@ -195,6 +204,8 @@ function CreateProfileCard({
   const [busy, setBusy] = useState(false)
 
   const enabledEndpoints = endpoints.filter((e) => e.enabled)
+  const selectedEndpoint = enabledEndpoints.find((endpoint) => endpoint.id === endpointId)
+  const splitUnavailable = mode === 'split' && selectedEndpoint?.remote_subnets.length === 0
 
   async function go(e: FormEvent) {
     e.preventDefault()
@@ -264,7 +275,7 @@ function CreateProfileCard({
         </Field>
         <Field
           label="Mode"
-          hint="Split = only permitted destinations. Full = all traffic via gateway (privacy / hostile WiFi)."
+          hint="Split routes every configured remote VLAN. Full routes IPv4 internet through the gateway. Gateway permissions restrict remote VLAN access in both modes."
         >
           <Select value={mode} onChange={(e) => setMode(e.target.value as VpnTunnelMode)}>
             {MODES.map((m) => (
@@ -275,12 +286,17 @@ function CreateProfileCard({
           </Select>
         </Field>
       </div>
+      {splitUnavailable && (
+        <div style={{ marginTop: 12, color: 'var(--warn)' }}>
+          This endpoint has no remote routes. Ask an admin to add one before creating a split profile.
+        </div>
+      )}
       {error && <div style={{ marginTop: 12, color: 'var(--err)' }}>{error}</div>}
       <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
         <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
           Cancel
         </Button>
-        <Button type="submit" variant="primary" disabled={busy || !endpointId || !label}>
+        <Button type="submit" variant="primary" disabled={busy || !endpointId || !label || splitUnavailable}>
           {busy ? 'creating…' : 'Create'}
         </Button>
       </div>

@@ -322,6 +322,8 @@ export interface Node {
 
 export type VpnProtocol = 'tcp' | 'udp' | 'icmp' | 'any'
 export type VpnTunnelMode = 'split' | 'full'
+export type VpnConfigRouteStatus = 'current' | 'stale' | 'legacy' | 'not_applicable'
+export type VpnGatewaySync = 'not_required' | 'dispatched' | 'pending'
 
 export interface VpnEndpoint {
   id: string
@@ -332,6 +334,8 @@ export interface VpnEndpoint {
   public_endpoint: string
   wg_public_key: string | null
   dns_servers: string[] | null
+  remote_subnets: string[]
+  route_revision: number
   enabled: boolean
   created_at: string
 }
@@ -361,6 +365,12 @@ export interface VpnPermissionInput {
   port_range_end?: number | null
 }
 
+export interface VpnPermissionsUpdate {
+  permissions: VpnPermission[]
+  gateway_sync: VpnGatewaySync
+  command_ids: string[]
+}
+
 export interface VpnProfile {
   id: string
   user_id: string
@@ -369,6 +379,8 @@ export interface VpnProfile {
   tunnel_ip: string
   wg_public_key: string
   tunnel_mode: VpnTunnelMode
+  issued_route_revision: number | null
+  config_route_status: VpnConfigRouteStatus
   last_handshake_at: string | null
   created_at: string
 }

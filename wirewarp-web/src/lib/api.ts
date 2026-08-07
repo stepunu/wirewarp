@@ -507,6 +507,7 @@ export const vpnEndpoints = {
     listen_port?: number
     wg_interface?: string
     dns_servers?: string[] | null
+    remote_subnets?: string[]
   }) =>
     request<import('./types').VpnEndpoint>('/vpn-endpoints', {
       method: 'POST',
@@ -519,6 +520,7 @@ export const vpnEndpoints = {
       listen_port: number
       dns_servers: string[] | null
       enabled: boolean
+      remote_subnets: string[]
     }>,
   ) =>
     request<import('./types').VpnEndpoint>(`/vpn-endpoints/${id}`, {
@@ -537,7 +539,7 @@ export const vpnEndpoints = {
     userId: string,
     permissions: import('./types').VpnPermissionInput[],
   ) =>
-    request<import('./types').VpnPermission[]>(
+    request<import('./types').VpnPermissionsUpdate>(
       `/vpn-endpoints/${endpointId}/users/${userId}/permissions`,
       {
         method: 'PUT',
@@ -589,7 +591,7 @@ export const vpnProfiles = {
     }),
   patch: (
     id: string,
-    data: { label?: string; tunnel_mode?: import('./types').VpnTunnelMode },
+    data: { label?: string },
   ) =>
     request<import('./types').VpnProfile>(`/vpn-profiles/${id}`, {
       method: 'PATCH',
