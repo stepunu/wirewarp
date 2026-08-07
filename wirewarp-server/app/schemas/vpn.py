@@ -8,9 +8,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.services.vpn_routes import normalize_remote_subnets
+
 
 Protocol = Literal["tcp", "udp", "icmp", "any"]
 TunnelMode = Literal["split", "full"]
+ConfigRouteStatus = Literal["current", "stale", "legacy", "not_applicable"]
+GatewaySyncStatus = Literal["not_required", "dispatched", "pending"]
 
 
 # ---- permissions ----
@@ -74,6 +78,12 @@ class VpnUserPermissionsRead(BaseModel):
     permissions: list[VpnPermissionRead] = []
 
 
+class VpnPermissionsUpdateRead(BaseModel):
+    permissions: list[VpnPermissionRead]
+    gateway_sync: GatewaySyncStatus
+    command_ids: list[str]
+
+
 # ---- endpoint ----
 
 
@@ -86,6 +96,8 @@ class VpnEndpointRead(BaseModel):
     public_endpoint: str
     wg_public_key: str | None
     dns_servers: list[str] | None
+    remote_subnets: list[str]
+    route_revision: int
     enabled: bool
     created_at: datetime
 
@@ -98,7 +110,13 @@ class VpnEndpointCreate(BaseModel):
     listen_port: int = 51821
     wg_interface: str = "wg-vpn0"
     dns_servers: list[str] | None = None
+    remote_subnets: list[str] = Field(default_factory=list)
     # vpn_network omitted — server allocates from the pool
+
+    @field_validator("remote_subnets")
+    @classmethod
+    def _valid_remote_subnets(cls, values: list[str]) -> list[str]:
+        return normalize_remote_subnets(values)
 
 
 class VpnEndpointUpdate(BaseModel):
@@ -106,6 +124,12 @@ class VpnEndpointUpdate(BaseModel):
     listen_port: int | None = None
     dns_servers: list[str] | None = None
     enabled: bool | None = None
+    remote_subnets: list[str] | None = None
+
+    @field_validator("remote_subnets")
+    @classmethod
+    def _valid_remote_subnets(cls, values: list[str] | None) -> list[str] | None:
+        return None if values is None else normalize_remote_subnets(values)
 
 
 # ---- profile ----
@@ -119,6 +143,8 @@ class VpnProfileRead(BaseModel):
     tunnel_ip: str
     wg_public_key: str
     tunnel_mode: TunnelMode
+    issued_route_revision: int | None
+    config_route_status: ConfigRouteStatus
     last_handshake_at: datetime | None
     created_at: datetime
 
@@ -145,7 +171,8 @@ class VpnProfileAdminCreate(VpnProfileSelfCreate):
 
 class VpnProfileUpdate(BaseModel):
     label: str | None = Field(default=None, min_length=1, max_length=64)
-    tunnel_mode: TunnelMode | None = None
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class VpnProfileIssued(VpnProfileRead):

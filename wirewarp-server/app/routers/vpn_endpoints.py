@@ -33,6 +33,7 @@ from app.schemas.vpn import (
     VpnEndpointUpdate,
     VpnPermissionInput,
     VpnPermissionRead,
+    VpnPermissionsUpdateRead,
     VpnUserPermissionsRead,
 )
 from app.schemas.wg_peer import WgPeerSnapshotRead
@@ -42,6 +43,10 @@ from app.services.vpn_ops import (
     dispatch_vpn_endpoint_up,
     dispatch_vpn_peer_update_rules,
     load_user_endpoint_permissions,
+)
+from app.services.vpn_routes import (
+    destination_in_route_envelope,
+    normalize_remote_subnets,
 )
 
 
@@ -117,6 +122,12 @@ async def create_endpoint(
         )
 
     network = await allocate_vpn_network(db)
+    try:
+        remote_subnets = normalize_remote_subnets(
+            body.remote_subnets, vpn_network=network
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     ep = VpnEndpoint(
         tunnel_client_id=body.tunnel_client_id,
         wg_interface=body.wg_interface,
@@ -124,6 +135,8 @@ async def create_endpoint(
         vpn_network=network,
         public_endpoint=body.public_endpoint,
         dns_servers=body.dns_servers,
+        remote_subnets=remote_subnets,
+        route_revision=1,
         enabled=True,
     )
     db.add(ep)
@@ -167,9 +180,46 @@ async def update_endpoint(
     payload = body.model_dump(exclude_unset=True)
     listen_port_changed = "listen_port" in payload and payload["listen_port"] != ep.listen_port
     enabled_changed = "enabled" in payload and payload["enabled"] != ep.enabled
+    routes_changed = False
+    if "remote_subnets" in payload:
+        try:
+            new_routes = normalize_remote_subnets(
+                payload["remote_subnets"] or [], vpn_network=ep.vpn_network
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        routes_changed = new_routes != ep.remote_subnets
+        if routes_changed:
+            permissions = (
+                await db.execute(
+                    select(VpnPermission).where(
+                        VpnPermission.vpn_endpoint_id == endpoint_id
+                    )
+                )
+            ).scalars().all()
+            blocked = [
+                permission.destination
+                for permission in permissions
+                if not destination_in_route_envelope(
+                    permission.destination,
+                    vpn_network=ep.vpn_network,
+                    remote_subnets=new_routes,
+                )
+            ]
+            if blocked:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Cannot remove routes used by VPN permissions: "
+                        + ", ".join(sorted(set(blocked)))
+                    ),
+                )
+            payload["remote_subnets"] = new_routes
 
     for field, val in payload.items():
         setattr(ep, field, val)
+    if routes_changed:
+        ep.route_revision += 1
     await db.commit()
     await db.refresh(ep)
 
@@ -289,7 +339,7 @@ async def get_user_permissions(
 
 @router.put(
     "/{endpoint_id}/users/{user_id}/permissions",
-    response_model=list[VpnPermissionRead],
+    response_model=VpnPermissionsUpdateRead,
 )
 async def replace_user_permissions(
     endpoint_id: uuid.UUID,
@@ -309,6 +359,24 @@ async def replace_user_permissions(
     target = await db.get(User, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
+
+    outside = [
+        entry.destination
+        for entry in body.permissions
+        if not destination_in_route_envelope(
+            entry.destination,
+            vpn_network=ep.vpn_network,
+            remote_subnets=ep.remote_subnets,
+        )
+    ]
+    if outside:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Permission destinations must fit the VPN network or a remote subnet: "
+                + ", ".join(sorted(set(outside)))
+            ),
+        )
 
     await db.execute(
         sa_delete(VpnPermission).where(
@@ -341,10 +409,22 @@ async def replace_user_permissions(
             )
         )
     ).scalars().all()
+    command_ids: list[str] = []
+    all_sent = True
     for profile in profiles:
-        await dispatch_vpn_peer_update_rules(
+        sent, command_id = await dispatch_vpn_peer_update_rules(
             profile, ep, perms, db, actor_user_id=actor.id
         )
+        all_sent = all_sent and sent
+        if command_id:
+            command_ids.append(command_id)
+
+    if not profiles:
+        gateway_sync = "not_required"
+    elif all_sent:
+        gateway_sync = "dispatched"
+    else:
+        gateway_sync = "pending"
 
     await log_auth_event(
         db,
@@ -355,6 +435,15 @@ async def replace_user_permissions(
             "target_user_id": str(user_id),
             "rule_count": len(perms),
             "profile_count": len(profiles),
+            "gateway_sync": gateway_sync,
+            "command_ids": command_ids,
         },
     )
-    return list(perms)
+    return VpnPermissionsUpdateRead(
+        permissions=[
+            VpnPermissionRead.model_validate(permission, from_attributes=True)
+            for permission in perms
+        ],
+        gateway_sync=gateway_sync,
+        command_ids=command_ids,
+    )

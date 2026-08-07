@@ -27,6 +27,8 @@ def _endpoint(**over) -> VpnEndpoint:
         public_endpoint="vpn.example.com:51821",
         wg_public_key="ENDPOINTPUBKEY",
         dns_servers=None,
+        remote_subnets=["192.168.1.0/24", "192.168.2.0/24"],
+        route_revision=1,
         enabled=True,
     )
     base.update(over)
@@ -76,7 +78,7 @@ def test_psk_shape():
     assert len(base64.b64decode(psk)) == 32
 
 
-def test_split_tunnel_allowed_ips_is_union():
+def test_split_tunnel_allowed_ips_uses_endpoint_routes_not_permissions():
     ep = _endpoint()
     p = _profile(tunnel_mode="split")
     perms = [
@@ -84,22 +86,27 @@ def test_split_tunnel_allowed_ips_is_union():
         _perm(destination="192.168.2.0/24"),
     ]
     assert compute_allowed_ips(ep, p, perms) == [
-        "192.168.1.50",
+        "10.30.0.0/24",
+        "192.168.1.0/24",
         "192.168.2.0/24",
     ]
 
 
-def test_split_tunnel_with_no_perms_falls_back_to_vpn_network():
+def test_split_tunnel_with_no_perms_keeps_all_endpoint_routes():
     ep = _endpoint()
     p = _profile(tunnel_mode="split")
-    assert compute_allowed_ips(ep, p, []) == ["10.30.0.0/24"]
+    assert compute_allowed_ips(ep, p, []) == [
+        "10.30.0.0/24",
+        "192.168.1.0/24",
+        "192.168.2.0/24",
+    ]
 
 
 def test_full_tunnel_overrides_perms():
     ep = _endpoint()
     p = _profile(tunnel_mode="full")
     perms = [_perm(destination="192.168.1.50")]
-    assert compute_allowed_ips(ep, p, perms) == ["0.0.0.0/0", "::/0"]
+    assert compute_allowed_ips(ep, p, perms) == ["0.0.0.0/0"]
 
 
 def test_render_conf_contains_required_blocks():
@@ -116,7 +123,7 @@ def test_render_conf_contains_required_blocks():
     assert "[Peer]" in text
     assert "PublicKey = ENDPOINTPUBKEY" in text
     assert "PresharedKey = PSKPSKPSK" in text
-    assert "AllowedIPs = 192.168.1.50" in text
+    assert "AllowedIPs = 10.30.0.0/24, 192.168.1.0/24, 192.168.2.0/24" in text
     assert "Endpoint = vpn.example.com:51821" in text
     assert "PersistentKeepalive = 25" in text
 
@@ -127,7 +134,8 @@ def test_render_conf_full_tunnel_allowed_ips():
     text = render_conf(
         endpoint=ep, profile=p, permissions=[], private_key="PRIVPRIV"
     )
-    assert "AllowedIPs = 0.0.0.0/0, ::/0" in text
+    assert "AllowedIPs = 0.0.0.0/0" in text
+    assert "::/0" not in text
 
 
 def test_render_conf_endpoint_pubkey_pending_marker_when_endpoint_not_yet_initialized():

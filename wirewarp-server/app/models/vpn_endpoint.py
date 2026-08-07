@@ -25,6 +25,12 @@ class VpnEndpoint(Base):
     public_endpoint: Mapped[str] = mapped_column(String, nullable=False)
     wg_public_key: Mapped[str | None] = mapped_column(String, nullable=True)
     dns_servers: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    remote_subnets: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    route_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

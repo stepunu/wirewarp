@@ -41,7 +41,6 @@ from app.services.network_alloc import allocate_vpn_peer_ip
 from app.services.vpn_ops import (
     dispatch_vpn_peer_add,
     dispatch_vpn_peer_remove,
-    dispatch_vpn_peer_update_rules,
     generate_keypair,
     generate_psk,
     load_user_endpoint_permissions,
@@ -80,6 +79,11 @@ async def _create_profile(
         raise HTTPException(status_code=404, detail="VPN endpoint not found")
     if not endpoint.enabled:
         raise HTTPException(status_code=400, detail="VPN endpoint is disabled")
+    if tunnel_mode == "split" and not endpoint.remote_subnets:
+        raise HTTPException(
+            status_code=400,
+            detail="Split profiles require at least one endpoint remote subnet",
+        )
 
     permissions = await load_user_endpoint_permissions(user.id, endpoint.id, db)
     if require_permissions and not permissions:
@@ -103,6 +107,10 @@ async def _create_profile(
         wg_public_key=keys.public_key,
         wg_psk=psk,
         tunnel_mode=tunnel_mode,
+        issued_route_revision=(
+            endpoint.route_revision if tunnel_mode == "split" else None
+        ),
+        endpoint=endpoint,
     )
     db.add(profile)
     try:
@@ -148,6 +156,8 @@ async def _create_profile(
         tunnel_ip=profile.tunnel_ip,
         wg_public_key=profile.wg_public_key,
         tunnel_mode=profile.tunnel_mode,  # type: ignore[arg-type]
+        issued_route_revision=profile.issued_route_revision,
+        config_route_status=profile.config_route_status,  # type: ignore[arg-type]
         last_handshake_at=None,
         created_at=profile.created_at,
         config_text=config_text,
@@ -184,6 +194,8 @@ async def _regenerate_keys(
     keys = generate_keypair()
     profile.wg_public_key = keys.public_key
     profile.wg_psk = generate_psk()
+    if profile.tunnel_mode == "split":
+        profile.issued_route_revision = endpoint.route_revision
     await db.commit()
     await db.refresh(profile)
 
@@ -196,6 +208,7 @@ async def _regenerate_keys(
         wg_public_key=old_pubkey,
         wg_psk="",
         tunnel_mode=profile.tunnel_mode,
+        issued_route_revision=profile.issued_route_revision,
     )
     await dispatch_vpn_peer_remove(placeholder, endpoint, db, actor_user_id=actor.id)
     await dispatch_vpn_peer_add(
@@ -226,6 +239,8 @@ async def _regenerate_keys(
         tunnel_ip=profile.tunnel_ip,
         wg_public_key=profile.wg_public_key,
         tunnel_mode=profile.tunnel_mode,  # type: ignore[arg-type]
+        issued_route_revision=profile.issued_route_revision,
+        config_route_status=profile.config_route_status,  # type: ignore[arg-type]
         last_handshake_at=profile.last_handshake_at,
         created_at=profile.created_at,
         config_text=config_text,
@@ -372,21 +387,11 @@ async def update_profile(
     if profile is None:
         raise HTTPException(status_code=404, detail="VPN profile not found")
     payload = body.model_dump(exclude_unset=True)
-    mode_changed = "tunnel_mode" in payload and payload["tunnel_mode"] != profile.tunnel_mode
     for field, val in payload.items():
         setattr(profile, field, val)
     await db.commit()
     await db.refresh(profile)
 
-    if mode_changed:
-        endpoint = await db.get(VpnEndpoint, profile.vpn_endpoint_id)
-        if endpoint:
-            permissions = await load_user_endpoint_permissions(
-                profile.user_id, profile.vpn_endpoint_id, db
-            )
-            await dispatch_vpn_peer_update_rules(
-                profile, endpoint, permissions, db, actor_user_id=actor.id
-            )
     await log_auth_event(
         db,
         "vpn.profile.update",

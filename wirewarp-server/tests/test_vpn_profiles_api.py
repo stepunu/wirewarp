@@ -39,6 +39,7 @@ async def _bootstrap_endpoint(client, db, factories) -> str:
         json={
             "tunnel_client_id": str(gateway.id),
             "public_endpoint": "vpn.example:51821",
+            "remote_subnets": ["10.0.0.0/16", "192.168.0.0/16"],
         },
     )
     assert resp.status_code == 201, resp.text
@@ -166,7 +167,10 @@ async def test_permissions_replace_full_list(client, db, factories):
         },
     )
     assert resp.status_code == 200, resp.text
-    perms = resp.json()
+    result = resp.json()
+    assert result["gateway_sync"] == "not_required"
+    assert result["command_ids"] == []
+    perms = result["permissions"]
     assert len(perms) == 2
     assert {p["destination"] for p in perms} == {
         "192.168.1.50",
@@ -178,7 +182,7 @@ async def test_permissions_replace_full_list(client, db, factories):
         json={"permissions": [{"destination": "10.0.0.5", "protocol": "any"}]},
     )
     assert resp.status_code == 200
-    perms = resp.json()
+    perms = resp.json()["permissions"]
     assert len(perms) == 1
     assert perms[0]["destination"] == "10.0.0.5"
 
@@ -240,9 +244,10 @@ async def test_self_serve_allowed_after_permissions_provisioned(client, db, fact
     )
     assert resp.status_code == 201, resp.text
     body = resp.json()
-    # AllowedIPs in the rendered .conf now reflects the provisioned rules,
-    # not the bare VPN /24.
-    assert "192.168.1.50" in body["config_text"]
+    # Client routes come from the endpoint route envelope, not this user's
+    # narrower gateway permission.
+    assert "AllowedIPs = 10.21.0.0/24, 10.0.0.0/16, 192.168.0.0/16" in body["config_text"]
+    assert "192.168.1.50" not in body["config_text"]
 
 
 @pytest.mark.asyncio
@@ -307,7 +312,7 @@ async def test_permissions_replace_four_entries_creates_four_rows(client, db, fa
         json=payload,
     )
     assert resp.status_code == 200, resp.text
-    perms = resp.json()
+    perms = resp.json()["permissions"]
     assert len(perms) == 4
     assert {p["destination"] for p in perms} == {
         "192.168.20.5/32",

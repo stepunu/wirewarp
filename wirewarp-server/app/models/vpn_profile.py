@@ -3,6 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     String,
+    Integer,
     DateTime,
     ForeignKey,
     UniqueConstraint,
@@ -40,11 +41,22 @@ class VpnProfile(Base):
     wg_public_key: Mapped[str] = mapped_column(String, nullable=False)
     wg_psk: Mapped[str] = mapped_column(String, nullable=False)
     tunnel_mode: Mapped[str] = mapped_column(String, nullable=False, default="split")
+    issued_route_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_handshake_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     endpoint: Mapped["VpnEndpoint"] = relationship(  # noqa: F821
-        "VpnEndpoint", back_populates="profiles"
+        "VpnEndpoint", back_populates="profiles", lazy="selectin"
     )
+
+    @property
+    def config_route_status(self) -> str:
+        if self.tunnel_mode == "full":
+            return "not_applicable"
+        if self.issued_route_revision is None:
+            return "legacy"
+        if self.issued_route_revision == self.endpoint.route_revision:
+            return "current"
+        return "stale"

@@ -84,18 +84,12 @@ def _format_port_range(start: int | None, end: int | None) -> str | None:
 def compute_allowed_ips(
     endpoint: VpnEndpoint,
     profile: VpnProfile,
-    permissions: list[VpnPermission],
+    permissions: list[VpnPermission] | None = None,
 ) -> list[str]:
-    """Compute AllowedIPs for the .conf based on tunnel mode + permissions."""
+    """Compute client routes independently from gateway permissions."""
     if profile.tunnel_mode == "full":
-        return ["0.0.0.0/0", "::/0"]
-    out: list[str] = []
-    seen: set[str] = set()
-    for p in permissions:
-        if p.destination not in seen:
-            out.append(p.destination)
-            seen.add(p.destination)
-    return out or [endpoint.vpn_network]
+        return ["0.0.0.0/0"]
+    return [endpoint.vpn_network, *endpoint.remote_subnets]
 
 
 def _ensure_endpoint_has_port(public_endpoint: str, listen_port: int) -> str:
@@ -283,7 +277,7 @@ async def dispatch_vpn_peer_update_rules(
     actor_user_id: uuid.UUID | None = None,
 ) -> tuple[bool, str]:
     """Reapply iptables rules for one peer after the admin edits the
-    permission list (or toggles tunnel_mode)."""
+    permission list."""
     agent_id = await _gateway_agent_id(endpoint, db)
     if agent_id is None:
         return False, ""
