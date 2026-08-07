@@ -1,10 +1,15 @@
 package handlers
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/wirewarp/agent/internal/config"
@@ -19,9 +24,9 @@ import (
 // look like on the wire". 1280 MTU is the homelab/cellular safe value;
 // 1240 MSS = 1280 - 40 (IP + TCP headers).
 const (
-	vpnMTU                  = 1280
-	vpnMSS                  = 1240
-	vpnRoutingRulePriority  = 4500 // higher precedence than the 5000-priority LAN-source pin rules
+	vpnMTU                 = 1280
+	vpnMSS                 = 1240
+	vpnRoutingRulePriority = 4500 // higher precedence than the 5000-priority LAN-source pin rules
 )
 
 // VpnHandlers manages road-warrior WireGuard endpoints — one
@@ -37,7 +42,6 @@ type VpnHandlers struct {
 	cfg     *config.Config
 	mu      sync.Mutex
 	wgs     map[string]*wireguard.Server // keyed by interface name
-	wanCache string                      // best-effort WAN interface for full-tunnel MASQUERADE
 }
 
 // NewVpnHandlers initialises any VPN endpoints from saved config so the
@@ -91,17 +95,6 @@ func (h *VpnHandlers) LiveInterfaces() []string {
 		out = append(out, iface)
 	}
 	return out
-}
-
-// SetWanIface stashes the WAN interface name so full-tunnel peers can
-// MASQUERADE outbound. The gateway's WAN is whatever it uses for default
-// internet — typically the same iface the operator port-forwards on.
-// Caller passes it via main.go after determining it from the existing
-// gateway-attachment state.
-func (h *VpnHandlers) SetWanIface(iface string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.wanCache = iface
 }
 
 // --- command handlers ---
@@ -253,7 +246,6 @@ func (h *VpnHandlers) handlePeerAdd(raw json.RawMessage) (string, error) {
 
 	h.mu.Lock()
 	wg, ok := h.wgs[p.Interface]
-	wan := h.wanCache
 	h.mu.Unlock()
 	if !ok {
 		return "", fmt.Errorf("vpn endpoint %s not initialised — send vpn_endpoint_up first", p.Interface)
@@ -269,6 +261,10 @@ func (h *VpnHandlers) handlePeerAdd(raw json.RawMessage) (string, error) {
 	}
 
 	rules := convertRules(p.Rules)
+	wan := ""
+	if p.FullTunnel {
+		wan = detectDefaultRouteIface()
+	}
 	if err := iptables.VpnPeerEnsureRules(p.TunnelIP, p.FullTunnel, wan, rules); err != nil {
 		return "", err
 	}
@@ -357,10 +353,11 @@ func (h *VpnHandlers) handlePeerUpdateRules(raw json.RawMessage) (string, error)
 			return "", err
 		}
 	}
-	h.mu.Lock()
-	wan := h.wanCache
-	h.mu.Unlock()
 	rules := convertRules(p.Rules)
+	wan := ""
+	if p.FullTunnel {
+		wan = detectDefaultRouteIface()
+	}
 	if err := iptables.VpnPeerEnsureRules(p.TunnelIP, p.FullTunnel, wan, rules); err != nil {
 		return "", err
 	}
@@ -504,4 +501,32 @@ func convertRules(in []vpnPeerRulePayload) []iptables.VpnRule {
 		})
 	}
 	return out
+}
+
+func detectDefaultRouteIface() string {
+	file, err := os.Open("/proc/net/route")
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	return defaultRouteIfaceFrom(file)
+}
+
+func defaultRouteIfaceFrom(reader io.Reader) string {
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 4 || fields[1] != "00000000" {
+			continue
+		}
+		flags, err := strconv.ParseUint(fields[3], 16, 32)
+		if err != nil || flags&0x3 != 0x3 {
+			continue
+		}
+		if validate.PublicIface(fields[0]) != nil {
+			continue
+		}
+		return fields[0]
+	}
+	return ""
 }

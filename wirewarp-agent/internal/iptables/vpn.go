@@ -15,49 +15,59 @@ type VpnRule struct {
 	PortRangeEnd   int    // 0 = single-port (uses Start)
 }
 
+type vpnPeerPlan struct {
+	acceptRules    [][]string
+	masqueradeRule []string
+}
+
 // VpnPeerEnsureRules removes every existing rule for `srcIP` first, then
 // re-applies the supplied list. This is what makes a permission-list
 // edit atomic from the agent's side: the operator's new rule set is
 // applied wholesale, no leftover ACCEPTs from a previous version.
 //
-// `fullTunnel` does two things:
-//   * adds a blanket FORWARD ACCEPT so the peer can reach 0.0.0.0/0 — the
-//     wg-easy-equivalent default. The per-rule ACCEPTs in `rules` still
-//     apply (and stay narrower) for split-tunnel use cases that re-use
-//     this helper, but for full-tunnel mode the peer mostly relies on
-//     the blanket ACCEPT.
-//   * adds a per-peer MASQUERADE on the WAN interface so the gateway
-//     SNATs the peer's internet-bound traffic to its own WAN address.
+// Full-tunnel peers get one extra ACCEPT restricted to the detected WAN
+// output interface. LAN traffic still needs a normal permission rule.
 func VpnPeerEnsureRules(srcIP string, fullTunnel bool, wanIface string, rules []VpnRule) error {
 	if err := vpnFlushPeer(srcIP); err != nil {
 		return fmt.Errorf("flush peer rules: %w", err)
 	}
-	for _, r := range rules {
-		if err := vpnAddPeerRule(srcIP, r); err != nil {
+	plan, err := buildVpnPeerPlan(srcIP, fullTunnel, wanIface, rules)
+	if err != nil {
+		return err
+	}
+	for _, args := range plan.acceptRules {
+		if err := checkOrInsert(args); err != nil {
 			return fmt.Errorf("add peer rule: %w", err)
 		}
 	}
-	if fullTunnel {
-		// Blanket FORWARD ACCEPT for this peer to anywhere. Inserted at
-		// the top so it sits ahead of the chain-wide default-DROP for
-		// the VPN /24.
-		args := []string{"FORWARD", "-s", srcIP + "/32", "-j", "ACCEPT"}
-		if err := checkOrInsert(args); err != nil {
-			return fmt.Errorf("vpn full-tunnel forward accept: %w", err)
-		}
-		if wanIface != "" {
-			masqArgs := []string{
-				"-t", "nat", "POSTROUTING",
-				"-s", srcIP + "/32",
-				"-o", wanIface,
-				"-j", "MASQUERADE",
-			}
-			if err := checkOrAppend(masqArgs); err != nil {
-				return fmt.Errorf("vpn masquerade: %w", err)
-			}
+	if len(plan.masqueradeRule) > 0 {
+		if err := checkOrAppend(plan.masqueradeRule); err != nil {
+			return fmt.Errorf("vpn masquerade: %w", err)
 		}
 	}
 	return nil
+}
+
+func buildVpnPeerPlan(srcIP string, fullTunnel bool, wanIface string, rules []VpnRule) (vpnPeerPlan, error) {
+	if fullTunnel && wanIface == "" {
+		return vpnPeerPlan{}, fmt.Errorf("vpn full-tunnel WAN interface is unavailable")
+	}
+	plan := vpnPeerPlan{acceptRules: make([][]string, 0, len(rules)+1)}
+	for _, rule := range rules {
+		plan.acceptRules = append(plan.acceptRules, vpnPeerRuleArgs(srcIP, rule))
+	}
+	if fullTunnel {
+		plan.acceptRules = append(plan.acceptRules, []string{
+			"FORWARD", "-s", srcIP + "/32", "-o", wanIface, "-j", "ACCEPT",
+		})
+		plan.masqueradeRule = []string{
+			"-t", "nat", "POSTROUTING",
+			"-s", srcIP + "/32",
+			"-o", wanIface,
+			"-j", "MASQUERADE",
+		}
+	}
+	return plan, nil
 }
 
 // VpnEnsureMSSClamp installs (idempotently) bidirectional TCP-MSS
@@ -165,7 +175,7 @@ func VpnRemoveDefaultDrop(vpnNetwork string) error {
 
 // --- helpers ---
 
-func vpnAddPeerRule(srcIP string, r VpnRule) error {
+func vpnPeerRuleArgs(srcIP string, r VpnRule) []string {
 	args := []string{"FORWARD", "-s", srcIP + "/32"}
 	if r.Destination != "" {
 		args = append(args, "-d", r.Destination)
@@ -181,11 +191,7 @@ func vpnAddPeerRule(srcIP string, r VpnRule) error {
 		}
 	}
 	args = append(args, "-j", "ACCEPT")
-	// Insert at the top of FORWARD so the per-peer ACCEPT wins over the
-	// blanket DROP that VpnEnsureDefaultDrop appends. Otherwise the DROP
-	// (which gets installed first, at endpoint-up time) shadows every
-	// later ACCEPT and the peer can't reach anything.
-	return checkOrInsert(args)
+	return args
 }
 
 // checkOrInsert mirrors checkOrAppend but uses -I (insert at top) so the
@@ -219,34 +225,41 @@ func vpnFlushPeer(srcIP string) error {
 		if err != nil {
 			return fmt.Errorf("iptables-save -t %s: %w — %s", table, err, out)
 		}
-		needles := []string{
-			" -s " + srcIP + "/32",
-			" -s " + srcIP + " ",
-		}
-		for _, line := range strings.Split(string(out), "\n") {
-			if !strings.HasPrefix(line, "-A ") {
-				continue
-			}
-			matched := false
-			for _, n := range needles {
-				if strings.Contains(line, n) {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				continue
-			}
-			fields[0] = "-D"
-			args := append([]string{"-t", table}, fields...)
+		for _, args := range vpnPeerDeleteArgs(srcIP, table, string(out)) {
 			if delOut, err := exec.Command("iptables", args...).CombinedOutput(); err != nil {
 				return fmt.Errorf("iptables %s: %w — %s", strings.Join(args, " "), err, delOut)
 			}
 		}
 	}
 	return nil
+}
+
+func vpnPeerDeleteArgs(srcIP, table, savedRules string) [][]string {
+	needles := []string{
+		" -s " + srcIP + "/32",
+		" -s " + srcIP + " ",
+	}
+	var commands [][]string
+	for _, line := range strings.Split(savedRules, "\n") {
+		if !strings.HasPrefix(line, "-A ") {
+			continue
+		}
+		matched := false
+		for _, needle := range needles {
+			if strings.Contains(line, needle) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		fields[0] = "-D"
+		commands = append(commands, append([]string{"-t", table}, fields...))
+	}
+	return commands
 }

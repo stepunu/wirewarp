@@ -120,17 +120,6 @@ func main() {
 		log.Fatalf("Failed to initialise VPN handlers: %v", err)
 	}
 	vpn.Register(client.Exec())
-	if cfg.Mode == "client" {
-		// The first gateway attachment's LAN egress interface is the
-		// homelab WAN, which is what full-tunnel VPN peers MASQUERADE
-		// against. Server-mode agents have no LAN attachment.
-		for _, a := range cfg.Attachments {
-			if a.IsGateway && a.LANIface != "" {
-				vpn.SetWanIface(a.LANIface)
-				break
-			}
-		}
-	}
 	wsclient.SetVpnInterfacesProvider(client, vpn.LiveInterfaces)
 
 	// agent_update works in both modes — download new binary and restart via systemd.
