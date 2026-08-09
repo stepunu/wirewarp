@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { agents as agentsApi, nodes as nodesApi } from '../lib/api'
 import { Badge, Button, FilterBar, StatusDot, relTime } from '../components/ui'
 import { Ic } from '../components/icons'
 import { useToast } from '../components/Toasts'
+import { NewAgentTokenDialog } from '../components/NewAgentTokenDialog'
 import { useRole } from '../hooks/useRole'
 import type { Node, NodeRole } from '../lib/types'
 
@@ -46,7 +47,8 @@ function ComponentHealthBadges({ node }: { node: Node }) {
 export default function Nodes() {
   const qc = useQueryClient()
   const push = useToast()
-  const { canMutate } = useRole()
+  const { canMutate, isAdmin } = useRole()
+  const [params, setParams] = useSearchParams()
   const [filter, setFilter] = useState('')
   const [role, setRole] = useState<'all' | NodeRole>('all')
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -69,6 +71,14 @@ export default function Nodes() {
   const connectedCount = nodes.filter((n) => n.status === 'connected').length
   const allFilteredSelected = filtered.length > 0 && filtered.every((n) => selected.has(n.agent_id))
   const someFilteredSelected = filtered.some((n) => selected.has(n.agent_id))
+  const showToken = isAdmin && params.get('new') === '1'
+
+  const setTokenDialogOpen = (open: boolean) => {
+    const next = new URLSearchParams(params)
+    if (open) next.set('new', '1')
+    else next.delete('new')
+    setParams(next, { replace: true })
+  }
 
   const updateNodes = useMutation({
     mutationFn: async (ids: string[]) => {
@@ -126,6 +136,13 @@ export default function Nodes() {
             {connectedCount}/{nodes.length} connected · {serverCount} servers · {gatewayCount} gateways
           </p>
         </div>
+        {isAdmin && (
+          <div className="page-actions">
+            <Button variant="primary" leading={<Ic.plus />} onClick={() => setTokenDialogOpen(true)}>
+              Add node
+            </Button>
+          </div>
+        )}
       </div>
 
       <FilterBar
@@ -229,6 +246,8 @@ export default function Nodes() {
           </tbody>
         </table>
       </div>
+
+      {showToken && <NewAgentTokenDialog onClose={() => setTokenDialogOpen(false)} />}
     </div>
   )
 }

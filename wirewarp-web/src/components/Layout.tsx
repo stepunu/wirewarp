@@ -244,7 +244,14 @@ export default function Layout() {
 
       {role && role !== 'vpn_user' && <BottomNav onMore={() => setDrawerOpen(true)} />}
 
-      {cmdkOpen && <CommandPalette onClose={() => setCmdkOpen(false)} navigate={navigate} agents={agents} />}
+      {cmdkOpen && (
+        <CommandPalette
+          onClose={() => setCmdkOpen(false)}
+          navigate={navigate}
+          agents={agents}
+          canIssueAgentToken={role === 'admin'}
+        />
+      )}
       {helpOpen && <HelpOverlay onClose={() => setHelpOpen(false)} />}
     </div>
   )

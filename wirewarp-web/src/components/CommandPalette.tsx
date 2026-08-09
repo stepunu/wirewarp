@@ -17,10 +17,12 @@ export function CommandPalette({
   onClose,
   navigate,
   agents,
+  canIssueAgentToken,
 }: {
   onClose: () => void
   navigate: (path: string) => void
   agents: Agent[]
+  canIssueAgentToken: boolean
 }) {
   const [q, setQ] = useState('')
   const [idx, setIdx] = useState(0)
@@ -37,7 +39,9 @@ export function CommandPalette({
       { section: 'Navigate', icon: Ic.forward, label: 'Port forwards', hint: 'g p', action: () => navigate('/port-forwards') },
       { section: 'Navigate', icon: Ic.settings, label: 'Settings', hint: '', action: () => navigate('/settings') },
       { section: 'Actions', icon: Ic.plus, label: 'New port forward', hint: 'N', action: () => navigate('/port-forwards?new=1') },
-      { section: 'Actions', icon: Ic.plus, label: 'Issue agent token', hint: '', action: () => navigate('/nodes?new=1') },
+      ...(canIssueAgentToken
+        ? [{ section: 'Actions', icon: Ic.plus, label: 'Add node', hint: '', action: () => navigate('/nodes?new=1') }]
+        : []),
       ...agents.slice(0, 8).map<Item>((a) => ({
         section: 'Nodes',
         icon: a.type === 'server' ? Ic.server : Ic.client,
@@ -51,7 +55,7 @@ export function CommandPalette({
     return all.filter(
       (x) => x.label.toLowerCase().includes(f) || x.hint.toLowerCase().includes(f),
     )
-  }, [q, agents, navigate])
+  }, [q, agents, navigate, canIssueAgentToken])
 
   const sections = useMemo(() => {
     const map = new Map<string, (Item & { _i: number })[]>()
