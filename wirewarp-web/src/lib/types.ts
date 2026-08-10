@@ -45,6 +45,7 @@ export interface TunnelServerIP {
   label: string | null
   is_primary: boolean
   port_forward_count: number
+  lan_egress_pin_count: number
   created_at: string
 }
 

@@ -122,7 +122,6 @@ export default function Layout() {
     return true
   })
 
-  const agents = agentsQ.data ?? []
   const nodes = nodesQ.data ?? []
   const pfCount = pfQ.data?.length ?? 0
   const crumb = pathToCrumb(location.pathname)
@@ -248,7 +247,7 @@ export default function Layout() {
         <CommandPalette
           onClose={() => setCmdkOpen(false)}
           navigate={navigate}
-          agents={agents}
+          nodes={nodes}
           canIssueAgentToken={role === 'admin'}
         />
       )}

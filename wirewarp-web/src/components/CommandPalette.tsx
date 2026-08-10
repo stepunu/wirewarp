@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Ic } from './icons'
 import { K } from './ui'
-import type { Agent } from '../lib/types'
+import type { Node } from '../lib/types'
 
 type IconFn = (p?: { s?: number }) => ReactNode
 
@@ -16,12 +16,12 @@ type Item = {
 export function CommandPalette({
   onClose,
   navigate,
-  agents,
+  nodes,
   canIssueAgentToken,
 }: {
   onClose: () => void
   navigate: (path: string) => void
-  agents: Agent[]
+  nodes: Node[]
   canIssueAgentToken: boolean
 }) {
   const [q, setQ] = useState('')
@@ -42,12 +42,12 @@ export function CommandPalette({
       ...(canIssueAgentToken
         ? [{ section: 'Actions', icon: Ic.plus, label: 'Add node', hint: '', action: () => navigate('/nodes?new=1') }]
         : []),
-      ...agents.slice(0, 8).map<Item>((a) => ({
+      ...nodes.slice(0, 8).map<Item>((node) => ({
         section: 'Nodes',
-        icon: a.type === 'server' ? Ic.server : Ic.client,
-        label: a.name,
-        hint: a.id,
-        action: () => navigate(`/nodes/${a.id}`),
+        icon: node.role === 'server' ? Ic.server : node.role === 'gateway' ? Ic.host : Ic.client,
+        label: node.name,
+        hint: node.agent_id,
+        action: () => navigate(`/nodes/${node.agent_id}`),
       })),
     ]
     if (!q) return all
@@ -55,7 +55,7 @@ export function CommandPalette({
     return all.filter(
       (x) => x.label.toLowerCase().includes(f) || x.hint.toLowerCase().includes(f),
     )
-  }, [q, agents, navigate, canIssueAgentToken])
+  }, [q, nodes, navigate, canIssueAgentToken])
 
   const sections = useMemo(() => {
     const map = new Map<string, (Item & { _i: number })[]>()
@@ -105,7 +105,7 @@ export function CommandPalette({
               setIdx(0)
             }}
             onKeyDown={onKeyDown}
-            placeholder="search agents, pages, actions…"
+            placeholder="search nodes, pages, actions…"
           />
           <K>esc</K>
         </div>

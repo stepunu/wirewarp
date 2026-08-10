@@ -5,6 +5,7 @@ import {
   agents as agentsApi,
   audit as auditApi,
   edge as edgeApi,
+  lanClients as lanApi,
   nodes as nodesApi,
   portForwards as pfApi,
   security as secApi,
@@ -15,6 +16,7 @@ import {
 import { Badge, Button, Dialog, Field, Input, KV, Select, Stat, StatusDot, Tabs, Toggle, relTime } from '../components/ui'
 import { Ic } from '../components/icons'
 import { WgPeerTable } from '../components/WgPeerTable'
+import { NodeLifecycleActions, ServerConfigurationPanel } from '../components/NodeManagement'
 import { HealEventList } from './TunnelServerDetail'
 import { CreateSiteDialog } from './SecuritySites'
 import { EditProtectionDialog } from './SecurityProtections'
@@ -32,6 +34,8 @@ import type {
   EdgeRoute,
   SecurityEventGroup,
   Site,
+  LanClient,
+  TunnelClientSummary,
   TraefikImportPreview,
   TraefikImportRequest,
   WafMode,
@@ -39,6 +43,7 @@ import type {
 
 type Tab =
   | 'overview'
+  | 'configuration'
   | 'routes'
   | 'security'
   | 'rate'
@@ -68,6 +73,7 @@ function tabsFor(node: Node): { value: Tab; label: string; count?: number }[] {
   if (node.role === 'server') {
     return [
       { value: 'overview', label: 'Overview' },
+      { value: 'configuration', label: 'Configuration' },
       { value: 'routes', label: 'Routes' },
       { value: 'security', label: 'Security' },
       { value: 'rate', label: 'Rate Limits' },
@@ -86,6 +92,7 @@ function tabsFor(node: Node): { value: Tab; label: string; count?: number }[] {
   }
   if (node.role === 'gateway') {
     return [
+      { value: 'attachment', label: 'Configuration' },
       { value: 'lan', label: 'LAN' },
       { value: 'egress', label: 'Egress' },
       { value: 'activity', label: 'Activity' },
@@ -93,7 +100,7 @@ function tabsFor(node: Node): { value: Tab; label: string; count?: number }[] {
     ]
   }
   return [
-    { value: 'attachment', label: 'Attachment' },
+    { value: 'attachment', label: 'Configuration' },
     { value: 'activity', label: 'Activity' },
     { value: 'audit', label: 'Audit' },
   ]
@@ -189,6 +196,9 @@ export default function NodeDetail() {
   })
 
   if (nodeQ.isLoading) return <div className="page"><p>Loading...</p></div>
+  if (nodeQ.isError) {
+    return <div className="page"><h1 className="page-title">Could not load node</h1><p style={{ color: 'var(--err)' }}>{nodeQ.error.message}</p></div>
+  }
   if (!node) return <div className="page"><h1 className="page-title">Node not found</h1></div>
 
   const server = serverQ.data
@@ -217,6 +227,7 @@ export default function NodeDetail() {
             <span>last seen {relTime(node.last_seen)}</span>
           </p>
         </div>
+        <NodeLifecycleActions node={node} />
       </div>
 
       <div className="server-stat-grid">
@@ -229,6 +240,13 @@ export default function NodeDetail() {
       <Tabs<Tab> value={activeTab} onChange={setTab} tabs={activeTabs} />
 
       {activeTab === 'overview' && <EdgeOverviewPanel node={node} edge={edgeQ.data} policy={policyQ.data} loading={edgeQ.isLoading} />}
+      {activeTab === 'configuration' && (
+        <ServerConfigurationPanel
+          server={server}
+          loading={serverQ.isLoading}
+          error={serverQ.error}
+        />
+      )}
       {node.role === 'server' && routeTabs.includes(activeTab) && !edgeActive && (
         <EdgeEnablePanel node={node} edge={edgeQ.data} loading={edgeQ.isLoading} />
       )}
@@ -275,9 +293,19 @@ export default function NodeDetail() {
       )}
       {activeTab === 'forwards' && <ForwardsTable rows={forwardsQ.data ?? []} />}
       {activeTab === 'peers' && <WgPeerTable peers={peersQ.data ?? []} />}
-      {activeTab === 'lan' && <ClientPanel title="LAN" node={node} client={client} />}
-      {activeTab === 'egress' && <ClientPanel title="Egress" node={node} client={client} />}
-      {activeTab === 'attachment' && <ClientPanel title="Attachment" node={node} client={client} />}
+      {activeTab === 'lan' && (
+        <GatewayLanPanel mode="lan" client={client} loading={clientQ.isLoading} error={clientQ.error} />
+      )}
+      {activeTab === 'egress' && (
+        <GatewayLanPanel mode="egress" client={client} loading={clientQ.isLoading} error={clientQ.error} />
+      )}
+      {activeTab === 'attachment' && (
+        <ClientConfigurationPanel
+          client={client}
+          loading={clientQ.isLoading}
+          error={clientQ.error}
+        />
+      )}
       {activeTab === 'activity' && <HealEventList events={healQ.data ?? []} loading={healQ.isLoading} />}
       {activeTab === 'audit' && <AuditTable rows={auditQ.data ?? []} loading={auditQ.isLoading} />}
       {server && activeTab === 'overview' && (
@@ -1675,19 +1703,388 @@ function SitesTable({
   )
 }
 
-function ClientPanel({ title, node, client }: { title: string; node: Node; client?: import('../lib/types').TunnelClientSummary }) {
+function ClientConfigurationPanel({
+  client,
+  loading = false,
+  error,
+}: {
+  client?: TunnelClientSummary
+  loading?: boolean
+  error?: Error | null
+}) {
+  if (error) {
+    return <div className="card"><div className="card-body" style={{ color: 'var(--err)' }}>Could not load client configuration: {error.message}</div></div>
+  }
+  if (!client) {
+    return <div className="card"><div className="card-body">{loading ? 'Loading client configuration...' : 'Client configuration is not available.'}</div></div>
+  }
+  return (
+    <ClientConfigurationEditor
+      key={`${client.id}:${client.is_gateway}:${client.vm_network}:${client.lan_ip}`}
+      client={client}
+    />
+  )
+}
+
+function ClientConfigurationEditor({ client }: { client: TunnelClientSummary }) {
+  const qc = useQueryClient()
+  const push = useToast()
+  const { canMutate } = useRole()
+  const servers = useQuery({ queryKey: ['tunnel-servers'], queryFn: tsApi.list }).data ?? []
+  const agents = useQuery({ queryKey: ['agents'], queryFn: agentsApi.list }).data ?? []
+  const [form, setForm] = useState({
+    is_gateway: client.is_gateway,
+    vm_network: client.vm_network || '',
+    lan_ip: client.lan_ip || '',
+  })
+  const [attachServerId, setAttachServerId] = useState('')
+  const [attachTunnelIp, setAttachTunnelIp] = useState('')
+
+  const refreshClient = () => {
+    qc.invalidateQueries({ queryKey: ['nodes'] })
+    qc.invalidateQueries({ queryKey: ['tunnel-clients'] })
+    qc.invalidateQueries({ queryKey: ['tunnel-client-summary', client.id] })
+    qc.invalidateQueries({ queryKey: ['tunnel-client-attachments'] })
+  }
+
+  const update = useMutation({
+    mutationFn: () =>
+      tcApi.update(client.id, {
+        is_gateway: form.is_gateway,
+        vm_network: form.is_gateway ? form.vm_network.trim() || null : null,
+        lan_ip: form.is_gateway ? form.lan_ip.trim() || null : null,
+      }),
+    onSuccess: () => {
+      refreshClient()
+      push('client configuration saved', 'ok', 'tc://')
+    },
+    onError: (e: Error) => push(e.message, 'err', 'tc://'),
+  })
+
+  const attach = useMutation({
+    mutationFn: () =>
+      attachApi.create({
+        tunnel_client_id: client.id,
+        tunnel_server_id: attachServerId,
+        tunnel_ip: attachTunnelIp || undefined,
+      }),
+    onSuccess: () => {
+      refreshClient()
+      setAttachServerId('')
+      setAttachTunnelIp('')
+      push('tunnel server attached', 'ok', 'tca://')
+    },
+    onError: (e: Error) => push(e.message, 'err', 'tca://'),
+  })
+
+  function agentName(agentId?: string | null) {
+    if (!agentId) return 'unknown server'
+    return agents.find((agent) => agent.id === agentId)?.name || agentId.slice(0, 8)
+  }
+
+  function serverName(serverId: string) {
+    return agentName(servers.find((server) => server.id === serverId)?.agent_id)
+  }
+
+  const attachedServerIds = new Set(client.attachments.map((attachment) => attachment.tunnel_server_id))
+  const availableServers = servers.filter((server) => !attachedServerIds.has(server.id))
+  const mutationPending = update.isPending || attach.isPending
+  const gatewayFieldsMissing = form.is_gateway && (!form.vm_network.trim() || !form.lan_ip.trim())
+
+  return (
+    <div className="col" style={{ gap: 14 }}>
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="title">Gateway configuration</div>
+            <div className="scheme">client role and LAN routing</div>
+          </div>
+          {canMutate && (
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() => update.mutate()}
+              disabled={mutationPending || gatewayFieldsMissing}
+              title={gatewayFieldsMissing ? 'Gateway mode requires a LAN network and LAN IP.' : ''}
+            >
+              {update.isPending ? 'saving...' : 'Save settings'}
+            </Button>
+          )}
+        </div>
+        <div className="card-body">
+          <div className="gridcols-2">
+            <Field
+              label="Gateway"
+              hint="A gateway routes traffic between its LAN, tunnel servers, and VPN users."
+            >
+              {canMutate ? (
+                <div className="row" style={{ gap: 8 }}>
+                  <Toggle
+                    on={form.is_gateway}
+                    onChange={(is_gateway) => setForm((current) => ({ ...current, is_gateway }))}
+                  />
+                  <span style={{ fontSize: 12, color: 'var(--fg-2)' }}>
+                    {form.is_gateway ? 'enabled' : 'disabled'}
+                  </span>
+                </div>
+              ) : (
+                <Badge tone={form.is_gateway ? 'info' : 'neutral'}>
+                  {form.is_gateway ? 'enabled' : 'disabled'}
+                </Badge>
+              )}
+            </Field>
+            <div />
+            {form.is_gateway && (
+              <>
+                <Field label="LAN network" hint="The subnet reachable behind this gateway.">
+                  <Input
+                    mono
+                    placeholder="192.168.1.0/24"
+                    value={form.vm_network}
+                    disabled={!canMutate}
+                    onChange={(e) => setForm((current) => ({ ...current, vm_network: e.target.value }))}
+                  />
+                </Field>
+                <Field label="LAN IP" hint="The gateway address on that LAN.">
+                  <Input
+                    mono
+                    placeholder="192.168.1.10"
+                    value={form.lan_ip}
+                    disabled={!canMutate}
+                    onChange={(e) => setForm((current) => ({ ...current, lan_ip: e.target.value }))}
+                  />
+                </Field>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-head">
+          <div>
+            <div className="title">Tunnel attachments</div>
+            <div className="scheme">{client.attachments.length} connected server{client.attachments.length === 1 ? '' : 's'}</div>
+          </div>
+        </div>
+        <div className="card-body">
+          <div className="col" style={{ gap: 8 }}>
+            {client.attachments.map((attachment) => (
+              <div
+                key={attachment.id}
+                className="row"
+                style={{
+                  justifyContent: 'space-between',
+                  gap: 10,
+                  flexWrap: 'wrap',
+                  padding: '8px 10px',
+                  background: 'var(--bg-2)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--r-2)',
+                }}
+              >
+                <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                  <Badge tone="peer">{attachment.wg_interface}</Badge>
+                  <strong>{serverName(attachment.tunnel_server_id)}</strong>
+                  <span className="mono">{attachment.tunnel_ip}</span>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+                    fwmark 0x{attachment.fwmark.toString(16)} · table {attachment.route_table_id}
+                  </span>
+                </div>
+                {canMutate && (
+                  <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+                    Detach requires durable cleanup support.
+                  </span>
+                )}
+              </div>
+            ))}
+            {client.attachments.length === 0 && (
+              <div style={{ fontSize: 12, color: 'var(--fg-3)' }}>No tunnel servers are attached.</div>
+            )}
+          </div>
+
+          {canMutate && (
+            <div className="gridcols-2" style={{ marginTop: 14 }}>
+              <Field label="Tunnel server">
+                <Select value={attachServerId} onChange={(e) => setAttachServerId(e.target.value)}>
+                  <option value="">Select a server...</option>
+                  {availableServers.map((server) => (
+                    <option key={server.id} value={server.id}>
+                      {agentName(server.agent_id)} ({server.primary_ip || server.tunnel_network})
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="Tunnel IP" hint="Leave blank to allocate the next available address.">
+                <div className="row" style={{ gap: 8 }}>
+                  <Input
+                    mono
+                    placeholder="auto"
+                    value={attachTunnelIp}
+                    onChange={(e) => setAttachTunnelIp(e.target.value)}
+                  />
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={!attachServerId || mutationPending}
+                    onClick={() => attach.mutate()}
+                  >
+                    {attach.isPending ? 'attaching...' : 'Attach'}
+                  </Button>
+                </div>
+              </Field>
+            </div>
+          )}
+          {canMutate && availableServers.length === 0 && servers.length > 0 && (
+            <div style={{ marginTop: 10, fontSize: 12, color: 'var(--fg-3)' }}>
+              All tunnel servers are already attached.
+            </div>
+          )}
+        </div>
+      </div>
+
+    </div>
+  )
+}
+
+function GatewayLanPanel({
+  mode,
+  client,
+  loading = false,
+  error,
+}: {
+  mode: 'lan' | 'egress'
+  client?: TunnelClientSummary
+  loading?: boolean
+  error?: Error | null
+}) {
+  const qc = useQueryClient()
+  const push = useToast()
+  const { canMutate } = useRole()
+  const lanQ = useQuery({
+    queryKey: ['lan-clients', client?.id],
+    queryFn: () => lanApi.list(client!.id),
+    enabled: !!client,
+  })
+  const servers = useQuery({ queryKey: ['tunnel-servers'], queryFn: tsApi.list }).data ?? []
+  const agents = useQuery({ queryKey: ['agents'], queryFn: agentsApi.list }).data ?? []
+  const lanClients = lanQ.data ?? []
+
+  const setEgress = useMutation({
+    mutationFn: ({ lanClient, value }: { lanClient: LanClient; value: string }) => {
+      if (!client) throw new Error('Gateway configuration is not available.')
+      if (!value) return lanApi.setEgress(client.id, lanClient.id, null, null)
+      const [attachmentId, serverIpId] = value.split('|')
+      return lanApi.setEgress(client.id, lanClient.id, attachmentId || null, serverIpId || null)
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['lan-clients'] })
+      qc.invalidateQueries({ queryKey: ['port-forwards'] })
+      push('egress updated', 'ok', 'lan://')
+    },
+    onError: (error: Error) => push(error.message, 'err', 'lan://'),
+  })
+  function serverName(agentId?: string | null): string {
+    if (!agentId) return 'server'
+    return agents.find((agent) => agent.id === agentId)?.name || agentId.slice(0, 8)
+  }
+
+  function egressOptions(): { value: string; label: string }[] {
+    if (!client) return []
+    return client.attachments.flatMap((attachment) => {
+      const server = servers.find((candidate) => candidate.id === attachment.tunnel_server_id)
+      const name = serverName(server?.agent_id)
+      if (!server?.ips.length) {
+        return [{
+          value: `${attachment.id}|`,
+          label: `${server?.primary_ip || server?.tunnel_network || 'unknown endpoint'} (${attachment.wg_interface}, ${name})`,
+        }]
+      }
+      return server.ips.map((ip) => ({
+        value: `${attachment.id}|${ip.id}`,
+        label: `${ip.address}${ip.is_primary ? ' (primary)' : ''} via ${name}`,
+      }))
+    })
+  }
+
+  function egressValue(lanClient: LanClient): string {
+    if (!lanClient.egress_attachment_id) return ''
+    return `${lanClient.egress_attachment_id}|${lanClient.egress_tunnel_server_ip_id || ''}`
+  }
+
+  function egressLabel(lanClient: LanClient): string {
+    const value = egressValue(lanClient)
+    return egressOptions().find((option) => option.value === value)?.label || 'home ISP (default)'
+  }
+
+  if (error) {
+    return <div className="card"><div className="card-body" style={{ color: 'var(--err)' }}>Could not load gateway configuration: {error.message}</div></div>
+  }
+  if (!client) {
+    return <div className="card"><div className="card-body">{loading ? 'Loading gateway clients...' : 'Gateway configuration is not available.'}</div></div>
+  }
   return (
     <div className="card">
-      <div className="card-head"><div className="title">{title}</div></div>
-      <div className="card-body" style={{ padding: 0 }}>
-        <KV pairs={[
-          ['client id', node.tunnel_client_id || '—', true],
-          ['lan ip', client?.lan_ip || '—', true],
-          ['vm network', client?.vm_network || '—', true],
-          ['attachments', String(client?.attachments.length ?? 0), true],
-          ['rx', formatBytes(client?.total_rx_bytes ?? 0), true],
-          ['tx', formatBytes(client?.total_tx_bytes ?? 0), true],
-        ]} />
+      <div className="card-head">
+        <div>
+          <div className="title">{mode === 'lan' ? 'LAN clients' : 'Egress routing'}</div>
+          <div className="scheme">
+            {lanClients.length} detected
+            {mode === 'egress' ? `, ${lanClients.filter((item) => item.egress_attachment_id).length} pinned` : ''}
+          </div>
+        </div>
+      </div>
+      <div className="card-body">
+        {lanQ.isLoading && <div style={{ color: 'var(--fg-3)', fontSize: 12 }}>Loading LAN clients...</div>}
+        {lanQ.isError && (
+          <div style={{ color: 'var(--err)', fontSize: 12 }}>
+            Could not load LAN clients: {lanQ.error.message}
+          </div>
+        )}
+        {!lanQ.isLoading && lanClients.length === 0 && (
+          <div style={{ color: 'var(--fg-3)', fontSize: 12 }}>
+            No LAN hosts have forwarded traffic through this gateway yet.
+          </div>
+        )}
+        <div className="col" style={{ gap: 8 }}>
+          {lanClients.map((lanClient) => (
+            <div
+              key={lanClient.id}
+              className="row"
+              style={{
+                justifyContent: 'space-between',
+                gap: 12,
+                flexWrap: 'wrap',
+                padding: '10px 12px',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--r-2)',
+                background: 'var(--bg-2)',
+              }}
+            >
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap', minWidth: 0 }}>
+                <strong>{lanClient.hostname || 'unknown host'}</strong>
+                <span className="mono">{lanClient.lan_ip}</span>
+                <span className="mono" style={{ color: 'var(--fg-3)', fontSize: 11 }}>{lanClient.mac || 'no MAC'}</span>
+                <span style={{ color: 'var(--fg-3)', fontSize: 11 }}>seen {relTime(lanClient.last_seen)}</span>
+              </div>
+              {mode === 'egress' && (canMutate ? (
+                <Select
+                  value={egressValue(lanClient)}
+                  disabled={setEgress.isPending}
+                  onChange={(event) => setEgress.mutate({ lanClient, value: event.target.value })}
+                  style={{ minWidth: 260, maxWidth: '100%' }}
+                >
+                  <option value="">home ISP (default)</option>
+                  {egressOptions().map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </Select>
+              ) : (
+                <span style={{ color: 'var(--fg-2)', fontSize: 12 }}>{egressLabel(lanClient)}</span>
+              ))}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   )

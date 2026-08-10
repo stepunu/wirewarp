@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link, useParams } from 'react-router-dom'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   agents as agentsApi,
   audit as auditApi,
@@ -16,8 +16,6 @@ type Tab = 'overview' | 'config' | 'audit' | 'heal'
 
 export default function AgentDetail() {
   const { id } = useParams<{ id: string }>()
-  const navigate = useNavigate()
-  const qc = useQueryClient()
   const push = useToast()
   const [tab, setTab] = useState<Tab>('overview')
   const [jwtModal, setJwtModal] = useState<string | null>(null)
@@ -61,14 +59,6 @@ export default function AgentDetail() {
     return Date.now() - t < 24 * 3600 * 1000
   })
 
-  const deleteAgent = useMutation({
-    mutationFn: () => agentsApi.del(id!),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['agents'] })
-      push('agent removed', 'ok', 'agent://')
-      navigate('/agents')
-    },
-  })
   const issueJwt = useMutation({
     mutationFn: () => agentsApi.issueJwt(id!),
     onSuccess: (data) => setJwtModal(data.jwt),
@@ -120,16 +110,6 @@ export default function AgentDetail() {
             title={a.status !== 'connected' ? 'agent must be connected' : ''}
           >
             {updateAgent.isPending ? 'updating…' : 'update agent'}
-          </Button>
-          <Button
-            size="sm"
-            variant="danger"
-            leading={<Ic.trash />}
-            onClick={() => {
-              if (confirm(`Delete agent ${a.name}?`)) deleteAgent.mutate()
-            }}
-          >
-            remove
           </Button>
         </div>
       </div>

@@ -437,16 +437,6 @@ function EditServerDialog({ server, onClose }: { server: TunnelServer; onClose: 
     onError: (e: Error) => push(e.message, 'err', 'ts://'),
   })
 
-  const del = useMutation({
-    mutationFn: () => tsApi.del(server.id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['tunnel-servers'] })
-      push('server deleted', 'err', 'ts://')
-      onClose()
-    },
-    onError: (e: Error) => push(e.message, 'err', 'ts://'),
-  })
-
   return (
     <>
       <Dialog
@@ -456,15 +446,7 @@ function EditServerDialog({ server, onClose }: { server: TunnelServer; onClose: 
         width={620}
         footer={
           <>
-            <Button
-              variant="danger"
-              leading={<Ic.trash />}
-              onClick={() => {
-                if (confirm('Delete this tunnel server?')) del.mutate()
-              }}
-            >
-              delete
-            </Button>
+            <span className="left">Configured servers require an explicit host teardown before removal.</span>
             <div className="right">
               <Button variant="ghost" onClick={onClose}>Cancel</Button>
               <Button variant="primary" onClick={() => update.mutate()} disabled={update.isPending}>

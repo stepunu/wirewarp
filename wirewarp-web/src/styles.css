@@ -1227,7 +1227,7 @@ option, optgroup {
 
   /* ----- Mobile shell ----- */
   .app-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: var(--topbar-h) 1fr;
     grid-template-areas: "tb" "main";
   }
@@ -1320,7 +1320,7 @@ option, optgroup {
   }
 
   /* TunnelServers stat row */
-  .server-stat-grid { grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px; }
+  .server-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 12px; }
 
   /* Dense pages — stack to single column */
   .dash-main-grid,

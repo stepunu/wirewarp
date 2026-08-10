@@ -9,9 +9,10 @@ type Opts = {
 
 const GO_MAP: Record<string, string> = {
   d: '/',
-  a: '/agents',
-  s: '/tunnel-servers',
-  c: '/tunnel-clients',
+  n: '/nodes',
+  a: '/nodes',
+  s: '/nodes',
+  c: '/nodes',
   l: '/lan-clients',
   p: '/port-forwards',
   u: '/users',

@@ -78,17 +78,9 @@ export function HelpOverlay({ onClose }: { onClose: () => void }) {
               </dt>
               <dd>Dashboard</dd>
               <dt>
-                <K>g</K> <K>a</K>
+                <K>g</K> <K>n</K>
               </dt>
-              <dd>Agents</dd>
-              <dt>
-                <K>g</K> <K>s</K>
-              </dt>
-              <dd>Tunnel servers</dd>
-              <dt>
-                <K>g</K> <K>c</K>
-              </dt>
-              <dd>Tunnel clients</dd>
+              <dd>Nodes</dd>
               <dt>
                 <K>g</K> <K>p</K>
               </dt>

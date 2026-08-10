@@ -88,7 +88,7 @@ export function NewAgentTokenDialog({ onClose }: { onClose: () => void }) {
                 fontSize: 12,
               }}
             >
-              After the agent connects, open Tunnel Clients to assign it to a server and set gateway flags.
+              After the agent connects, open its Configuration tab in Nodes. Attach a server there and enable Gateway when this client routes a LAN.
             </div>
           )}
         </>
@@ -96,7 +96,7 @@ export function NewAgentTokenDialog({ onClose }: { onClose: () => void }) {
         <div className="col" style={{ gap: 14 }}>
           <Field
             label="Agent type"
-            hint="Servers run on VPSes with public IPs. Clients dial out and become reachable via a server."
+            hint="Servers listen on public VPSes. Clients dial out. Register gateways as clients, then enable Gateway in the node configuration."
           >
             <div className="row">
               <Button variant={type === 'server' ? 'primary' : 'default'} onClick={() => setType('server')}>

@@ -229,8 +229,8 @@ function EditClientDialog({ client, onClose }: { client: TunnelClient; onClose: 
   const update = useMutation({
     mutationFn: () =>
       tcApi.update(client.id, {
-        vm_network: form.vm_network,
-        lan_ip: form.lan_ip,
+        vm_network: form.is_gateway ? form.vm_network.trim() || null : null,
+        lan_ip: form.is_gateway ? form.lan_ip.trim() || null : null,
         is_gateway: form.is_gateway,
       }),
     onSuccess: () => {
@@ -240,16 +240,6 @@ function EditClientDialog({ client, onClose }: { client: TunnelClient; onClose: 
     },
     onError: (e: Error) => push(e.message, 'err', 'tc://'),
   })
-  const del = useMutation({
-    mutationFn: () => tcApi.del(client.id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['tunnel-clients'] })
-      push('client deleted', 'err', 'tc://')
-      onClose()
-    },
-    onError: (e: Error) => push(e.message, 'err', 'tc://'),
-  })
-
   const attach = useMutation({
     mutationFn: () =>
       tcaApi.create({
@@ -263,16 +253,6 @@ function EditClientDialog({ client, onClose }: { client: TunnelClient; onClose: 
       setAttachServerId('')
       setAttachTunnelIp('')
       push('attached', 'ok', 'tca://')
-    },
-    onError: (e: Error) => push(e.message, 'err', 'tca://'),
-  })
-
-  const detach = useMutation({
-    mutationFn: (att: TunnelClientAttachment) => tcaApi.del(att.id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['tunnel-clients'] })
-      qc.invalidateQueries({ queryKey: ['tunnel-client-attachments'] })
-      push('detached', 'ok', 'tca://')
     },
     onError: (e: Error) => push(e.message, 'err', 'tca://'),
   })
@@ -293,15 +273,7 @@ function EditClientDialog({ client, onClose }: { client: TunnelClient; onClose: 
       width={680}
       footer={
         <>
-          <Button
-            variant="danger"
-            leading={<Ic.trash />}
-            onClick={() => {
-              if (confirm('Delete this tunnel client?')) del.mutate()
-            }}
-          >
-            delete
-          </Button>
+          <span className="left">Configured clients require an explicit host teardown before removal.</span>
           <div className="right">
             <Button variant="ghost" onClick={onClose}>Cancel</Button>
             <Button variant="primary" onClick={() => update.mutate()} disabled={update.isPending}>
@@ -373,16 +345,9 @@ function EditClientDialog({ client, onClose }: { client: TunnelClient; onClose: 
                   fwmark 0x{att.fwmark.toString(16)} · table {att.route_table_id}
                 </span>
               </div>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  if (confirm(`Detach ${att.wg_interface} (${att.tunnel_ip})?`)) detach.mutate(att)
-                }}
-                disabled={detach.isPending}
-              >
-                detach
-              </Button>
+              <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>
+                Detach requires durable cleanup support.
+              </span>
             </div>
           ))}
           {client.attachments.length === 0 && (
@@ -464,14 +429,6 @@ function LanClientsSection({
     onError: (e: Error) => push(e.message, 'err', 'lan://'),
   })
 
-  const del = useMutation({
-    mutationFn: (lc: LanClient) => lanApi.del(client.id, lc.id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['lan-clients', client.id] })
-    },
-    onError: (e: Error) => push(e.message, 'err', 'lan://'),
-  })
-
   function attachmentOptions(att: TunnelClientAttachment): { value: string; label: string }[] {
     const s = servers.find((x) => x.id === att.tunnel_server_id)
     const name = s ? agents.find((a) => a.id === s.agent_id)?.name || s.id.slice(0, 8) : 'server'
@@ -542,16 +499,6 @@ function LanClientsSection({
                     </span>
                     {pinned && <Badge tone="peer">pinned</Badge>}
                   </div>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    leading={<Ic.trash />}
-                    onClick={() => {
-                      if (confirm(`Drop ${lc.lan_ip} from the discovered list?`)) del.mutate(lc)
-                    }}
-                    disabled={del.isPending}
-                    title="Drop from list (also clears egress pin)"
-                  />
                 </div>
                 <div className="row" style={{ gap: 8 }}>
                   <span style={{ fontSize: 11, color: 'var(--fg-3)' }}>Egress</span>

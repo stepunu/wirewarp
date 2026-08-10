@@ -173,12 +173,6 @@ export default function LanClients() {
     onError: (e: Error) => push(e.message, 'err', 'lan://'),
   })
 
-  const del = useMutation({
-    mutationFn: (lc: LanClient) => lanApi.del(lc.tunnel_client_id, lc.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['lan-clients'] }),
-    onError: (e: Error) => push(e.message, 'err', 'lan://'),
-  })
-
   // "Fix" a single asymmetric forward by aligning its (attachment_id,
   // tunnel_server_ip_id) with the host's egress pin. Auto-migration on
   // egress change should normally already cover this — the button is a
@@ -340,16 +334,6 @@ export default function LanClients() {
                     leading={<Ic.edit />}
                     onClick={() => setMetaEditing(lc)}
                     title="Edit hostname / MAC"
-                  />
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    leading={<Ic.trash />}
-                    onClick={() => {
-                      if (confirm(`Drop ${lc.lan_ip} from the discovered list?`)) del.mutate(lc)
-                    }}
-                    disabled={del.isPending}
-                    title="Drop from list (also clears egress pin)"
                   />
                 </div>
               </div>

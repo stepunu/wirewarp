@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
   agents as agentsApi,
+  nodes as nodesApi,
   portForwards as pfApi,
   tunnelServers as tsApi,
   tunnelClients as tcApi,
@@ -18,6 +19,7 @@ export default function Dashboard() {
   // we don't spam 403s in the console. The render branches below.
   const enabled = !isVpnUser
   const agents = useQuery({ queryKey: ['agents'], queryFn: agentsApi.list, enabled }).data ?? []
+  const nodes = useQuery({ queryKey: ['nodes'], queryFn: nodesApi.list, enabled }).data ?? []
   const pf = useQuery({ queryKey: ['port-forwards'], queryFn: () => pfApi.list(), enabled }).data ?? []
   const ts = useQuery({ queryKey: ['tunnel-servers'], queryFn: tsApi.list, enabled }).data ?? []
   const tc = useQuery({ queryKey: ['tunnel-clients'], queryFn: tcApi.list, enabled }).data ?? []
@@ -117,8 +119,8 @@ export default function Dashboard() {
         </div>
         <div className="card">
           <div className="card-head">
-            <div className="title">Recent agents</div>
-            <Link to="/agents" style={{ textDecoration: 'none' }}>
+            <div className="title">Recent nodes</div>
+            <Link to="/nodes" style={{ textDecoration: 'none' }}>
               <Button variant="ghost" size="sm">view all <Ic.chevR /></Button>
             </Link>
           </div>
@@ -127,30 +129,30 @@ export default function Dashboard() {
               <thead>
                 <tr>
                   <th>Name</th>
-                  <th>Type</th>
+                  <th>Role</th>
                   <th>Status</th>
                   <th>Last seen</th>
                 </tr>
               </thead>
               <tbody>
-                {agents.slice(0, 8).map((a) => (
-                  <tr key={a.id}>
+                {nodes.slice(0, 8).map((node) => (
+                  <tr key={node.agent_id}>
                     <td>
-                      <Link to={`/agents/${a.id}`} className="tbl-link mono">
-                        {a.name}
+                      <Link to={`/nodes/${node.agent_id}`} className="tbl-link mono">
+                        {node.name}
                       </Link>
                     </td>
                     <td>
-                      <Badge tone={a.type === 'server' ? 'info' : 'neutral'}>{a.type}</Badge>
+                      <Badge tone={node.role === 'server' ? 'info' : node.role === 'gateway' ? 'peer' : 'neutral'}>{node.role}</Badge>
                     </td>
-                    <td><StatusDot status={a.status} /></td>
-                    <td className="mono" style={{ color: 'var(--fg-2)' }}>{relTime(a.last_seen)}</td>
+                    <td><StatusDot status={node.status} /></td>
+                    <td className="mono" style={{ color: 'var(--fg-2)' }}>{relTime(node.last_seen)}</td>
                   </tr>
                 ))}
-                {agents.length === 0 && (
+                {nodes.length === 0 && (
                   <tr>
                     <td colSpan={4} style={{ padding: 24, textAlign: 'center', color: 'var(--fg-3)' }}>
-                      No agents yet. <Link to="/agents" className="tbl-link">Issue a token →</Link>
+                      No nodes yet. <Link to="/nodes?new=1" className="tbl-link">Issue a token →</Link>
                     </td>
                   </tr>
                 )}

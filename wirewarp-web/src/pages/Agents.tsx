@@ -81,15 +81,6 @@ export default function Agents() {
     return () => window.removeEventListener('keydown', onKey)
   }, [filtered, focusIdx, navigate])
 
-  const delAgent = useMutation({
-    mutationFn: agentsApi.del,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['agents'] })
-      push('agent removed', 'ok', 'agent://')
-    },
-    onError: (e) => push(e instanceof Error ? e.message : 'delete failed', 'err', 'agent://'),
-  })
-
   // Bulk update: dispatch agent_update to each selected agent. Each call is
   // independent (Promise.allSettled) so one offline agent (503) doesn't abort
   // the rest — we summarise how many were reached vs skipped.
@@ -252,7 +243,6 @@ export default function Agents() {
               <th>Version</th>
               <th>Last seen</th>
               <th>Status</th>
-              <th style={{ width: 100 }}></th>
             </tr>
           </thead>
           <tbody>
@@ -294,20 +284,6 @@ export default function Agents() {
                   {relTime(a.last_seen)}
                 </td>
                 <td data-label="status"><StatusDot status={a.status} /></td>
-                <td data-label="" onClick={(e) => e.stopPropagation()}>
-                  <div className="row-actions">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      style={{ color: 'var(--err)' }}
-                      onClick={() => {
-                        if (confirm(`Delete agent ${a.name}?`)) delAgent.mutate(a.id)
-                      }}
-                    >
-                      remove
-                    </Button>
-                  </div>
-                </td>
               </tr>
             ))}
           </tbody>
