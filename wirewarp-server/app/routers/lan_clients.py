@@ -19,6 +19,7 @@ cleared, the IP pin is also cleared (no point SNAT-pinning if traffic
 isn't taking the tunnel anymore).
 """
 
+import asyncio
 import logging
 import uuid
 
@@ -49,6 +50,7 @@ from app.realtime.events import (
     emit_tunnel_server_changed,
 )
 from app.routers.port_forwards import migrate_port_forwards_to_pin
+from app.services.port_forward_ops import serialize_server_runtime_mutation
 from app.services.dns_sync import (
     DiscoveredRecord,
     provider_from_settings,
@@ -199,6 +201,17 @@ async def create_lan_client(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_role("admin", "operator")),
 ):
+    if body.egress_attachment_id is not None or body.egress_tunnel_server_ip_id is not None:
+        async with serialize_server_runtime_mutation(uuid.UUID(int=0), db):
+            return await _create_lan_client_locked(client_id, body, db)
+    return await _create_lan_client_locked(client_id, body, db)
+
+
+async def _create_lan_client_locked(
+    client_id: uuid.UUID,
+    body: GatewayLanClientCreate,
+    db: AsyncSession,
+):
     """Manually register a LAN host. Useful when the host hasn't sent any
     public-bound traffic yet so the agent's conntrack scrape hasn't
     discovered it, or when you want to pre-configure an egress pin
@@ -208,6 +221,14 @@ async def create_lan_client(
     client = await db.scalar(select(TunnelClient).where(TunnelClient.id == client_id))
     if client is None:
         raise HTTPException(status_code=404, detail="Gateway client not found")
+    if (
+        body.egress_attachment_id is not None
+        or body.egress_tunnel_server_ip_id is not None
+    ) and not client.is_gateway:
+        raise HTTPException(
+            status_code=409,
+            detail="LAN egress can only be assigned to a gateway client",
+        )
 
     attachment: TunnelClientAttachment | None = None
     new_ip_row: TunnelServerIP | None = None
@@ -242,6 +263,16 @@ async def create_lan_client(
             detail="egress_tunnel_server_ip_id requires egress_attachment_id to be set",
         )
 
+    migration = None
+    if attachment is not None:
+        migration = await migrate_port_forwards_to_pin(
+            body.lan_ip,
+            attachment.id,
+            body.egress_tunnel_server_ip_id,
+            db,
+            runtime_lock_held=True,
+        )
+
     lan_client = GatewayLanClient(
         tunnel_client_id=client_id,
         lan_ip=body.lan_ip,
@@ -255,11 +286,25 @@ async def create_lan_client(
     try:
         await db.commit()
     except IntegrityError:
-        await db.rollback()
+        if migration is not None:
+            await asyncio.shield(migration.abort(db))
+        else:
+            await db.rollback()
         raise HTTPException(
             status_code=409,
             detail=f"LAN client {body.lan_ip} already registered on this gateway",
         )
+    except BaseException:
+        if migration is not None:
+            await asyncio.shield(migration.abort(db))
+        else:
+            await db.rollback()
+        raise
+    if migration is not None:
+        await asyncio.shield(migration.complete(db))
+        if migration.count:
+            emit_port_forward_changed()
+            emit_tunnel_server_changed()
     await db.refresh(lan_client)
 
     if attachment is not None:
@@ -270,15 +315,6 @@ async def create_lan_client(
             )
             if server is not None:
                 await dispatch_set_lan_snat(server, lan_client.lan_ip, new_ip_row.address, db)
-        migrated = await migrate_port_forwards_to_pin(
-            lan_client.lan_ip,
-            attachment.id,
-            body.egress_tunnel_server_ip_id,
-            db,
-        )
-        if migrated:
-            emit_port_forward_changed()
-            emit_tunnel_server_changed()
         new_ip = await _resolve_new_ip_address(attachment, body.egress_tunnel_server_ip_id, db)
         if new_ip:
             await _run_dns_sync(lan_client, new_ip, db)
@@ -296,6 +332,22 @@ async def update_lan_client(
     body: GatewayLanClientUpdate,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_role("admin", "operator")),
+):
+    fields_set = body.model_fields_set
+    if (
+        "egress_attachment_id" in fields_set
+        or "egress_tunnel_server_ip_id" in fields_set
+    ):
+        async with serialize_server_runtime_mutation(uuid.UUID(int=0), db):
+            return await _update_lan_client_locked(client_id, lan_client_id, body, db)
+    return await _update_lan_client_locked(client_id, lan_client_id, body, db)
+
+
+async def _update_lan_client_locked(
+    client_id: uuid.UUID,
+    lan_client_id: uuid.UUID,
+    body: GatewayLanClientUpdate,
+    db: AsyncSession,
 ):
     lan_client = await db.scalar(
         select(GatewayLanClient).where(
@@ -364,6 +416,11 @@ async def update_lan_client(
         "egress_attachment_id" in fields_set
         or "egress_tunnel_server_ip_id" in fields_set
     )
+    if egress_touched and not client.is_gateway:
+        raise HTTPException(
+            status_code=409,
+            detail="LAN egress can only be changed for a gateway client",
+        )
 
     # The agent-online gate only matters when we're going to dispatch
     # routing/SNAT commands. Pure metadata edits (hostname, MAC, DNS
@@ -375,6 +432,15 @@ async def update_lan_client(
                 f"Gateway agent (id={client.agent_id}) not connected — "
                 "bring it back online and retry."
             ),
+        )
+    migration = None
+    if egress_touched and attachment is not None:
+        migration = await migrate_port_forwards_to_pin(
+            lan_client.lan_ip,
+            attachment.id,
+            body.egress_tunnel_server_ip_id,
+            db,
+            runtime_lock_held=True,
         )
     if egress_touched:
         lan_client.egress_attachment_id = body.egress_attachment_id
@@ -396,7 +462,19 @@ async def update_lan_client(
         lan_client.hostname = body.hostname or None
     if "mac" in fields_set:
         lan_client.mac = body.mac or None
-    await db.commit()
+    try:
+        await db.commit()
+    except BaseException:
+        if migration is not None:
+            await asyncio.shield(migration.abort(db))
+        else:
+            await db.rollback()
+        raise
+    if migration is not None:
+        await asyncio.shield(migration.complete(db))
+        if migration.count:
+            emit_port_forward_changed()
+            emit_tunnel_server_changed()
     await db.refresh(lan_client)
 
     if egress_touched:
@@ -425,15 +503,6 @@ async def update_lan_client(
         # outbound pin. Skipped when egress is being cleared — operator may want
         # the forwards to keep working independently of the egress pin.
         if attachment is not None:
-            migrated = await migrate_port_forwards_to_pin(
-                lan_client.lan_ip,
-                attachment.id,
-                body.egress_tunnel_server_ip_id,
-                db,
-            )
-            if migrated:
-                emit_port_forward_changed()
-                emit_tunnel_server_changed()
             new_ip = await _resolve_new_ip_address(attachment, body.egress_tunnel_server_ip_id, db)
             if new_ip:
                 await _run_dns_sync(lan_client, new_ip, db)
@@ -452,10 +521,7 @@ async def delete_lan_client(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_role("admin", "operator")),
 ):
-    """Drop a LAN client from the discovered list. If a pin was active, also
-    clear it on the agent so the ip rule is removed. If a SNAT pin was
-    active, clear it on the matching VPS so the rule isn't orphaned.
-    """
+    """Reject deletion until runtime pin removal has durable delivery."""
     lan_client = await db.scalar(
         select(GatewayLanClient).where(
             GatewayLanClient.id == lan_client_id,
@@ -464,30 +530,14 @@ async def delete_lan_client(
     )
     if lan_client is None:
         raise HTTPException(status_code=404, detail="LAN client not found")
-
-    if lan_client.egress_attachment_id is not None:
-        client = await db.scalar(
-            select(TunnelClient).where(TunnelClient.id == client_id)
-        )
-        if client is not None and manager.is_connected(str(client.agent_id)):
-            await dispatch_set_lan_egress(client, lan_client.lan_ip, None, db)
-
-    if lan_client.egress_tunnel_server_ip_id is not None and lan_client.egress_attachment_id is not None:
-        att = await db.scalar(
-            select(TunnelClientAttachment).where(
-                TunnelClientAttachment.id == lan_client.egress_attachment_id
-            )
-        )
-        if att is not None:
-            server = await db.scalar(
-                select(TunnelServer).where(TunnelServer.id == att.tunnel_server_id)
-            )
-            if server is not None:
-                await dispatch_set_lan_snat(server, lan_client.lan_ip, None, db)
-
-    await db.delete(lan_client)
-    await db.commit()
-    emit_lan_client_changed()
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "LAN client deletion is blocked because egress and SNAT cleanup "
+            "cannot be delivered durably while agents are offline. Clear its "
+            "pins first and preserve the discovered row."
+        ),
+    )
 
 
 # --- DNS provider helpers ---

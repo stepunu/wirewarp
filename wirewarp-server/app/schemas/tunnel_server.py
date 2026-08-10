@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.schemas.tunnel_server_ip import TunnelServerIPRead
 
@@ -32,7 +32,12 @@ class TunnelServerSummary(TunnelServerRead):
 
 
 class TunnelServerUpdate(BaseModel):
-    wg_port: int | None = None
-    public_iface: str | None = None
+    wg_port: int | None = Field(default=None, ge=1, le=65535)
+    public_iface: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=15,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
     # tunnel_network is intentionally NOT editable here — use POST
     # /tunnel-servers/{id}/rebase, which also renumbers clients & forwards.

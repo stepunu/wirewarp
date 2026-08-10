@@ -89,7 +89,6 @@ async def agent_websocket(websocket: WebSocket):
 
     await websocket.accept()
     agent_id: str | None = None
-    is_first_connection = False  # True only on a successful 'register' (not 'auth')
 
     try:
         # First message must be either registration (token) or auth (jwt)
@@ -145,8 +144,6 @@ async def agent_websocket(websocket: WebSocket):
 
                 jwt = create_agent_token(agent_id, expires_delta=timedelta(days=3650))
                 await websocket.send_text(json.dumps({"type": "registered", "agent_id": agent_id, "jwt": jwt}))
-                is_first_connection = True
-
             elif msg_type == "auth":
                 # Reconnect: validate JWT (must carry typ=agent)
                 jwt = msg.get("jwt", "")
@@ -181,17 +178,6 @@ async def agent_websocket(websocket: WebSocket):
         emit_agent_changed()
         logger.info("Agent %s connected", agent_id)
 
-        # On first registration of a server agent, fire wg_init immediately
-        # so the operator doesn't have to manually trigger it from the dashboard.
-        if is_first_connection:
-            async with SessionLocal() as db:
-                from app.services.tunnel_server_ops import dispatch_wg_init
-                ts_row = await db.scalar(
-                    select(TunnelServer).where(TunnelServer.agent_id == agent_id)
-                )
-                if ts_row is not None:
-                    await dispatch_wg_init(ts_row, db)
-
         # Replay active port forwards + wg peers to server agents on
         # (re)connect so rules are applied even if the agent restarted or
         # missed earlier commands. Both walks pivot off attachments now —
@@ -200,6 +186,7 @@ async def agent_websocket(websocket: WebSocket):
             from app.models.tunnel_server import TunnelServer
             from app.models.tunnel_client import TunnelClient
             from app.models.tunnel_client_attachment import TunnelClientAttachment
+            from app.models.gateway_lan_client import GatewayLanClient
             from app.models.port_forward import PortForward
             result = await db.execute(
                 select(TunnelServer).where(TunnelServer.agent_id == agent_id)
@@ -208,6 +195,17 @@ async def agent_websocket(websocket: WebSocket):
             if server:
                 from app.models.tunnel_server_ip import TunnelServerIP
                 from app.services.primary_ip import get_primary_ip
+                from app.services.port_forward_ops import dispatch_raw_forward
+                from app.services.tunnel_server_ops import (
+                    dispatch_reconcile_lan_snat,
+                    dispatch_wg_init,
+                )
+
+                # Rebuild the server interface on every auth reconnect. This
+                # must precede forward and peer replay because wg_init replaces
+                # the live WireGuard configuration.
+                await dispatch_wg_init(server, db, replay_peers=False)
+                await dispatch_reconcile_lan_snat(server, db)
 
                 # All attachments peering with this server.
                 att_rows = (
@@ -241,22 +239,11 @@ async def agent_websocket(websocket: WebSocket):
                     public_ip = ip_map.get(pf.tunnel_server_ip_id) if pf.tunnel_server_ip_id else None
                     if not public_ip:
                         public_ip = primary_ip or ""
-                    params = {
-                        "protocol": pf.protocol,
-                        "public_port": pf.public_port,
-                        "destination_ip": pf.destination_ip,
-                        "destination_port": pf.destination_port,
-                        "public_ip": public_ip,
-                    }
-                    if pf.public_port_end is not None:
-                        params["public_port_end"] = pf.public_port_end
-                    if pf.destination_port_end is not None:
-                        params["destination_port_end"] = pf.destination_port_end
-                    await send_command(
-                        agent_id=agent_id,
-                        command_type="iptables_add_forward",
-                        params=params,
-                        db=db,
+                    await dispatch_raw_forward(
+                        pf,
+                        "iptables_add_forward",
+                        db,
+                        public_ip_override=public_ip,
                     )
                 logger.info(
                     "Replayed %d active port forward(s) to server agent %s",
@@ -308,7 +295,10 @@ async def agent_websocket(websocket: WebSocket):
                 select(TunnelClient).where(TunnelClient.agent_id == agent_id)
             )
             if client_row is not None:
-                from app.services.tunnel_server_ops import dispatch_wg_attach
+                from app.services.tunnel_server_ops import (
+                    dispatch_set_lan_egress,
+                    dispatch_wg_attach,
+                )
                 client_atts = (
                     await db.execute(
                         select(TunnelClientAttachment).where(
@@ -324,6 +314,33 @@ async def agent_websocket(websocket: WebSocket):
                         len(client_atts), agent_id,
                     )
 
+                attachment_map = {att.id: att for att in client_atts}
+                lan_clients = (
+                    await db.execute(
+                        select(GatewayLanClient).where(
+                            GatewayLanClient.tunnel_client_id == client_row.id
+                        )
+                    )
+                ).scalars().all()
+                for lan_client in lan_clients:
+                    attachment = (
+                        attachment_map.get(lan_client.egress_attachment_id)
+                        if client_row.is_gateway
+                        else None
+                    )
+                    await dispatch_set_lan_egress(
+                        client_row,
+                        lan_client.lan_ip,
+                        attachment,
+                        db,
+                    )
+                if lan_clients:
+                    logger.info(
+                        "Replayed %d LAN egress desired state row(s) to client agent %s",
+                        len(lan_clients),
+                        agent_id,
+                    )
+
                 # VPN endpoint replay: gateway clients may host a wg-vpn0
                 # interface for road warriors. Reissue endpoint_up + a
                 # peer_add per profile so the gateway's iptables rules and
@@ -336,11 +353,15 @@ async def agent_websocket(websocket: WebSocket):
                     load_user_endpoint_permissions,
                 )
 
-                vpn_endpoint = await db.scalar(
-                    select(VpnEndpoint).where(
-                        VpnEndpoint.tunnel_client_id == client_row.id,
-                        VpnEndpoint.enabled == True,  # noqa: E712
+                vpn_endpoint = (
+                    await db.scalar(
+                        select(VpnEndpoint).where(
+                            VpnEndpoint.tunnel_client_id == client_row.id,
+                            VpnEndpoint.enabled == True,  # noqa: E712
+                        )
                     )
+                    if client_row.is_gateway
+                    else None
                 )
                 if vpn_endpoint is not None:
                     await dispatch_vpn_endpoint_up(vpn_endpoint, db)

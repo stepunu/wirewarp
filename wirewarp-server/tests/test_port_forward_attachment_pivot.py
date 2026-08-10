@@ -4,8 +4,31 @@ right server agent.
 """
 import pytest
 
+from app.websocket.handlers import handle_command_result
+
 
 pytestmark = pytest.mark.asyncio
+
+
+def _ack_forward_removals(fake_manager, session_maker):
+    original_send = fake_manager.send
+
+    async def send_with_result(agent_id, message):
+        sent = await original_send(agent_id, message)
+        if sent and message["type"] == "iptables_remove_forward":
+            async with session_maker() as result_db:
+                await handle_command_result(
+                    agent_id,
+                    {
+                        "command_id": message["id"],
+                        "success": True,
+                        "output": "removed",
+                    },
+                    result_db,
+                )
+        return sent
+
+    fake_manager.send = send_with_result
 
 
 async def test_create_forward_with_attachment(client, db, factories, fake_manager):
@@ -201,7 +224,9 @@ async def test_list_filter_by_tunnel_server_id(client, db, factories, fake_manag
     assert rows[0]["public_port"] == 8080
 
 
-async def test_delete_forward_dispatches_remove(client, db, factories, fake_manager):
+async def test_delete_forward_dispatches_remove(
+    client, db, session_maker, factories, fake_manager
+):
     server = await factories.make_server(db)
     cli = await factories.make_client(db)
     att = await factories.make_attachment(db, client=cli, server=server)
@@ -220,6 +245,7 @@ async def test_delete_forward_dispatches_remove(client, db, factories, fake_mana
     pf_id = create.json()["id"]
 
     fake_manager.sent.clear()
+    _ack_forward_removals(fake_manager, session_maker)
     res = await client.delete(f"/api/port-forwards/{pf_id}")
     assert res.status_code == 204
     remove_msgs = [s for s in fake_manager.sent if s["message"]["type"] == "iptables_remove_forward"]

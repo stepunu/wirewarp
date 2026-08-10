@@ -9,6 +9,8 @@ from sqlalchemy import select
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.heal_event import AgentHealEvent
+from app.models.tunnel_client import TunnelClient
+from app.models.tunnel_server import TunnelServer
 from app.models.user import User
 from app.models.registration_token import RegistrationToken
 from app.schemas.agent import AgentRead, AgentJWTRead
@@ -87,6 +89,21 @@ async def delete_agent(
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    tunnel_server = await db.scalar(
+        select(TunnelServer.id).where(TunnelServer.agent_id == agent.id)
+    )
+    tunnel_client = await db.scalar(
+        select(TunnelClient.id).where(TunnelClient.agent_id == agent.id)
+    )
+    if tunnel_server is not None or tunnel_client is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Configured agents cannot be deleted because complete runtime teardown "
+                "is not available. Stop and uninstall the agent on its host. Preserve "
+                "this control-plane record until a teardown workflow is available."
+            ),
+        )
     await db.delete(agent)
     await db.commit()
     emit_agent_changed()

@@ -214,61 +214,11 @@ async def delete_attachment(
     )
     if att is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
-
-    pf_count = (
-        await db.scalar(
-            select(PortForward).where(PortForward.attachment_id == attachment_id).limit(1)
-        )
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "Tunnel client attachments cannot be deleted until runtime peer, "
+            "route, forward, and LAN egress teardown has durable delivery. "
+            "The desired state was preserved."
+        ),
     )
-    if pf_count is not None and not cascade:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Cannot detach: port forwards reference this attachment. "
-                "Delete them first or pass ?cascade=1 to remove them with the attachment."
-            ),
-        )
-
-    if cascade:
-        forwards = (
-            await db.execute(
-                select(PortForward).where(PortForward.attachment_id == attachment_id)
-            )
-        ).scalars().all()
-        for pf in forwards:
-            await db.delete(pf)
-        await db.commit()
-
-    # Clear any LAN-host egress pins that referenced this attachment, both
-    # in the DB and on the agent. The FK has ON DELETE SET NULL so the row
-    # would survive the attachment delete, but the agent's `ip rule from
-    # <lan_ip> table <route_table_id>` would point at a now-stale table —
-    # ask the agent to remove each one before we delete the attachment.
-    pinned = (
-        await db.execute(
-            select(GatewayLanClient).where(GatewayLanClient.egress_attachment_id == attachment_id)
-        )
-    ).scalars().all()
-    if pinned:
-        client = await db.scalar(
-            select(TunnelClient).where(TunnelClient.id == att.tunnel_client_id)
-        )
-        if client is not None:
-            for lc in pinned:
-                await dispatch_set_lan_egress(client, lc.lan_ip, None, db)
-
-    # Try to gracefully tear down on both ends. If agents are offline we
-    # still drop the DB row — the attachment slot will reconcile when the
-    # agents reconnect (server agent's stale peer is harmless; client
-    # agent's stale wgN gets reclaimed by the next attach since ordinal
-    # allocation picks the lowest free slot).
-    await dispatch_remove_peer_for_attachment(att, db)
-    await dispatch_wg_detach(att, db)
-
-    await db.delete(att)
-    await db.commit()
-    emit_tunnel_client_changed()
-    if cascade:
-        emit_port_forward_changed()
-    if pinned:
-        emit_lan_client_changed()

@@ -39,7 +39,12 @@ from app.services.traefik_ops import (
     dispatch_traefik_sync,
     load_letsencrypt_config,
 )
-from app.services.tunnel_server_ops import dispatch_wg_attach, dispatch_wg_init
+from app.services.tunnel_server_ops import (
+    dispatch_reconcile_lan_snat,
+    dispatch_wg_attach,
+    dispatch_wg_init,
+    reconcile_server_attachments,
+)
 from app.websocket.hub import manager
 
 logger = logging.getLogger(__name__)
@@ -316,12 +321,38 @@ async def update_tunnel_server(
     server = result.scalar_one_or_none()
     if not server:
         raise HTTPException(status_code=404, detail="Tunnel server not found")
-    for field, value in body.model_dump(exclude_none=True).items():
+    changes = {
+        field: value
+        for field, value in body.model_dump(exclude_none=True).items()
+        if getattr(server, field) != value
+    }
+    for field, value in changes.items():
         setattr(server, field, value)
+    if not changes:
+        return _to_read(server)
     await db.commit()
     await db.refresh(server, attribute_names=["ips"])
 
-    await dispatch_wg_init(server, db)
+    try:
+        await dispatch_wg_init(server, db, replay_peers=False)
+        await dispatch_reconcile_lan_snat(server, db)
+        await reconcile_server_attachments(server.id, db)
+    except Exception:
+        await db.rollback()
+        logger.exception(
+            "Immediate config reconcile failed for tunnel server %s; desired "
+            "state will replay on reconnect",
+            server_id,
+        )
+    server = (
+        await db.execute(
+            select(TunnelServer)
+            .options(selectinload(TunnelServer.ips))
+            .where(TunnelServer.id == server_id)
+        )
+    ).scalar_one_or_none()
+    if server is None:
+        raise HTTPException(status_code=404, detail="Tunnel server not found after update")
     emit_tunnel_server_changed()
 
     return _to_read(server)
@@ -337,11 +368,13 @@ async def delete_tunnel_server(
     server = result.scalar_one_or_none()
     if not server:
         raise HTTPException(status_code=404, detail="Tunnel server not found")
-    await db.delete(server)
-    await db.commit()
-    emit_tunnel_server_changed()
-    emit_tunnel_client_changed()  # cascade may have removed attachments
-    emit_port_forward_changed()
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "Tunnel server configuration cannot be deleted separately from its agent. "
+            "Runtime teardown is not available, so the desired state was preserved."
+        ),
+    )
 
 
 class RebaseRequest(BaseModel):

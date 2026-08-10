@@ -19,10 +19,34 @@ from sqlalchemy import func, select
 
 from app.models.gateway_lan_client import GatewayLanClient
 from app.models.tunnel_server_ip import TunnelServerIP
-from app.websocket.handlers import handle_heartbeat
+from app.websocket.handlers import handle_command_result, handle_heartbeat
 
 
 pytestmark = pytest.mark.asyncio
+
+
+def _ack_raw_forward_commands(fake_manager, session_maker):
+    original_send = fake_manager.send
+
+    async def send_with_result(agent_id, message):
+        sent = await original_send(agent_id, message)
+        if sent and message["type"] in {
+            "iptables_remove_forward",
+            "iptables_add_forward",
+        }:
+            async with session_maker() as result_db:
+                await handle_command_result(
+                    agent_id,
+                    {
+                        "command_id": message["id"],
+                        "success": True,
+                        "output": "applied",
+                    },
+                    result_db,
+                )
+        return sent
+
+    fake_manager.send = send_with_result
 
 
 async def _add_secondary_ip(db, server, address: str = "1.2.3.5") -> TunnelServerIP:
@@ -203,7 +227,9 @@ async def test_set_egress_clear(client, db, session_maker, factories, fake_manag
     assert sent[0]["message"]["params"]["route_table_id"] == 0
 
 
-async def test_delete_lan_client_clears_pin(client, db, session_maker, factories, fake_manager):
+async def test_delete_lan_client_with_pin_is_blocked(
+    client, db, session_maker, factories, fake_manager
+):
     cli = await factories.make_client(db)
     server = await factories.make_server(db)
     att = await factories.make_attachment(db, client=cli, server=server)
@@ -215,24 +241,23 @@ async def test_delete_lan_client_clears_pin(client, db, session_maker, factories
     db.add(lc)
     await db.commit()
     await db.refresh(lc)
-    fake_manager.online.add(str(cli.agent_id))
     await db.close()
 
     res = await client.delete(f"/api/tunnel-clients/{cli.id}/lan-clients/{lc.id}")
-    assert res.status_code == 204
+    assert res.status_code == 409
+    assert "cannot be delivered durably" in res.text
 
     async with session_maker() as fresh:
-        gone = await fresh.scalar(
+        retained = await fresh.scalar(
             select(GatewayLanClient).where(GatewayLanClient.id == lc.id)
         )
-        assert gone is None
+        assert retained is not None
+        assert retained.egress_attachment_id == att.id
 
-    sent = [m for m in fake_manager.sent if m["message"]["type"] == "set_lan_egress"]
-    assert len(sent) == 1
-    assert sent[0]["message"]["params"]["route_table_id"] == 0
+    assert not fake_manager.sent
 
 
-async def test_attachment_delete_clears_pinned_lan_clients(
+async def test_attachment_delete_is_blocked_and_preserves_pinned_lan_clients(
     client, db, session_maker, factories, fake_manager
 ):
     cli = await factories.make_client(db)
@@ -251,16 +276,12 @@ async def test_attachment_delete_clears_pinned_lan_clients(
     await db.close()
 
     res = await client.delete(f"/api/tunnel-client-attachments/{att.id}")
-    assert res.status_code == 204, res.text
-
-    # set_lan_egress dispatched with route_table_id=0 (clear)
-    set_clears = [
-        m for m in fake_manager.sent
-        if m["message"]["type"] == "set_lan_egress"
-        and m["message"]["params"]["route_table_id"] == 0
-    ]
-    assert len(set_clears) == 1
-    assert set_clears[0]["message"]["params"]["lan_ip"] == "192.168.1.204"
+    assert res.status_code == 409, res.text
+    async with session_maker() as fresh:
+        retained = await fresh.get(GatewayLanClient, lc.id)
+        assert retained is not None
+        assert retained.egress_attachment_id == att.id
+    assert not fake_manager.sent
 
 
 async def test_list_filters_to_client(client, db, factories, fake_manager):
@@ -513,7 +534,7 @@ async def test_clear_ip_pin_only(
     assert snat_msgs[0]["message"]["params"]["action"] == "clear"
 
 
-async def test_delete_lan_client_clears_snat(
+async def test_delete_lan_client_with_snat_is_blocked(
     client, db, session_maker, factories, fake_manager
 ):
     cli = await factories.make_client(db)
@@ -531,20 +552,18 @@ async def test_delete_lan_client_clears_snat(
     db.add(lc)
     await db.commit()
     await db.refresh(lc)
-    fake_manager.online.add(str(cli.agent_id))
-    fake_manager.online.add(str(server.agent_id))
     await db.close()
 
     res = await client.delete(f"/api/tunnel-clients/{cli.id}/lan-clients/{lc.id}")
-    assert res.status_code == 204
+    assert res.status_code == 409
 
-    snat_clears = [
-        m for m in fake_manager.sent
-        if m["message"]["type"] == "set_lan_snat"
-        and m["message"]["params"]["action"] == "clear"
-    ]
-    assert len(snat_clears) == 1
-    assert snat_clears[0]["message"]["params"]["lan_ip"] == "192.168.1.50"
+    async with session_maker() as fresh:
+        retained = await fresh.scalar(
+            select(GatewayLanClient).where(GatewayLanClient.id == lc.id)
+        )
+        assert retained is not None
+        assert retained.egress_tunnel_server_ip_id == primary.id
+    assert not fake_manager.sent
 
 
 async def test_egress_change_auto_migrates_port_forwards(
@@ -588,6 +607,7 @@ async def test_egress_change_auto_migrates_port_forwards(
     fake_manager.online.add(str(cli.agent_id))
     fake_manager.online.add(str(server_a.agent_id))
     fake_manager.online.add(str(server_b.agent_id))
+    _ack_raw_forward_commands(fake_manager, session_maker)
     await db.close()
 
     # Pin egress to attachment B + its IP
@@ -668,6 +688,7 @@ async def test_egress_change_skips_forwards_that_would_conflict(
     fake_manager.online.add(str(cli.agent_id))
     fake_manager.online.add(str(server_a.agent_id))
     fake_manager.online.add(str(server_b.agent_id))
+    _ack_raw_forward_commands(fake_manager, session_maker)
     await db.close()
 
     res = await client.patch(
@@ -718,6 +739,7 @@ async def test_pf_patch_attachment_id_migrates_rule(
     await db.refresh(pf)
     fake_manager.online.add(str(server_a.agent_id))
     fake_manager.online.add(str(server_b.agent_id))
+    _ack_raw_forward_commands(fake_manager, session_maker)
     await db.close()
 
     res = await client.patch(

@@ -137,10 +137,12 @@ async def test_delete_409_when_port_forward_references(client, db, factories, fa
 
     res = await client.delete(f"/api/tunnel-client-attachments/{att_id}")
     assert res.status_code == 409
-    assert "port forwards" in res.text.lower()
+    assert "desired state was preserved" in res.text.lower()
 
 
-async def test_delete_cascade_removes_forwards(client, db, factories, fake_manager):
+async def test_delete_cascade_is_blocked_and_preserves_forwards(
+    client, db, factories, fake_manager
+):
     server = await factories.make_server(db)
     cli = await factories.make_client(db)
     fake_manager.online.add(str(server.agent_id))
@@ -165,17 +167,18 @@ async def test_delete_cascade_removes_forwards(client, db, factories, fake_manag
     pf_id = pf.id
 
     res = await client.delete(f"/api/tunnel-client-attachments/{att_id}?cascade=1")
-    assert res.status_code == 204
+    assert res.status_code == 409
+    assert "desired state was preserved" in res.text.lower()
 
     remaining_att = await db.scalar(
         select(TunnelClientAttachment).where(TunnelClientAttachment.id == uuid.UUID(att_id))
     )
-    assert remaining_att is None
+    assert remaining_att is not None
 
     remaining_pf = await db.scalar(
         select(PortForward).where(PortForward.id == pf_id)
     )
-    assert remaining_pf is None
+    assert remaining_pf is not None
 
 
 async def test_list_filters_by_client(client, db, factories, fake_manager):

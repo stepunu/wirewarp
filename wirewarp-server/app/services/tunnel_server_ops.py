@@ -16,7 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.tunnel_client import TunnelClient
 from app.models.tunnel_client_attachment import TunnelClientAttachment
+from app.models.gateway_lan_client import GatewayLanClient
 from app.models.tunnel_server import TunnelServer
+from app.models.tunnel_server_ip import TunnelServerIP
 from app.services.agent_commands import send_command
 from app.services.network_alloc import server_tunnel_ip
 from app.services.primary_ip import get_primary_ip
@@ -24,7 +26,12 @@ from app.services.primary_ip import get_primary_ip
 logger = logging.getLogger(__name__)
 
 
-async def dispatch_wg_init(server: TunnelServer, db: AsyncSession) -> tuple[bool, str]:
+async def dispatch_wg_init(
+    server: TunnelServer,
+    db: AsyncSession,
+    *,
+    replay_peers: bool = True,
+) -> tuple[bool, str]:
     """Send wg_init to the server agent so it (re)builds the WireGuard interface.
 
     Skips dispatch when no primary IP is known yet: the agent validates
@@ -60,14 +67,15 @@ async def dispatch_wg_init(server: TunnelServer, db: AsyncSession) -> tuple[bool
     # peers. Re-fire wg_add_peer for every attachment that has reported a
     # public key so the peer list converges back. Commands queue FIFO per
     # agent so the adds run after wg_init.
-    attachments = (await db.scalars(
-        select(TunnelClientAttachment).where(
-            TunnelClientAttachment.tunnel_server_id == server.id,
-            TunnelClientAttachment.wg_public_key.isnot(None),
-        )
-    )).all()
-    for att in attachments:
-        await dispatch_add_peer_for_attachment(att, db)
+    if replay_peers:
+        attachments = (await db.scalars(
+            select(TunnelClientAttachment).where(
+                TunnelClientAttachment.tunnel_server_id == server.id,
+                TunnelClientAttachment.wg_public_key.isnot(None),
+            )
+        )).all()
+        for att in attachments:
+            await dispatch_add_peer_for_attachment(att, db)
 
     return sent, cmd_id
 
@@ -138,6 +146,77 @@ async def dispatch_wg_attach(
             client.agent_id, cmd_id,
         )
     return sent, cmd_id
+
+
+async def reconcile_server_attachments(
+    server_id: uuid.UUID, db: AsyncSession
+) -> None:
+    """Replay current endpoint and client routing state for one server.
+
+    Desired state is committed by the caller before this helper runs. A
+    delivery or command-log failure must not turn that successful write into
+    a false HTTP failure. Reconnect replay remains the final authority.
+    """
+    attachment_ids = (
+        await db.scalars(
+            select(TunnelClientAttachment.id).where(
+                TunnelClientAttachment.tunnel_server_id == server_id
+            )
+        )
+    ).all()
+    for attachment_id in attachment_ids:
+        try:
+            attachment = await db.scalar(
+                select(TunnelClientAttachment).where(
+                    TunnelClientAttachment.id == attachment_id
+                )
+            )
+            if attachment is not None:
+                await dispatch_add_peer_for_attachment(attachment, db)
+                await dispatch_wg_attach(attachment, db)
+        except Exception:
+            await db.rollback()
+            logger.exception(
+                "Immediate wg_attach reconcile failed for attachment %s; "
+                "desired state will replay on reconnect",
+                attachment_id,
+            )
+
+
+async def reconcile_client_attachments(
+    client_id: uuid.UUID, db: AsyncSession
+) -> None:
+    """Replay current gateway-role state on both sides of each attachment.
+
+    Remove the server peer before replaying it so an obsolete LAN AllowedIP
+    and its route can be removed when a gateway role or LAN network changes.
+    """
+    attachment_ids = (
+        await db.scalars(
+            select(TunnelClientAttachment.id).where(
+                TunnelClientAttachment.tunnel_client_id == client_id
+            )
+        )
+    ).all()
+    for attachment_id in attachment_ids:
+        try:
+            attachment = await db.scalar(
+                select(TunnelClientAttachment).where(
+                    TunnelClientAttachment.id == attachment_id
+                )
+            )
+            if attachment is None:
+                continue
+            await dispatch_remove_peer_for_attachment(attachment, db)
+            await dispatch_wg_attach(attachment, db)
+            await dispatch_add_peer_for_attachment(attachment, db)
+        except Exception:
+            await db.rollback()
+            logger.exception(
+                "Immediate role reconcile failed for attachment %s; desired "
+                "state will replay on reconnect",
+                attachment_id,
+            )
 
 
 async def dispatch_wg_detach(
@@ -277,6 +356,61 @@ async def dispatch_set_lan_snat(
             server.agent_id, lan_ip, cmd_id,
         )
     return sent, cmd_id
+
+
+async def dispatch_reconcile_lan_snat(
+    server: TunnelServer,
+    db: AsyncSession,
+) -> tuple[bool, str]:
+    """Replace all managed per-host SNAT rules with current desired state."""
+    rows = (
+        await db.execute(
+            select(GatewayLanClient.lan_ip, TunnelServerIP.address)
+            .join(
+                TunnelClientAttachment,
+                GatewayLanClient.egress_attachment_id == TunnelClientAttachment.id,
+            )
+            .join(
+                TunnelServerIP,
+                GatewayLanClient.egress_tunnel_server_ip_id == TunnelServerIP.id,
+            )
+            .join(
+                TunnelClient,
+                GatewayLanClient.tunnel_client_id == TunnelClient.id,
+            )
+            .where(
+                TunnelClientAttachment.tunnel_server_id == server.id,
+                TunnelServerIP.tunnel_server_id == server.id,
+                TunnelClient.is_gateway.is_(True),
+            )
+            .order_by(GatewayLanClient.lan_ip, TunnelServerIP.address)
+        )
+    ).all()
+    pins = [
+        {"lan_ip": lan_ip, "public_ip": public_ip}
+        for lan_ip, public_ip in rows
+    ]
+    sent, command_id = await send_command(
+        agent_id=str(server.agent_id),
+        command_type="reconcile_lan_snat",
+        params={"pins": pins},
+        db=db,
+    )
+    if sent:
+        logger.info(
+            "Sent reconcile_lan_snat to server agent %s with %d pin(s) (cmd=%s)",
+            server.agent_id,
+            len(pins),
+            command_id,
+        )
+    else:
+        logger.warning(
+            "Server agent %s not connected; LAN SNAT desired state will replay "
+            "on reconnect (cmd=%s)",
+            server.agent_id,
+            command_id,
+        )
+    return sent, command_id
 
 
 async def dispatch_set_lan_egress(
