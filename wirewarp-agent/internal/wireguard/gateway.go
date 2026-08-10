@@ -1,6 +1,7 @@
 package wireguard
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 
 const rtTablesPath = "/etc/iproute2/rt_tables"
 const publicInboundTunnelFwmark int64 = 0x101
+const gatewayDockerUserComment = "wirewarp-gateway-docker-user"
 
 // GatewayConfig holds all the parameters needed to configure per-attachment
 // policy routing on a gateway client. Each attachment owns one set of
@@ -110,6 +112,27 @@ func TeardownGatewayRouting(cfg GatewayConfig) error {
 		"-o", cfg.TunnelIface, "-j", "TCPMSS", "--clamp-mss-to-pmtu")
 
 	return nil
+}
+
+// RemoveGatewayOnlyRules removes rules that are valid only while an
+// attachment is a LAN gateway. Missing rules are already the desired state.
+func RemoveGatewayOnlyRules(cfg GatewayConfig) error {
+	rules := [][]string{
+		gatewayDockerUserRule(cfg.TunnelIface, cfg.LANIface, true),
+		gatewayDockerUserRule(cfg.LANIface, cfg.TunnelIface, true),
+		// Saved IsGateway=true identifies this exact untagged pair as the
+		// legacy WireWarp shape. Operator rules with other arguments or a
+		// comment are not removed.
+		gatewayDockerUserRule(cfg.TunnelIface, cfg.LANIface, false),
+		gatewayDockerUserRule(cfg.LANIface, cfg.TunnelIface, false),
+	}
+	var firstErr error
+	for _, rule := range rules {
+		if err := deleteIPTablesRuleIfPresent(rule); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // EnsureOutputConnmark installs the global mangle CONNMARK restore rules.
@@ -310,17 +333,35 @@ func applyAttachmentNAT(cfg GatewayConfig) error {
 			}
 		}
 	}
+	return applyGatewayDockerRules(cfg)
+}
+
+func applyGatewayDockerRules(cfg GatewayConfig) error {
 	if cfg.IsGateway && dockerUserChainExists() {
 		iptCheckOrInsert( //nolint:errcheck
-			[]string{"-C", "DOCKER-USER", "-i", cfg.TunnelIface, "-o", cfg.LANIface, "-j", "ACCEPT"},
-			[]string{"-I", "DOCKER-USER", "-i", cfg.TunnelIface, "-o", cfg.LANIface, "-j", "ACCEPT"},
+			iptablesAction(gatewayDockerUserRule(cfg.TunnelIface, cfg.LANIface, true), "-C"),
+			iptablesAction(gatewayDockerUserRule(cfg.TunnelIface, cfg.LANIface, true), "-I"),
 		)
 		iptCheckOrInsert( //nolint:errcheck
-			[]string{"-C", "DOCKER-USER", "-i", cfg.LANIface, "-o", cfg.TunnelIface, "-j", "ACCEPT"},
-			[]string{"-I", "DOCKER-USER", "-i", cfg.LANIface, "-o", cfg.TunnelIface, "-j", "ACCEPT"},
+			iptablesAction(gatewayDockerUserRule(cfg.LANIface, cfg.TunnelIface, true), "-C"),
+			iptablesAction(gatewayDockerUserRule(cfg.LANIface, cfg.TunnelIface, true), "-I"),
 		)
 	}
-	return nil
+	if cfg.IsGateway {
+		return nil
+	}
+	// A persisted plain-client attachment is authoritative on replay. Remove
+	// tagged rules and the exact legacy pair so a failed prior rules save does
+	// not restore gateway access after reboot.
+	return RemoveGatewayOnlyRules(cfg)
+}
+
+func gatewayDockerUserRule(inputIface, outputIface string, tagged bool) []string {
+	rule := []string{"DOCKER-USER", "-i", inputIface, "-o", outputIface}
+	if tagged {
+		rule = append(rule, "-m", "comment", "--comment", gatewayDockerUserComment)
+	}
+	return append(rule, "-j", "ACCEPT")
 }
 
 func shouldApplyGatewayLANMasquerade(cfg GatewayConfig) bool {
@@ -348,6 +389,25 @@ func deleteIPTablesRule(rule []string) bool {
 		removed = true
 	}
 	return removed
+}
+
+func deleteIPTablesRuleIfPresent(rule []string) error {
+	checkArgs := iptablesAction(rule, "-C")
+	deleteArgs := iptablesAction(rule, "-D")
+	for {
+		checkOut, err := exec.Command("iptables", checkArgs...).CombinedOutput()
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+				return nil
+			}
+			return fmt.Errorf("iptables %s: %w: %s", strings.Join(checkArgs, " "), err, checkOut)
+		}
+		deleteOut, err := exec.Command("iptables", deleteArgs...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("iptables %s: %w: %s", strings.Join(deleteArgs, " "), err, deleteOut)
+		}
+	}
 }
 
 func iptablesAction(rule []string, action string) []string {

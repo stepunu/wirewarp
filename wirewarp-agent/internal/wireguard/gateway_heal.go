@@ -138,23 +138,13 @@ func HealAttachment(cfg GatewayConfig) (healed []string, firstErr error) {
 	// 10. DOCKER-USER pass-through, only for gateway-mode attachments where
 	// the chain exists.
 	if cfg.IsGateway && dockerUserChainExists() {
-		if exec.Command("iptables",
-			"-C", "DOCKER-USER",
-			"-i", cfg.TunnelIface, "-o", cfg.LANIface, "-j", "ACCEPT",
-		).Run() != nil {
-			record("docker-user-in", iptE(
-				"-I", "DOCKER-USER",
-				"-i", cfg.TunnelIface, "-o", cfg.LANIface, "-j", "ACCEPT",
-			))
+		inRule := gatewayDockerUserRule(cfg.TunnelIface, cfg.LANIface, true)
+		if exec.Command("iptables", iptablesAction(inRule, "-C")...).Run() != nil {
+			record("docker-user-in", iptE(iptablesAction(inRule, "-I")...))
 		}
-		if exec.Command("iptables",
-			"-C", "DOCKER-USER",
-			"-i", cfg.LANIface, "-o", cfg.TunnelIface, "-j", "ACCEPT",
-		).Run() != nil {
-			record("docker-user-out", iptE(
-				"-I", "DOCKER-USER",
-				"-i", cfg.LANIface, "-o", cfg.TunnelIface, "-j", "ACCEPT",
-			))
+		outRule := gatewayDockerUserRule(cfg.LANIface, cfg.TunnelIface, true)
+		if exec.Command("iptables", iptablesAction(outRule, "-C")...).Run() != nil {
+			record("docker-user-out", iptE(iptablesAction(outRule, "-I")...))
 		}
 	}
 
@@ -196,16 +186,16 @@ func ensureSysctls(tunnelIface, lanIface string) (changed bool, err error) {
 // surfaces the diff for the heal log.
 func ensureOutputConnmarkAndReport() (healed []string, err error) {
 	outputArgs := []string{"-t", "mangle", "OUTPUT", "-j", "CONNMARK", "--restore-mark"}
-	if exec.Command("iptables", append([]string{"-C"}, outputArgs[1:]...)...).Run() != nil {
-		if e := iptE(append([]string{"-A"}, outputArgs[1:]...)...); e != nil {
+	if exec.Command("iptables", iptablesAction(outputArgs, "-C")...).Run() != nil {
+		if e := iptE(iptablesAction(outputArgs, "-A")...); e != nil {
 			return healed, e
 		}
 		healed = append(healed, "output-connmark-restore")
 	}
 
 	preArgs := []string{"-t", "mangle", "PREROUTING", "!", "-i", "wg+", "-j", "CONNMARK", "--restore-mark"}
-	if exec.Command("iptables", append([]string{"-C"}, preArgs[1:]...)...).Run() != nil {
-		if e := iptE(append([]string{"-A"}, preArgs[1:]...)...); e != nil {
+	if exec.Command("iptables", iptablesAction(preArgs, "-C")...).Run() != nil {
+		if e := iptE(iptablesAction(preArgs, "-A")...); e != nil {
 			return healed, e
 		}
 		healed = append(healed, "prerouting-connmark-restore")

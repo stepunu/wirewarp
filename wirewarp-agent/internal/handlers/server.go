@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
-	"strings"
 	"sync/atomic"
 
 	"github.com/wirewarp/agent/internal/config"
@@ -49,8 +47,12 @@ func NewServer(cfg *config.Config, cfgPath string) (*ServerHandlers, error) {
 		return nil, fmt.Errorf("wireguard.NewServer: %w", err)
 	}
 
-	if err := wgSrv.Init(); err != nil {
-		log.Printf("[server] WARN: failed to restore WireGuard interface on startup: %v", err)
+	if err := wgSrv.PruneStalePeerRoutes(); err != nil {
+		return nil, fmt.Errorf("prune stale peer routes: %w", err)
+	}
+	initErr := wgSrv.Init()
+	if initErr != nil {
+		log.Printf("[server] WARN: failed to restore WireGuard interface on startup: %v", initErr)
 	} else {
 		log.Printf("[server] WireGuard interface %s restored from saved config", s.WGInterface)
 		// Re-apply forwarding and NAT on startup
@@ -116,6 +118,7 @@ func (h *ServerHandlers) Register(exec *executor.Executor) {
 	exec.Register("iptables_add_forward", h.handleAddForward)
 	exec.Register("iptables_remove_forward", h.handleRemoveForward)
 	exec.Register("set_lan_snat", h.handleSetLANSNAT)
+	exec.Register("reconcile_lan_snat", h.handleReconcileLANSNAT)
 	exec.Register("crowdsec_install", h.handleCrowdSecInstall)
 	exec.Register("crowdsec_sync_whitelist", h.handleCrowdSecSyncWhitelist)
 	exec.Register("traefik_install", h.handleTraefikInstall)
@@ -161,6 +164,9 @@ func (h *ServerHandlers) handleWGInit(raw json.RawMessage) (string, error) {
 	if err := validate.IPv4(p.PublicIP); err != nil {
 		return "", err
 	}
+	if err := h.cleanupChangedPublicIface(p.PublicIface); err != nil {
+		return "", err
+	}
 
 	wgSrv, err := wireguard.NewServer(wireguard.ServerConfig{
 		Interface:     p.Interface,
@@ -171,27 +177,22 @@ func (h *ServerHandlers) handleWGInit(raw json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	h.wg = nil
+	if err := wgSrv.PruneStalePeerRoutes(); err != nil {
+		return "", fmt.Errorf("prune stale peer routes: %w", err)
+	}
 	if err := wgSrv.Init(); err != nil {
 		return "", err
 	}
 	h.wg = wgSrv
 
 	// Enable forwarding and NAT so tunnel traffic can reach the internet
-	if err := iptables.EnableIPForward(); err != nil {
-		log.Printf("[server] WARN: %v", err)
-	}
-	if err := iptables.EnsureMasquerade(p.PublicIface); err != nil {
-		log.Printf("[server] WARN: masquerade on %s: %v", p.PublicIface, err)
-	}
-	if err := iptables.EnsureMSSClamp(p.Interface); err != nil {
-		log.Printf("[server] WARN: mss clamp on %s: %v", p.Interface, err)
-	}
-	if saveErr := iptables.SaveRules(); saveErr != nil {
-		log.Printf("[server] WARN: iptables save failed: %v", saveErr)
+	if err := configureWGInitRuntime(p); err != nil {
+		return "", err
 	}
 
 	// Persist state
-	h.cfg.Server = &config.ServerState{
+	nextServer := &config.ServerState{
 		WGInterface:   p.Interface,
 		WGPort:        p.ListenPort,
 		TunnelNetwork: p.TunnelNetwork,
@@ -200,9 +201,10 @@ func (h *ServerHandlers) handleWGInit(raw json.RawMessage) (string, error) {
 		PublicIP:      p.PublicIP,
 		Initialized:   true,
 	}
-	if err := h.cfg.Save(h.cfgPath); err != nil {
-		log.Printf("[server] WARN: failed to save config after wg_init: %v", err)
+	if err := h.saveWGInitState(nextServer); err != nil {
+		return "", err
 	}
+	h.wg = wgSrv
 
 	if exe, err := os.Executable(); err == nil {
 		if err := EnsureRoutingUnit(exe, h.cfgPath); err != nil {
@@ -211,6 +213,46 @@ func (h *ServerHandlers) handleWGInit(raw json.RawMessage) (string, error) {
 	}
 
 	return fmt.Sprintf("WireGuard interface %s initialised; public key: %s", p.Interface, wgSrv.PublicKey), nil
+}
+
+func configureWGInitRuntime(p wgInitParams) error {
+	if err := iptables.EnableIPForward(); err != nil {
+		return err
+	}
+	if err := iptables.EnsureMasquerade(p.PublicIface); err != nil {
+		return fmt.Errorf("masquerade on %s: %w", p.PublicIface, err)
+	}
+	if err := iptables.EnsureMSSClamp(p.Interface); err != nil {
+		return fmt.Errorf("mss clamp on %s: %w", p.Interface, err)
+	}
+	if err := iptables.SaveRules(); err != nil {
+		return fmt.Errorf("save iptables rules: %w", err)
+	}
+	return nil
+}
+
+func (h *ServerHandlers) saveWGInitState(next *config.ServerState) error {
+	old := h.cfg.Server
+	h.cfg.Server = next
+	if err := h.cfg.Save(h.cfgPath); err != nil {
+		h.cfg.Server = old
+		return fmt.Errorf("save config after wg_init: %w", err)
+	}
+	return nil
+}
+
+func (h *ServerHandlers) cleanupChangedPublicIface(nextIface string) error {
+	if h.cfg == nil || h.cfg.Server == nil {
+		return nil
+	}
+	oldIface := h.cfg.Server.PublicIface
+	if oldIface == "" || oldIface == nextIface {
+		return nil
+	}
+	if err := iptables.CleanupServerNAT(oldIface); err != nil {
+		return fmt.Errorf("clean up old public interface %s: %w", oldIface, err)
+	}
+	return nil
 }
 
 type addPeerParams struct {
@@ -242,25 +284,18 @@ func (h *ServerHandlers) handleAddPeer(raw json.RawMessage) (string, error) {
 			return "", err
 		}
 	}
-	if err := h.wg.AddPeer(wireguard.Peer{
+	peer := wireguard.Peer{
 		Name:       p.Name,
 		PublicKey:  p.PublicKey,
 		TunnelIP:   p.TunnelIP,
 		AllowedIPs: p.AllowedIPs,
-	}); err != nil {
-		return "", err
 	}
-	// wg syncconf doesn't add kernel routes like wg-quick does.
-	// Add routes for non-tunnel AllowedIPs (e.g. LAN subnets) so the
-	// VPS can reach LAN devices through the gateway peer.
 	iface := "wg0"
 	if h.cfg.Server != nil && h.cfg.Server.WGInterface != "" {
 		iface = h.cfg.Server.WGInterface
 	}
-	for _, subnet := range p.AllowedIPs {
-		if subnet != p.TunnelIP+"/32" {
-			addRouteIfMissing(subnet, iface)
-		}
+	if err := h.wg.AddPeerAndRoutes(peer, iface); err != nil {
+		return "", err
 	}
 	return fmt.Sprintf("peer %s (%s) added", p.Name, p.TunnelIP), nil
 }
@@ -280,7 +315,11 @@ func (h *ServerHandlers) handleRemovePeer(raw json.RawMessage) (string, error) {
 	if err := validate.WGKey(p.PublicKey); err != nil {
 		return "", err
 	}
-	if err := h.wg.RemovePeer(p.PublicKey); err != nil {
+	iface := "wg0"
+	if h.cfg.Server != nil && h.cfg.Server.WGInterface != "" {
+		iface = h.cfg.Server.WGInterface
+	}
+	if err := h.wg.RemovePeerAndRoutes(p.PublicKey, iface); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("peer %s removed", p.PublicKey), nil
@@ -328,8 +367,8 @@ func (h *ServerHandlers) handleAddForward(raw json.RawMessage) (string, error) {
 	}); err != nil {
 		return "", err
 	}
-	if saveErr := iptables.SaveRules(); saveErr != nil {
-		log.Printf("[server] WARN: iptables save failed: %v", saveErr)
+	if err := iptables.SaveRules(); err != nil {
+		return "", fmt.Errorf("save added forward: %w", err)
 	}
 	return fmt.Sprintf("forward %s:%s → %s:%s added",
 		p.Protocol, portRangeStr(p.PublicPort, p.PublicPortEnd),
@@ -351,7 +390,7 @@ func (h *ServerHandlers) handleRemoveForward(raw json.RawMessage) (string, error
 	if err := validate.IPv4(publicIP); err != nil {
 		return "", err
 	}
-	if err := iptables.RemoveForward(publicIP, iptables.ForwardRule{
+	if err := iptables.RemoveForwardAndSave(publicIP, iptables.ForwardRule{
 		Protocol:      p.Protocol,
 		PublicPort:    p.PublicPort,
 		PublicPortEnd: p.PublicPortEnd,
@@ -360,9 +399,6 @@ func (h *ServerHandlers) handleRemoveForward(raw json.RawMessage) (string, error
 		DestPortEnd:   p.DestPortEnd,
 	}); err != nil {
 		return "", err
-	}
-	if saveErr := iptables.SaveRules(); saveErr != nil {
-		log.Printf("[server] WARN: iptables save failed: %v", saveErr)
 	}
 	return fmt.Sprintf("forward %s:%s → %s:%s removed",
 		p.Protocol, portRangeStr(p.PublicPort, p.PublicPortEnd),
@@ -375,15 +411,59 @@ type setLANSNATParams struct {
 	Action   string `json:"action"` // "set" | "clear"
 }
 
+type reconcileLANSNATPin struct {
+	LANIP    string `json:"lan_ip"`
+	PublicIP string `json:"public_ip"`
+}
+
+type reconcileLANSNATParams struct {
+	Pins []reconcileLANSNATPin `json:"pins"`
+}
+
+func (h *ServerHandlers) handleReconcileLANSNAT(raw json.RawMessage) (string, error) {
+	var p reconcileLANSNATParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "", fmt.Errorf("parse params: %w", err)
+	}
+	if p.Pins == nil {
+		return "", fmt.Errorf("pins must be an array")
+	}
+	if h.cfg.Server == nil || !h.cfg.Server.Initialized {
+		return "", fmt.Errorf("server not initialised: wg_init has not been run")
+	}
+	iface := h.cfg.Server.PublicIface
+	if err := validate.PublicIface(iface); err != nil {
+		return "", err
+	}
+
+	desired := make([]iptables.LANSNATPin, 0, len(p.Pins))
+	seenLANIPs := make(map[string]struct{}, len(p.Pins))
+	for _, pin := range p.Pins {
+		if err := validate.IPv4(pin.LANIP); err != nil {
+			return "", fmt.Errorf("lan_ip: %w", err)
+		}
+		if err := validate.IPv4(pin.PublicIP); err != nil {
+			return "", fmt.Errorf("public_ip: %w", err)
+		}
+		if _, duplicate := seenLANIPs[pin.LANIP]; duplicate {
+			return "", fmt.Errorf("duplicate lan_ip %s", pin.LANIP)
+		}
+		seenLANIPs[pin.LANIP] = struct{}{}
+		desired = append(desired, iptables.LANSNATPin{
+			LANIP:    pin.LANIP,
+			PublicIP: pin.PublicIP,
+		})
+	}
+
+	if err := iptables.ReconcileLANSNATAndSave(iface, desired); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("reconciled %d LAN SNAT pin(s)", len(desired)), nil
+}
+
 // handleSetLANSNAT installs or removes a per-LAN-host SNAT rule on the
-// VPS public interface. "set" first clears any prior rule for this
-// lan_ip (so the IP can be flipped without leaving stale rules) then
-// inserts the new SNAT before MASQUERADE. "clear" just removes any
-// matching rules.
-//
-// Idempotency comes from `iptables -C` in AddLANSNAT and the
-// iptables-save scan in RemoveLANSNATBySource — both safely no-op when
-// state already matches the request.
+// VPS public interface. The iptables layer snapshots all managed pins before
+// the per-source change and restores them if mutation or persistence fails.
 func (h *ServerHandlers) handleSetLANSNAT(raw json.RawMessage) (string, error) {
 	var p setLANSNATParams
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -408,13 +488,9 @@ func (h *ServerHandlers) handleSetLANSNAT(raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("public_iface not set on this server agent")
 	}
 
-	if err := iptables.RemoveLANSNATBySource(p.LANIp); err != nil {
-		log.Printf("[server] WARN: clearing prior snat for %s: %v", p.LANIp, err)
-	}
-
 	if p.Action == "clear" {
-		if saveErr := iptables.SaveRules(); saveErr != nil {
-			log.Printf("[server] WARN: iptables save failed: %v", saveErr)
+		if err := iptables.SetLANSNATAndSave(iface, p.LANIp, "", true); err != nil {
+			return "", err
 		}
 		return fmt.Sprintf("snat for %s cleared", p.LANIp), nil
 	}
@@ -422,11 +498,8 @@ func (h *ServerHandlers) handleSetLANSNAT(raw json.RawMessage) (string, error) {
 	if p.PublicIP == "" {
 		return "", fmt.Errorf("public_ip is required when action=set")
 	}
-	if err := iptables.AddLANSNAT(iface, p.LANIp, p.PublicIP); err != nil {
+	if err := iptables.SetLANSNATAndSave(iface, p.LANIp, p.PublicIP, false); err != nil {
 		return "", err
-	}
-	if saveErr := iptables.SaveRules(); saveErr != nil {
-		log.Printf("[server] WARN: iptables save failed: %v", saveErr)
 	}
 	return fmt.Sprintf("snat installed: %s -> %s on %s", p.LANIp, p.PublicIP, iface), nil
 }
@@ -464,18 +537,4 @@ func validateForwardParams(p *addForwardParams) error {
 		}
 	}
 	return nil
-}
-
-// addRouteIfMissing adds a kernel route for a subnet via a WireGuard interface.
-// Silently ignores "file exists" errors (route already present from wg-quick up).
-func addRouteIfMissing(subnet, iface string) {
-	out, err := exec.Command("ip", "route", "add", subnet, "dev", iface).CombinedOutput()
-	if err != nil {
-		// "RTNETLINK answers: File exists" means the route is already there — fine.
-		if !strings.Contains(string(out), "File exists") {
-			log.Printf("[server] WARN: ip route add %s dev %s: %s", subnet, iface, out)
-		}
-	} else {
-		log.Printf("[server] added route %s dev %s", subnet, iface)
-	}
 }

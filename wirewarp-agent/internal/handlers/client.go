@@ -134,19 +134,19 @@ func (h *ClientHandlers) Register(exec *executor.Executor) {
 // --- command handlers ---
 
 type wgAttachParams struct {
-	AttachmentID         string `json:"attachment_id"`
-	WGInterface          string `json:"wg_interface"`
-	TunnelIP             string `json:"tunnel_ip"`
-	Fwmark               int    `json:"fwmark"`
-	RouteTableID         int    `json:"route_table_id"`
-	ServerEndpoint       string `json:"server_endpoint"`
-	ServerPublicKey      string `json:"server_public_key"`
-	ServerTunnelNetwork  string `json:"server_tunnel_network"`
-	VPSTunnelIP          string `json:"vps_tunnel_ip"`
-	LANIface             string `json:"lan_iface"`
-	LANNetwork           string `json:"lan_network"`
-	LANIP                string `json:"lan_ip"`
-	IsGateway            bool   `json:"is_gateway"`
+	AttachmentID        string `json:"attachment_id"`
+	WGInterface         string `json:"wg_interface"`
+	TunnelIP            string `json:"tunnel_ip"`
+	Fwmark              int    `json:"fwmark"`
+	RouteTableID        int    `json:"route_table_id"`
+	ServerEndpoint      string `json:"server_endpoint"`
+	ServerPublicKey     string `json:"server_public_key"`
+	ServerTunnelNetwork string `json:"server_tunnel_network"`
+	VPSTunnelIP         string `json:"vps_tunnel_ip"`
+	LANIface            string `json:"lan_iface"`
+	LANNetwork          string `json:"lan_network"`
+	LANIP               string `json:"lan_ip"`
+	IsGateway           bool   `json:"is_gateway"`
 }
 
 func (h *ClientHandlers) handleWGAttach(raw json.RawMessage) (string, error) {
@@ -209,12 +209,24 @@ func (h *ClientHandlers) handleWGAttach(raw json.RawMessage) (string, error) {
 	if p.LANIface == "" {
 		att.LANIface = "eth0"
 	}
+	attachmentsBefore := append([]config.AttachmentState(nil), h.cfg.Attachments...)
+	var oldAttachment *config.AttachmentState
+	if old := h.cfg.FindAttachment(att.AttachmentID, att.WGInterface); old != nil {
+		oldCopy := *old
+		oldAttachment = &oldCopy
+	}
+	if err := h.cleanupGatewayRoleTransition(&att); err != nil {
+		return "", err
+	}
 
 	if err := wireguard.EnsureOutputConnmark(); err != nil {
 		log.Printf("[client] WARN: failed to ensure OUTPUT CONNMARK restore: %v", err)
 	}
 
-	wgCli, err := h.bringSingleUp(&att)
+	wgCli, err := bringWGAttachWithRollback(
+		func() (*wireguard.Client, error) { return h.bringSingleUp(&att) },
+		func() error { return h.restoreWGAttachRouting(oldAttachment, &att) },
+	)
 	if err != nil {
 		return "", err
 	}
@@ -222,10 +234,16 @@ func (h *ClientHandlers) handleWGAttach(raw json.RawMessage) (string, error) {
 
 	h.cfg.UpsertAttachment(att)
 	if err := h.cfg.Save(h.cfgPath); err != nil {
-		log.Printf("[client] WARN: failed to save config after wg_attach: %v", err)
+		rollbackErr := h.rollbackWGAttachConfig(attachmentsBefore, func() error {
+			return h.restoreWGAttachRouting(oldAttachment, &att)
+		})
+		if rollbackErr != nil {
+			return "", fmt.Errorf("save config after wg_attach: %w; rollback failed: %v", err, rollbackErr)
+		}
+		return "", fmt.Errorf("save config after wg_attach: %w; previous attachment routing restored", err)
 	}
-	if saveErr := wireguard.SaveIPTables(); saveErr != nil {
-		log.Printf("[client] WARN: iptables save failed: %v", saveErr)
+	if err := saveWGAttachIPTables(); err != nil {
+		return "", err
 	}
 
 	if exe, err := os.Executable(); err == nil {
@@ -412,6 +430,51 @@ func (h *ClientHandlers) handleUpdateEndpoint(raw json.RawMessage) (string, erro
 func (h *ClientHandlers) bringAttachmentUp(att *config.AttachmentState) error {
 	_, err := h.bringSingleUp(att)
 	return err
+}
+
+func (h *ClientHandlers) cleanupGatewayRoleTransition(next *config.AttachmentState) error {
+	old := h.cfg.FindAttachment(next.AttachmentID, next.WGInterface)
+	if old == nil || !old.IsGateway || next.IsGateway {
+		return nil
+	}
+	if err := wireguard.RemoveGatewayOnlyRules(h.buildGatewayConfig(old)); err != nil {
+		return fmt.Errorf("remove gateway-only rules for %s: %w", old.WGInterface, err)
+	}
+	return nil
+}
+
+func (h *ClientHandlers) restoreWGAttachRouting(old, next *config.AttachmentState) error {
+	if old != nil {
+		return wireguard.ApplyGatewayRouting(h.buildGatewayConfig(old))
+	}
+	return wireguard.TeardownGatewayRouting(h.buildGatewayConfig(next))
+}
+
+func bringWGAttachWithRollback(
+	bring func() (*wireguard.Client, error),
+	restoreRouting func() error,
+) (*wireguard.Client, error) {
+	client, err := bring()
+	if err == nil {
+		return client, nil
+	}
+	rollbackErr := restoreRouting()
+	if rollbackErr != nil {
+		return nil, fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
+	}
+	return nil, fmt.Errorf("%w; previous attachment routing restored", err)
+}
+
+func (h *ClientHandlers) rollbackWGAttachConfig(before []config.AttachmentState, restoreRouting func() error) error {
+	h.cfg.Attachments = before
+	return restoreRouting()
+}
+
+func saveWGAttachIPTables() error {
+	if err := wireguard.SaveIPTables(); err != nil {
+		return fmt.Errorf("save iptables after wg_attach: %w", err)
+	}
+	return nil
 }
 
 func (h *ClientHandlers) bringSingleUp(att *config.AttachmentState) (*wireguard.Client, error) {

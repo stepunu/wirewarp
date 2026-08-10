@@ -2,6 +2,7 @@ package wireguard
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,19 +43,22 @@ type ServerConfig struct {
 
 // Peer represents a WireGuard peer entry.
 type Peer struct {
-	Name       string
-	PublicKey  string
-	PresharedKey string  // optional — emitted as PresharedKey when set
-	TunnelIP   string   // assigned tunnel IP for this peer
-	AllowedIPs []string // subnets to route through this peer
+	Name         string
+	PublicKey    string
+	PresharedKey string   // optional: emitted as PresharedKey when set
+	TunnelIP     string   // assigned tunnel IP for this peer
+	AllowedIPs   []string // subnets to route through this peer
 }
 
 // Server manages the WireGuard server-side interface on a VPS.
 type Server struct {
-	cfg        ServerConfig
-	privateKey string
-	PublicKey  string
-	peers      map[string]Peer // keyed by public key
+	cfg               ServerConfig
+	privateKey        string
+	PublicKey         string
+	peers             map[string]Peer // keyed by public key
+	startupPeerRoutes []string
+	peerConfigWriter  func(map[string]Peer) error
+	peerConfigSyncer  func() error
 }
 
 // NewServer creates a Server, generating a keypair if one doesn't exist yet.
@@ -66,6 +70,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if err := os.MkdirAll(wgDir, 0700); err != nil {
 		return nil, fmt.Errorf("create wireguard dir: %w", err)
+	}
+	startupPeerRoutes, err := loadStartupPeerRoutes(confPath(cfg.Interface))
+	if err != nil {
+		return nil, fmt.Errorf("read existing peer routes: %w", err)
 	}
 
 	privateKey, err := loadOrGenPrivateKey(keyPath(cfg.Interface))
@@ -79,10 +87,11 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	return &Server{
-		cfg:        cfg,
-		privateKey: privateKey,
-		PublicKey:  publicKey,
-		peers:      make(map[string]Peer),
+		cfg:               cfg,
+		privateKey:        privateKey,
+		PublicKey:         publicKey,
+		peers:             make(map[string]Peer),
+		startupPeerRoutes: startupPeerRoutes,
 	}, nil
 }
 
@@ -101,11 +110,27 @@ func (s *Server) Init() error {
 
 // AddPeer adds or replaces a peer and syncs the config.
 func (s *Server) AddPeer(p Peer) error {
-	s.peers[p.PublicKey] = p
-	if err := s.writeConfig(); err != nil {
-		return err
+	next := clonePeers(s.peers)
+	next[p.PublicKey] = p
+	return s.commitPeers(next)
+}
+
+// RoutesToRemoveBeforePeerUpdate returns routes owned by the current version
+// of p that the replacement no longer needs. Routes used by another peer are
+// retained. Callers remove these routes before AddPeer so a failed sync cannot
+// leave an obsolete LAN route active.
+func (s *Server) RoutesToRemoveBeforePeerUpdate(p Peer) []string {
+	current, ok := s.peers[p.PublicKey]
+	if !ok {
+		return nil
 	}
-	return wgSyncConf(s.cfg.Interface, confPath(s.cfg.Interface))
+
+	peersAfterUpdate := make(map[string]Peer, len(s.peers))
+	for publicKey, peer := range s.peers {
+		peersAfterUpdate[publicKey] = peer
+	}
+	peersAfterUpdate[p.PublicKey] = p
+	return unusedPeerRoutes(current, peersAfterUpdate)
 }
 
 // RemovePeer removes a peer by public key and syncs the config.
@@ -113,11 +138,26 @@ func (s *Server) RemovePeer(publicKey string) error {
 	if _, ok := s.peers[publicKey]; !ok {
 		return fmt.Errorf("peer not found: %s", publicKey)
 	}
-	delete(s.peers, publicKey)
-	if err := s.writeConfig(); err != nil {
-		return err
+	next := clonePeers(s.peers)
+	delete(next, publicKey)
+	return s.commitPeers(next)
+}
+
+// RoutesToRemoveBeforePeerRemoval returns routes owned by the peer that no
+// remaining peer needs. The peer set is not changed.
+func (s *Server) RoutesToRemoveBeforePeerRemoval(publicKey string) ([]string, error) {
+	peer, ok := s.peers[publicKey]
+	if !ok {
+		return nil, fmt.Errorf("peer not found: %s", publicKey)
 	}
-	return wgSyncConf(s.cfg.Interface, confPath(s.cfg.Interface))
+
+	peersAfterRemoval := make(map[string]Peer, len(s.peers)-1)
+	for candidateKey, candidate := range s.peers {
+		if candidateKey != publicKey {
+			peersAfterRemoval[candidateKey] = candidate
+		}
+	}
+	return unusedPeerRoutes(peer, peersAfterRemoval), nil
 }
 
 // Down tears down the WireGuard interface.
@@ -126,13 +166,17 @@ func (s *Server) Down() error {
 }
 
 func (s *Server) writeConfig() error {
+	return s.writeConfigForPeers(s.peers)
+}
+
+func (s *Server) writeConfigForPeers(peers map[string]Peer) error {
 	if err := validate.NoControlChars(s.cfg.TunnelIP); err != nil {
 		return fmt.Errorf("server config TunnelIP: %w", err)
 	}
 	if err := validate.NoControlChars(s.privateKey); err != nil {
 		return fmt.Errorf("server private key: %w", err)
 	}
-	for _, p := range s.peers {
+	for _, p := range peers {
 		if err := validate.NoControlChars(p.Name); err != nil {
 			return fmt.Errorf("peer Name: %w", err)
 		}
@@ -162,7 +206,7 @@ func (s *Server) writeConfig() error {
 	}
 	b.WriteString("\n")
 
-	for _, p := range s.peers {
+	for _, p := range peers {
 		b.WriteString("[Peer]\n")
 		if p.Name != "" {
 			b.WriteString(fmt.Sprintf("# %s\n", p.Name))
@@ -176,7 +220,122 @@ func (s *Server) writeConfig() error {
 		b.WriteString("\n")
 	}
 
-	return os.WriteFile(confPath(s.cfg.Interface), []byte(b.String()), 0600)
+	return writeFileAtomic(confPath(s.cfg.Interface), []byte(b.String()), 0600)
+}
+
+func (s *Server) commitPeers(next map[string]Peer) error {
+	if err := s.writePeerConfig(next); err != nil {
+		return err
+	}
+	if err := s.syncPeerConfig(); err != nil {
+		rollbackWriteErr := s.writePeerConfig(s.peers)
+		var rollbackSyncErr error
+		if rollbackWriteErr == nil {
+			rollbackSyncErr = s.syncPeerConfig()
+		}
+		if rollbackWriteErr != nil || rollbackSyncErr != nil {
+			return fmt.Errorf(
+				"sync peer config: %w; rollback write: %v; rollback sync: %v",
+				err, rollbackWriteErr, rollbackSyncErr,
+			)
+		}
+		return fmt.Errorf("sync peer config: %w; previous peer config restored", err)
+	}
+	s.peers = next
+	return nil
+}
+
+func (s *Server) writePeerConfig(peers map[string]Peer) error {
+	if s.peerConfigWriter != nil {
+		return s.peerConfigWriter(peers)
+	}
+	return s.writeConfigForPeers(peers)
+}
+
+func (s *Server) syncPeerConfig() error {
+	if s.peerConfigSyncer != nil {
+		return s.peerConfigSyncer()
+	}
+	return wgSyncConf(s.cfg.Interface, confPath(s.cfg.Interface))
+}
+
+func clonePeers(peers map[string]Peer) map[string]Peer {
+	cloned := make(map[string]Peer, len(peers))
+	for publicKey, peer := range peers {
+		peer.AllowedIPs = append([]string(nil), peer.AllowedIPs...)
+		cloned[publicKey] = peer
+	}
+	return cloned
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".wirewarp-config-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := file.Name()
+	defer os.Remove(tmpPath)
+	if err := file.Chmod(perm); err != nil {
+		file.Close()
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+func unusedPeerRoutes(previous Peer, peersAfterChange map[string]Peer) []string {
+	var unused []string
+	seen := make(map[string]struct{})
+	previousTunnelIP := canonicalAllowedIP(previous.TunnelIP + "/32")
+	for _, route := range previous.AllowedIPs {
+		canonicalRoute := canonicalAllowedIP(route)
+		if canonicalRoute == previousTunnelIP {
+			continue
+		}
+		if _, duplicate := seen[canonicalRoute]; duplicate {
+			continue
+		}
+		seen[canonicalRoute] = struct{}{}
+		if peerRouteRequired(canonicalRoute, peersAfterChange) {
+			continue
+		}
+		unused = append(unused, route)
+	}
+	return unused
+}
+
+func peerRouteRequired(canonicalRoute string, peers map[string]Peer) bool {
+	for _, peer := range peers {
+		peerTunnelIP := canonicalAllowedIP(peer.TunnelIP + "/32")
+		for _, route := range peer.AllowedIPs {
+			candidate := canonicalAllowedIP(route)
+			if candidate != peerTunnelIP && candidate == canonicalRoute {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func canonicalAllowedIP(value string) string {
+	value = strings.TrimSpace(value)
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		return prefix.Masked().String()
+	}
+	if address, err := netip.ParseAddr(value); err == nil {
+		return address.String()
+	}
+	return value
 }
 
 // --- helpers ---
