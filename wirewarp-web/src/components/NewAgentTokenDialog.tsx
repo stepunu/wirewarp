@@ -12,6 +12,7 @@ export function NewAgentTokenDialog({ onClose }: { onClose: () => void }) {
   const push = useToast()
   const [type, setType] = useState<'server' | 'client'>('client')
   const [issued, setIssued] = useState<string | null>(null)
+  const [selectedUrl, setSelectedUrl] = useState<string | null>(null)
   const settingsQ = useQuery({ queryKey: ['settings'], queryFn: settingsApi.get })
 
   const create = useMutation({
@@ -22,7 +23,8 @@ export function NewAgentTokenDialog({ onClose }: { onClose: () => void }) {
 
   const publicUrl = settingsQ.data?.public_url || window.location.origin
   const internalUrl = settingsQ.data?.internal_url || publicUrl
-  const controlUrl = type === 'client' ? internalUrl : publicUrl
+  const controlUrls = [...new Set([internalUrl, publicUrl])]
+  const controlUrl = selectedUrl ?? (type === 'client' ? internalUrl : publicUrl)
   const installCmd = issued
     ? `curl -fsSL ${INSTALL_SCRIPT} | bash -s -- --mode ${type} --url ${controlUrl} --token ${issued}`
     : ''
@@ -48,7 +50,7 @@ export function NewAgentTokenDialog({ onClose }: { onClose: () => void }) {
             <span className="left">Token authorizes a single agent to register itself.</span>
             <div className="right">
               <Button variant="ghost" onClick={onClose}>Cancel</Button>
-              <Button variant="primary" onClick={() => create.mutate()} disabled={create.isPending}>
+              <Button variant="primary" onClick={() => create.mutate()} disabled={create.isPending || settingsQ.isPending || settingsQ.isError}>
                 {create.isPending ? 'issuing…' : 'Issue token'}
               </Button>
             </div>
@@ -99,18 +101,19 @@ export function NewAgentTokenDialog({ onClose }: { onClose: () => void }) {
             hint="Servers listen on public VPSes. Clients dial out. Register gateways as clients, then enable Gateway in the node configuration."
           >
             <div className="row">
-              <Button variant={type === 'server' ? 'primary' : 'default'} onClick={() => setType('server')}>
+              <Button variant={type === 'server' ? 'primary' : 'default'} disabled={create.isPending} onClick={() => { setType('server'); setSelectedUrl(null) }}>
                 tunnel server
               </Button>
-              <Button variant={type === 'client' ? 'primary' : 'default'} onClick={() => setType('client')}>
+              <Button variant={type === 'client' ? 'primary' : 'default'} disabled={create.isPending} onClick={() => { setType('client'); setSelectedUrl(null) }}>
                 tunnel client
               </Button>
             </div>
           </Field>
-          <Field label="Control URL" hint="From settings. Override there if wrong.">
-            <Select value={controlUrl} disabled>
-              <option>{controlUrl}</option>
+          <Field label="Control URL" hint="Choose the configured URL that the new node can reach. Edit URLs in Settings.">
+            <Select aria-label="Control URL" value={controlUrl} onChange={(event) => setSelectedUrl(event.target.value)} disabled={settingsQ.isPending || settingsQ.isError || create.isPending}>
+              {controlUrls.map((url) => <option key={url} value={url}>{url}</option>)}
             </Select>
+            {settingsQ.isError && <div style={{ color: 'var(--err)' }}>Could not load control URLs: {settingsQ.error.message}</div>}
           </Field>
         </div>
       )}
