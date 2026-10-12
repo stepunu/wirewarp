@@ -116,6 +116,11 @@ export const agents = {
 export const nodes = {
   list: () => request<import('./types').Node[]>('/nodes'),
   get: (id: string) => request<import('./types').Node>(`/nodes/${id}`),
+  rename: (id: string, name: string) =>
+    request<import('./types').Node>(`/nodes/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    }),
   edge: (id: string) => request<import('./types').NodeEdge>(`/nodes/${id}/edge`),
   edgeCapabilities: (id: string) =>
     request<import('./types').NodeEdgeCapabilities>(`/nodes/${id}/edge/capabilities`),

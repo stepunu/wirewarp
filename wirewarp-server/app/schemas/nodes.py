@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from app.schemas.crowdsec import CrowdSecSnapshotRead
 from app.schemas.security import ServerEdgePolicyRead, SiteRead, TraefikStatusRead
@@ -18,6 +19,10 @@ class EdgeComponentRead(BaseModel):
     version: str | None = None
     last_error: str | None = None
     updated_at: datetime | None = None
+
+
+class NodeRename(BaseModel):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
 
 
 class NodeRead(BaseModel):

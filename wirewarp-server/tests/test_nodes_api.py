@@ -36,6 +36,75 @@ def _enable_security_edge(server: TunnelServer) -> None:
     server.edge_install_phase = "healthy"
 
 
+@pytest.fixture
+def rename_client(request):
+    return request.getfixturevalue(request.param)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["server", "gateway", "client"])
+@pytest.mark.parametrize("rename_client", ["client", "operator_client"], indirect=True)
+async def test_rename_node_persists_across_inventory_and_agent_reads(
+    rename_client, session_maker, monkeypatch, role,
+) -> None:
+    client = rename_client
+    agent = _agent("server" if role == "server" else "client", "original")
+    agent.status = "disconnected"
+    async with session_maker() as s:
+        s.add(agent)
+        await s.commit()
+        if role == "server":
+            s.add(TunnelServer(agent_id=agent.id, tunnel_network="10.21.0.0/24"))
+        else:
+            s.add(TunnelClient(agent_id=agent.id, is_gateway=role == "gateway"))
+        await s.commit()
+    events = []
+    monkeypatch.setattr("app.routers.nodes.emit_agent_changed", lambda: events.append("agent.changed"))
+
+    response = await client.patch(f"/api/nodes/{agent.id}", json={"name": "  New display name  "})
+    assert response.status_code == 200
+    assert response.json()["name"] == "New display name"
+    assert response.json()["role"] == role
+    assert response.json()["hostname"] == "original.example"
+    assert response.json()["status"] == "disconnected"
+    assert events == ["agent.changed"]
+    assert (await client.get(f"/api/nodes/{agent.id}")).json()["name"] == "New display name"
+    assert (await client.get(f"/api/agents/{agent.id}")).json()["name"] == "New display name"
+    assert (await client.get("/api/nodes")).json()[0]["name"] == "New display name"
+    async with session_maker() as s:
+        assert (await s.get(Agent, agent.id)).name == "New display name"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["", " \t\n ", "x" * 256, None])
+async def test_rename_node_rejects_invalid_names(client, session_maker, name) -> None:
+    agent = _agent("client", "original")
+    async with session_maker() as s:
+        s.add(agent)
+        await s.commit()
+    response = await client.patch(f"/api/nodes/{agent.id}", json={"name": name})
+    assert response.status_code == 422
+    assert (await client.get(f"/api/nodes/{agent.id}")).json()["name"] == "original"
+
+
+@pytest.mark.asyncio
+async def test_rename_node_denies_viewers(viewer_client, session_maker) -> None:
+    agent = _agent("server", "original")
+    async with session_maker() as s:
+        s.add(agent)
+        await s.commit()
+    response = await viewer_client.patch(f"/api/nodes/{agent.id}", json={"name": "changed"})
+    assert response.status_code == 403
+    async with session_maker() as s:
+        assert (await s.get(Agent, agent.id)).name == "original"
+
+
+@pytest.mark.asyncio
+async def test_rename_node_missing(client) -> None:
+    response = await client.patch(f"/api/nodes/{uuid.uuid4()}", json={"name": "new name"})
+    assert response.status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_nodes_list_derives_server_gateway_client_roles(client, session_maker) -> None:
     server_agent = _agent("server", "edge-1")

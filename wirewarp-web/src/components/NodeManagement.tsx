@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   agents as agentsApi,
+  nodes as nodesApi,
   tunnelServerIPs as ipApi,
   tunnelServers as tsApi,
 } from '../lib/api'
@@ -15,6 +16,7 @@ export function NodeLifecycleActions({ node }: { node: Node }) {
   const push = useToast()
   const { canMutate, isAdmin } = useRole()
   const [jwt, setJwt] = useState<string | null>(null)
+  const [showRename, setShowRename] = useState(false)
 
   const update = useMutation({
     mutationFn: () => agentsApi.update(node.agent_id),
@@ -31,6 +33,7 @@ export function NodeLifecycleActions({ node }: { node: Node }) {
   return (
     <>
       <div className="page-actions">
+        <Button size="sm" onClick={() => setShowRename(true)}>Rename</Button>
         {isAdmin && (
           <Button size="sm" onClick={() => issueJwt.mutate()} disabled={issueJwt.isPending}>
             {issueJwt.isPending ? 'issuing...' : 'reissue JWT'}
@@ -47,7 +50,45 @@ export function NodeLifecycleActions({ node }: { node: Node }) {
         </Button>
       </div>
       {jwt && <AgentJwtDialog jwt={jwt} onClose={() => setJwt(null)} />}
+      {showRename && <RenameNodeDialog node={node} onClose={() => setShowRename(false)} />}
     </>
+  )
+}
+
+function RenameNodeDialog({ node, onClose }: { node: Node; onClose: () => void }) {
+  const qc = useQueryClient()
+  const push = useToast()
+  const [name, setName] = useState(node.name)
+  const rename = useMutation({
+    mutationFn: () => nodesApi.rename(node.agent_id, name.trim()),
+    onSuccess: (updated) => {
+      qc.setQueryData(['nodes', node.agent_id], updated)
+      qc.invalidateQueries({ queryKey: ['nodes'] })
+      qc.invalidateQueries({ queryKey: ['agents'] })
+      push('node renamed', 'ok', 'node://')
+      onClose()
+    },
+    onError: (error: Error) => push(error.message, 'err', 'node://'),
+  })
+  return (
+    <Dialog
+      title="Rename node"
+      scheme="PATCH /nodes/{id}"
+      onClose={onClose}
+      width={480}
+      footer={
+        <div className="right">
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" disabled={!name.trim() || name.trim() === node.name || rename.isPending} onClick={() => rename.mutate()}>
+            {rename.isPending ? 'saving...' : 'Save name'}
+          </Button>
+        </div>
+      }
+    >
+      <Field label="Node name" hint="Display name in WireWarp. The host keeps its hostname.">
+        <Input aria-label="Node name" value={name} maxLength={255} disabled={rename.isPending} onChange={(event) => setName(event.target.value)} autoFocus />
+      </Field>
+    </Dialog>
   )
 }
 

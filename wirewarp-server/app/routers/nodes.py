@@ -22,7 +22,7 @@ from app.models.tunnel_client import TunnelClient
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
 from app.models.user import User
-from app.realtime.events import emit_edge_changed, emit_security_changed
+from app.realtime.events import emit_agent_changed, emit_edge_changed, emit_security_changed
 from app.schemas.crowdsec import CrowdSecSnapshotRead
 from app.schemas.edge import (
     EdgeNodePolicyRead,
@@ -37,6 +37,7 @@ from app.schemas.nodes import (
     NodeEdgeCapabilitiesUpdate,
     NodeEdgeRead,
     NodeRead,
+    NodeRename,
 )
 from app.schemas.security import (
     EdgeRouteConfigRead,
@@ -537,6 +538,22 @@ async def get_node(
     agent = await db.get(Agent, agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="Node not found")
+    return await _node_read(agent, db)
+
+
+@router.patch("/{agent_id}", response_model=NodeRead)
+async def rename_node(
+    agent_id: uuid.UUID,
+    body: NodeRename,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("admin", "operator")),
+):
+    agent = await db.get(Agent, agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    agent.name = body.name
+    await db.commit()
+    emit_agent_changed()
     return await _node_read(agent, db)
 
 
