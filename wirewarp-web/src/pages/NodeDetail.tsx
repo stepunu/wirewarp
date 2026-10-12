@@ -19,6 +19,8 @@ import { WgPeerTable } from '../components/WgPeerTable'
 import { NodeLifecycleActions, ServerConfigurationPanel } from '../components/NodeManagement'
 import { HealEventList } from './TunnelServerDetail'
 import { CreateSiteDialog } from './SecuritySites'
+import { GatewaySiteLinks } from './SiteLinks'
+import { EdgeMigrationDialog, EdgeMigrationPanel } from '../components/EdgeMigrations'
 import { EditProtectionDialog } from './SecurityProtections'
 import { useRole } from '../hooks/useRole'
 import { useToast } from '../components/Toasts'
@@ -37,7 +39,7 @@ import type {
   LanClient,
   TunnelClientSummary,
   TraefikImportPreview,
-  TraefikImportRequest,
+  NodeTraefikImportRequest,
   WafMode,
 } from '../lib/types'
 
@@ -58,6 +60,7 @@ type Tab =
   | 'peers'
   | 'lan'
   | 'egress'
+  | 'links'
   | 'attachment'
   | 'activity'
   | 'audit'
@@ -95,6 +98,18 @@ function tabsFor(node: Node): { value: Tab; label: string; count?: number }[] {
       { value: 'attachment', label: 'Configuration' },
       { value: 'lan', label: 'LAN' },
       { value: 'egress', label: 'Egress' },
+      { value: 'links', label: 'Links' },
+      { value: 'overview', label: 'Edge Overview' },
+      { value: 'routes', label: 'Routes' },
+      { value: 'security', label: 'Security' },
+      { value: 'rate', label: 'Rate Limits' },
+      { value: 'access', label: 'Access' },
+      { value: 'tls', label: 'TLS' },
+      { value: 'origin', label: 'Origin' },
+      { value: 'headers', label: 'Headers & Transforms' },
+      { value: 'cache', label: 'Cache' },
+      { value: 'import', label: 'Import/Diff' },
+      { value: 'advanced', label: 'Advanced' },
       { value: 'activity', label: 'Activity' },
       { value: 'audit', label: 'Audit' },
     ]
@@ -111,6 +126,7 @@ export default function NodeDetail() {
   const [tab, setTab] = useState<Tab>('overview')
   const nodeQ = useQuery({ queryKey: ['nodes', id], queryFn: () => nodesApi.get(id!), enabled: !!id })
   const node = nodeQ.data
+  const edgeEligible = node?.role === 'server' || node?.role === 'gateway'
   const activeTabs = useMemo(() => (node ? tabsFor(node) : []), [node])
   const activeTab: Tab = activeTabs.some((t) => t.value === tab) ? tab : (activeTabs[0]?.value ?? 'edge')
 
@@ -137,49 +153,49 @@ export default function NodeDetail() {
   const edgeQ = useQuery({
     queryKey: ['node-edge', id],
     queryFn: () => nodesApi.edge(id!),
-    enabled: !!id && node?.role === 'server',
+    enabled: !!id && edgeEligible,
   })
   const edgeActive = edgeQ.data?.mode === 'security_edge' && edgeQ.data.state === 'enabled'
   const routeTabs: Tab[] = ['routes', 'security', 'rate', 'tls', 'origin', 'headers', 'cache', 'import', 'advanced']
   const routesQ = useQuery({
     queryKey: ['edge-routes', id],
     queryFn: () => nodesApi.edgeRoutes(id!),
-    enabled: !!id && node?.role === 'server' && edgeActive && routeTabs.includes(activeTab),
+    enabled: !!id && edgeEligible && edgeActive && routeTabs.includes(activeTab),
   })
   const profilesQ = useQuery({
     queryKey: ['edge-profiles'],
     queryFn: edgeApi.profiles,
-    enabled: node?.role === 'server' && edgeActive && ['routes', 'security', 'rate', 'tls', 'origin', 'headers', 'advanced'].includes(activeTab),
+    enabled: edgeEligible && edgeActive && ['routes', 'security', 'rate', 'tls', 'origin', 'headers', 'advanced'].includes(activeTab),
   })
   const policyQ = useQuery({
     queryKey: ['edge-policy', id],
     queryFn: () => nodesApi.edgePolicy(id!),
-    enabled: !!id && node?.role === 'server' && edgeActive && ['overview', 'rate', 'advanced'].includes(activeTab),
+    enabled: !!id && edgeEligible && edgeActive && ['overview', 'rate', 'advanced'].includes(activeTab),
   })
   const accessQ = useQuery({
     queryKey: ['node-edge-access', id],
     queryFn: () => nodesApi.edgeAccessEvents(id!, { limit: 100 }),
-    enabled: !!id && node?.role === 'server' && edgeActive && activeTab === 'access',
+    enabled: !!id && edgeEligible && edgeActive && activeTab === 'access',
   })
   const cacheQ = useQuery({
     queryKey: ['edge-cache', id],
     queryFn: () => nodesApi.edgeCache(id!),
-    enabled: !!id && node?.role === 'server' && activeTab === 'cache',
+    enabled: !!id && edgeEligible && edgeActive && activeTab === 'cache',
   })
   const renderedQ = useQuery({
     queryKey: ['edge-rendered', id],
     queryFn: () => nodesApi.edgeRendered(id!),
-    enabled: !!id && node?.role === 'server' && edgeActive && ['import', 'advanced'].includes(activeTab),
+    enabled: !!id && edgeEligible && edgeActive && ['import', 'advanced'].includes(activeTab),
   })
   const versionsQ = useQuery({
     queryKey: ['edge-versions', id],
     queryFn: () => nodesApi.edgeVersions(id!),
-    enabled: !!id && node?.role === 'server' && edgeActive && ['import', 'advanced'].includes(activeTab),
+    enabled: !!id && edgeEligible && edgeActive && ['import', 'advanced'].includes(activeTab),
   })
   const fragmentsQ = useQuery({
     queryKey: ['edge-fragments', id],
     queryFn: () => nodesApi.edgeFragments(id!),
-    enabled: !!id && node?.role === 'server' && edgeActive && activeTab === 'advanced',
+    enabled: !!id && edgeEligible && edgeActive && activeTab === 'advanced',
   })
   const peersQ = useQuery({
     queryKey: ['wg-peers', 'node', id],
@@ -239,7 +255,22 @@ export default function NodeDetail() {
 
       <Tabs<Tab> value={activeTab} onChange={setTab} tabs={activeTabs} />
 
+      {edgeEligible && (activeTab === 'overview' || routeTabs.includes(activeTab) || activeTab === 'access') && (
+        <div className="card" style={{ marginBottom: 14 }}><div className="card-body">
+          {node.role === 'gateway'
+            ? `Gateway edge: WireWarp manages Traefik, TLS, WAF, and cache on this LAN gateway. LAN-only routes need no VPS attachment. ${edgeQ.data?.public_ingress_available ? 'Public HTTPS crosses the selected VPS relay and WireGuard tunnel. TLS, WAF, cache, and client identity remain on this gateway.' : 'Public HTTPS requires an initialized gateway attachment and VPS WireGuard peer.'}`
+            : 'VPS edge: Traefik, TLS, WAF, and cache run on this public server. Routes use public ingress and a tunnel attachment. LAN-only listeners require a gateway edge.'}
+        </div></div>
+      )}
+      {edgeQ.isError && edgeEligible && <div className="card"><div className="card-body" role="alert">Could not load Security Edge: {edgeQ.error.message}</div></div>}
+      {routesQ.isError && routeTabs.includes(activeTab) && <div className="card"><div className="card-body" role="alert">Could not load routes: {routesQ.error.message}</div></div>}
+      {policyQ.isError && <div className="card"><div className="card-body" role="alert">Could not load edge policy: {policyQ.error.message}</div></div>}
+      {activeTab === 'access' && accessQ.isError && <div className="card"><div className="card-body" role="alert">Could not load access events: {accessQ.error.message}</div></div>}
+      {activeTab === 'cache' && cacheQ.isError && <div className="card"><div className="card-body" role="alert">Could not load cache: {cacheQ.error.message}</div></div>}
+      {['import', 'advanced'].includes(activeTab) && renderedQ.isError && <div className="card"><div className="card-body" role="alert">Could not load rendered config: {renderedQ.error.message}</div></div>}
+
       {activeTab === 'overview' && <EdgeOverviewPanel node={node} edge={edgeQ.data} policy={policyQ.data} loading={edgeQ.isLoading} />}
+      {activeTab === 'links' && node.role === 'gateway' && <GatewaySiteLinks gatewayId={node.agent_id} />}
       {activeTab === 'configuration' && (
         <ServerConfigurationPanel
           server={server}
@@ -247,30 +278,32 @@ export default function NodeDetail() {
           error={serverQ.error}
         />
       )}
-      {node.role === 'server' && routeTabs.includes(activeTab) && !edgeActive && (
+      {edgeEligible && (routeTabs.includes(activeTab) || activeTab === 'access') && !edgeActive && !edgeQ.isError && (
         <EdgeEnablePanel node={node} edge={edgeQ.data} loading={edgeQ.isLoading} />
       )}
-      {activeTab === 'routes' && edgeActive && (
+      {activeTab === 'routes' && edgeActive && !routesQ.isError && (
         <EdgeRoutesPanel
           node={node}
           routes={routesQ.data ?? []}
           profiles={profilesQ.data ?? []}
           loading={routesQ.isLoading}
+          publicIngressAvailable={edgeQ.data?.public_ingress_available ?? node.role === 'server'}
         />
       )}
-      {activeTab === 'security' && edgeActive && (
+      {activeTab === 'security' && edgeActive && !routesQ.isError && (
         <SecurityEdgePanel node={node} edge={edgeQ.data} routes={routesQ.data ?? []} loading={edgeQ.isLoading || routesQ.isLoading} />
       )}
-      {activeTab === 'rate' && edgeActive && (
+      {activeTab === 'routes' && edgeActive && <EdgeMigrationPanel nodeId={node.agent_id} />}
+      {activeTab === 'rate' && edgeActive && !routesQ.isError && (
         <EdgeRateLimitsPanel node={node} edge={edgeQ.data} policy={policyQ.data} routes={routesQ.data ?? []} />
       )}
       {activeTab === 'access' && edgeActive && (
         <EdgeAccessPanel node={node} events={accessQ.data?.items ?? []} loading={accessQ.isLoading} />
       )}
-      {activeTab === 'tls' && edgeActive && <EdgeRoutePolicyPanel title="TLS" routes={routesQ.data ?? []} kind="tls" />}
-      {activeTab === 'origin' && edgeActive && <EdgeRoutePolicyPanel title="Origin" routes={routesQ.data ?? []} kind="origin" />}
-      {activeTab === 'headers' && edgeActive && <EdgeRoutePolicyPanel title="Headers & Transforms" routes={routesQ.data ?? []} kind="headers" />}
-      {activeTab === 'cache' && edgeActive && (
+      {activeTab === 'tls' && edgeActive && !routesQ.isError && <EdgeRoutePolicyPanel title="TLS" routes={routesQ.data ?? []} kind="tls" />}
+      {activeTab === 'origin' && edgeActive && !routesQ.isError && <EdgeRoutePolicyPanel title="Origin" routes={routesQ.data ?? []} kind="origin" />}
+      {activeTab === 'headers' && edgeActive && !routesQ.isError && <EdgeRoutePolicyPanel title="Headers & Transforms" routes={routesQ.data ?? []} kind="headers" />}
+      {activeTab === 'cache' && edgeActive && !routesQ.isError && (
         <EdgeCachePanel node={node} cache={cacheQ.data} routes={routesQ.data ?? []} loading={cacheQ.isLoading} />
       )}
       {activeTab === 'import' && edgeActive && (
@@ -341,10 +374,10 @@ function componentName(name: string): string {
   return name.replace(/_/g, '-')
 }
 
-function EdgeLifecycleActions({ node, edge }: { node: Node; edge?: NodeEdge }) {
+function EdgeLifecycleActions({ node, edge, allowGateway = false, unsaved = false }: { node: Node; edge?: NodeEdge; allowGateway?: boolean; unsaved?: boolean }) {
   const qc = useQueryClient()
   const push = useToast()
-  const { canMutate } = useRole()
+  const { isAdmin: canMutate } = useRole()
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['nodes'] })
     qc.invalidateQueries({ queryKey: ['node-edge', node.agent_id] })
@@ -352,25 +385,25 @@ function EdgeLifecycleActions({ node, edge }: { node: Node; edge?: NodeEdge }) {
   }
   const install = useMutation({
     mutationFn: () => nodesApi.installEdge(node.agent_id),
-    onSuccess: () => {
+    onSuccess: result => {
       invalidate()
-      push('edge install queued', 'ok', 'edge://')
+      push(result.sent ? 'edge install queued' : 'edge settings saved; node is disconnected', result.sent ? 'ok' : 'info', 'edge://')
     },
     onError: (e: Error) => push(e.message, 'err', 'edge://'),
   })
   const enable = useMutation({
     mutationFn: () => nodesApi.enableEdge(node.agent_id),
-    onSuccess: () => {
+    onSuccess: result => {
       invalidate()
-      push('edge enable queued', 'ok', 'edge://')
+      push(result.sent ? 'edge enable queued' : 'edge settings saved; node is disconnected', result.sent ? 'ok' : 'info', 'edge://')
     },
     onError: (e: Error) => push(e.message, 'err', 'edge://'),
   })
   const disable = useMutation({
     mutationFn: () => nodesApi.disableEdge(node.agent_id),
-    onSuccess: () => {
+    onSuccess: result => {
       invalidate()
-      push('edge disable queued', 'ok', 'edge://')
+      push(result.sent ? 'edge disable queued' : 'edge disabled in control; node is disconnected', result.sent ? 'ok' : 'info', 'edge://')
     },
     onError: (e: Error) => push(e.message, 'err', 'edge://'),
   })
@@ -385,16 +418,16 @@ function EdgeLifecycleActions({ node, edge }: { node: Node; edge?: NodeEdge }) {
   const pending = install.isPending || enable.isPending || disable.isPending || reconcile.isPending
   const active = isEdgeActive(edge)
 
-  if (!canMutate) return null
+  if (!canMutate || (node.role === 'gateway' && !allowGateway)) return null
   return (
     <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-      <Button size="sm" variant="primary" leading={<Ic.download />} onClick={() => install.mutate()} disabled={pending}>
+      <Button size="sm" variant="primary" leading={<Ic.download />} onClick={() => install.mutate()} disabled={pending || unsaved}>
         install
       </Button>
-      <Button size="sm" variant="ghost" leading={<Ic.play />} onClick={() => enable.mutate()} disabled={pending || active}>
+      <Button size="sm" variant="ghost" leading={<Ic.play />} onClick={() => enable.mutate()} disabled={pending || active || unsaved}>
         enable
       </Button>
-      <Button size="sm" variant="ghost" leading={<Ic.refresh />} onClick={() => reconcile.mutate()} disabled={pending || !active}>
+      <Button size="sm" variant="ghost" leading={<Ic.refresh />} onClick={() => reconcile.mutate()} disabled={pending || !active || unsaved}>
         reconcile
       </Button>
       <Button size="sm" variant="danger" onClick={() => disable.mutate()} disabled={pending || !active}>
@@ -402,6 +435,47 @@ function EdgeLifecycleActions({ node, edge }: { node: Node; edge?: NodeEdge }) {
       </Button>
     </div>
   )
+}
+
+function GatewayEdgeListeners({ node, edge }: { node: Node; edge: NodeEdge }) {
+  return <GatewayEdgeListenerEditor key={`${edge.lan_bind_ip}:${edge.public_bind_ip}`} node={node} edge={edge} />
+}
+
+function GatewayEdgeListenerEditor({ node, edge }: { node: Node; edge: NodeEdge }) {
+  const qc = useQueryClient()
+  const push = useToast()
+  const { isAdmin: canMutate } = useRole()
+  const [lanIp, setLanIp] = useState(edge.lan_bind_ip ?? '')
+  const gatewayQ = useQuery({ queryKey: ['tunnel-client-summary', node.tunnel_client_id], queryFn: () => tcApi.summary(node.tunnel_client_id!), enabled: !!node.tunnel_client_id })
+  const unsaved = lanIp.trim() !== (edge.lan_bind_ip ?? '')
+  const save = useMutation({
+    mutationFn: () => nodesApi.updateEdgeCapabilities(node.agent_id, { lan_bind_ip: lanIp.trim() || null }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['nodes'] })
+      qc.invalidateQueries({ queryKey: ['node-edge', node.agent_id] })
+      push('gateway listeners saved', 'ok', 'edge://')
+    },
+    onError: (e: Error) => push(e.message, 'err', 'edge://'),
+  })
+  return <div className="card">
+    <div className="card-head"><div className="title">Gateway edge listeners</div></div>
+    <div className="card-body">
+      <div className="pf-attach-grid">
+        <Field label="LAN listener IP" hint={`Must match the gateway configured LAN IP${gatewayQ.data?.lan_ip ? ` (${gatewayQ.data.lan_ip})` : ''}. Traefik binds LAN HTTP and HTTPS to this address.`}>
+          <Input mono value={lanIp} onChange={e => setLanIp(e.target.value)} placeholder={gatewayQ.data?.lan_ip || 'Gateway configured LAN IP'} disabled={!canMutate || save.isPending} />
+        </Field>
+        <Field label="Public relay listener IP" hint="Assigned from the selected gateway tunnel attachment when a public route is saved. This listener stays separate from LAN routes.">
+          <Input mono value={edge.public_bind_ip || ''} placeholder="assigned when publishing" readOnly />
+        </Field>
+      </div>
+      {unsaved && <p role="status">Save listener changes before installing, enabling, or reconciling the edge.</p>}
+      {save.isError && <p role="alert" style={{ color: 'var(--err)' }}>{save.error.message}</p>}
+      <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginTop: 14 }}>
+        {canMutate && <Button onClick={() => save.mutate()} disabled={save.isPending || !lanIp.trim() || !unsaved}>{save.isPending ? 'Saving…' : 'Save listener IPs'}</Button>}
+        <EdgeLifecycleActions node={node} edge={edge} allowGateway unsaved={unsaved || save.isPending} />
+      </div>
+    </div>
+  </div>
 }
 
 function EdgeOverviewPanel({
@@ -441,9 +515,11 @@ function EdgeOverviewPanel({
               HTTP edge controls are paused: {edge.unavailable_reason}.
             </div>
           )}
+          {edge.runtime_mode === 'relay_only' && <p>Security Edge is disabled. Traefik continues encrypted gateway relays. WAF, cache, and certificates for these routes run on their gateway, not this VPS.</p>}
         </div>
       </div>
-      {!isEdgeActive(edge) && <EdgeEnablePanel node={node} edge={edge} loading={false} />}
+      {node.role === 'gateway' && <GatewayEdgeListeners node={node} edge={edge} />}
+      {node.role === 'server' && !isEdgeActive(edge) && <EdgeEnablePanel node={node} edge={edge} loading={false} />}
       <div className="card">
         <div className="card-head">
           <div className="title">Component Health</div>
@@ -489,6 +565,7 @@ function EdgeOverviewPanel({
 
 function EdgeEnablePanel({ node, edge, loading }: { node: Node; edge?: NodeEdge; loading: boolean }) {
   if (loading && !edge) return <div className="card"><div className="card-body">Loading...</div></div>
+  if (node.role === 'gateway') return edge ? <GatewayEdgeListeners node={node} edge={edge} /> : null
   return (
     <div className="card">
       <div className="card-head">
@@ -527,16 +604,19 @@ function EdgeRoutesPanel({
   routes,
   profiles,
   loading,
+  publicIngressAvailable,
 }: {
   node: Node
   routes: EdgeRoute[]
   profiles: EdgeProfile[]
   loading: boolean
+  publicIngressAvailable: boolean
 }) {
   const qc = useQueryClient()
   const push = useToast()
-  const { canMutate } = useRole()
+  const { isAdmin: canMutate } = useRole()
   const [showCreate, setShowCreate] = useState(false)
+  const [migrationRoute, setMigrationRoute] = useState<EdgeRoute | null>(null)
   const toggle = useMutation({
     mutationFn: (route: EdgeRoute) => edgeApi.updateRoute(route.id, { enabled: !route.enabled }),
     onSuccess: () => {
@@ -565,6 +645,7 @@ function EdgeRoutesPanel({
           <thead>
             <tr>
               <th>Domain</th>
+              <th>Visibility</th>
               <th>Upstream</th>
               <th>Profile</th>
               <th>WAF</th>
@@ -576,24 +657,26 @@ function EdgeRoutesPanel({
           <tbody>
             {routes.length === 0 && (
               <tr>
-                <td colSpan={canMutate ? 7 : 6}>
+                <td colSpan={canMutate ? 8 : 7}>
                   <div className="tbl-empty"><h3>{loading ? 'Loading...' : 'No routes'}</h3></div>
                 </td>
               </tr>
             )}
             {routes.map((route) => (
               <tr key={route.id}>
-                <td className="mono">{route.domain || '—'}</td>
-                <td className="mono">{route.destination_ip}:{route.destination_port}</td>
-                <td className="mono">{profileLabel(profiles, route.profile_id)}</td>
-                <td><Badge tone={policyLabel(route.effective, 'waf_mode') === 'block' ? 'ok' : 'neutral'}>{policyLabel(route.effective, 'waf_mode')}</Badge></td>
-                <td className="mono">{policyLabel(route.effective, 'rate_limit_rps', 'inherit')}</td>
-                <td><Badge tone={route.enabled ? 'ok' : 'neutral'}>{route.enabled ? 'active' : 'off'}</Badge></td>
+                <td data-label="Domain" className="mono"><div style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{route.domain || '—'}{route.inherit_node_policy === false && <div className="scheme" style={{ whiteSpace: 'normal', color: 'var(--fg-2)' }}>Policy preserved from source; target node defaults do not apply.</div>}</div></td>
+                <td data-label="Visibility"><Badge tone={route.visibility === 'lan_only' ? 'peer' : 'info'}>{route.visibility === 'lan_only' ? 'LAN only' : route.visibility === 'both' ? 'LAN + public' : 'Public only'}</Badge></td>
+                <td data-label="Upstream" className="mono">{route.destination_ip}:{route.destination_port}</td>
+                <td data-label="Profile" className="mono">{route.inherit_node_policy === false ? 'Preserved source policy' : profileLabel(profiles, route.profile_id)}</td>
+                <td data-label="WAF"><Badge tone={policyLabel(route.effective, 'waf_mode') === 'block' ? 'ok' : 'neutral'}>{policyLabel(route.effective, 'waf_mode')}</Badge></td>
+                <td data-label="Rate" className="mono">{policyLabel(route.effective, 'rate_limit_rps', 'inherit')}</td>
+                <td data-label="State"><Badge tone={route.enabled ? 'ok' : 'neutral'}>{route.enabled ? 'active' : 'off'}</Badge></td>
                 {canMutate && (
                   <td>
                     <Button size="sm" variant="ghost" onClick={() => toggle.mutate(route)} disabled={toggle.isPending}>
                       {route.enabled ? 'disable' : 'enable'}
                     </Button>
+                    {node.role === 'server' && route.enabled && route.visibility === 'public_only' && <Button size="sm" variant="ghost" onClick={() => setMigrationRoute(route)}>Migrate to gateway</Button>}
                   </td>
                 )}
               </tr>
@@ -601,10 +684,13 @@ function EdgeRoutesPanel({
           </tbody>
         </table>
       </div>
+      {migrationRoute && <EdgeMigrationDialog source={node} route={migrationRoute} onClose={() => setMigrationRoute(null)} />}
       {showCreate && (
         <RouteUpsertDialog
           node={node}
           profiles={profiles}
+          publicIngressAvailable={publicIngressAvailable}
+          existingPublicAttachment={routes.find(route => route.visibility !== 'lan_only' && route.attachment_id)?.attachment_id || undefined}
           onClose={() => setShowCreate(false)}
           onSaved={() => {
             qc.invalidateQueries({ queryKey: ['edge-routes', node.agent_id] })
@@ -622,31 +708,47 @@ function RouteUpsertDialog({
   profiles,
   onClose,
   onSaved,
+  publicIngressAvailable = false,
+  existingPublicAttachment,
 }: {
   node: Node
   profiles: EdgeProfile[]
   onClose: () => void
   onSaved: () => void
+  publicIngressAvailable?: boolean
+  existingPublicAttachment?: string
 }) {
   const push = useToast()
   const [domain, setDomain] = useState('')
-  const [attachmentId, setAttachmentId] = useState('')
+  const [attachmentId, setAttachmentId] = useState(existingPublicAttachment || '')
   const [destinationIp, setDestinationIp] = useState('')
   const [destinationPort, setDestinationPort] = useState('8080')
   const [profileId, setProfileId] = useState('')
   const [wafMode, setWafMode] = useState<WafMode>('observe')
+  const gateway = node.role === 'gateway'
+  const [visibility, setVisibility] = useState<'lan_only' | 'public_only' | 'both'>(gateway ? 'lan_only' : 'public_only')
+  const publishing = gateway && visibility !== 'lan_only'
   const attachmentsQ = useQuery({
-    queryKey: ['tunnel-client-attachments', 'server', node.tunnel_server_id],
-    queryFn: () => attachApi.list({ tunnel_server_id: node.tunnel_server_id! }),
-    enabled: !!node.tunnel_server_id,
+    queryKey: ['tunnel-client-attachments', gateway ? 'client' : 'server', gateway ? node.tunnel_client_id : node.tunnel_server_id],
+    queryFn: () => attachApi.list(gateway ? { tunnel_client_id: node.tunnel_client_id! } : { tunnel_server_id: node.tunnel_server_id! }),
+    enabled: gateway ? publishing && !!node.tunnel_client_id : !!node.tunnel_server_id,
   })
-  const activeAttachment = attachmentId || attachmentsQ.data?.[0]?.id || ''
+  const eligibleAttachments = (attachmentsQ.data ?? []).filter(attachment => !gateway || !!attachment.wg_public_key)
+  const activeAttachment = attachmentId || eligibleAttachments[0]?.id || ''
+  const relayServersQ = useQuery({ queryKey: ['tunnel-servers'], queryFn: tsApi.list, enabled: publishing })
+  const relayNodesQ = useQuery({ queryKey: ['nodes'], queryFn: nodesApi.list, enabled: publishing })
+  const gatewayQ = useQuery({ queryKey: ['tunnel-client-summary', node.tunnel_client_id], queryFn: () => tcApi.summary(node.tunnel_client_id!), enabled: gateway && !!node.tunnel_client_id })
+  const selectedAttachment = eligibleAttachments.find(attachment => attachment.id === activeAttachment)
+  const relayServer = relayServersQ.data?.find(server => server.id === selectedAttachment?.tunnel_server_id)
   const save = useMutation({
     mutationFn: () =>
-      nodesApi.upsertEdgeRouteByDomain(node.agent_id, domain, {
-        attachment_id: activeAttachment,
+      nodesApi.createEdgeRoute(node.agent_id, {
+        domain: domain.trim(),
+        ...(gateway && !publishing ? {} : { attachment_id: activeAttachment }),
+        ...(publishing ? { public_port: 443 } : {}),
+        visibility,
         enabled: true,
-        destination_ip: destinationIp,
+        destination_ip: destinationIp.trim(),
         destination_port: Number(destinationPort),
         profile_id: profileId || null,
         upstream_scheme: 'http',
@@ -662,17 +764,17 @@ function RouteUpsertDialog({
   return (
     <Dialog
       title="Add route"
-      scheme="PUT /api/nodes/{node}/edge/routes/by-domain/{domain}"
+      scheme={gateway ? publishing ? 'VPS relay → gateway edge' : 'LAN gateway route' : 'Public VPS route'}
       onClose={onClose}
       footer={
         <>
-          <span className="left">{activeAttachment ? 'ready' : 'select an attachment'}</span>
+          <span className="left">{gateway && !publishing ? 'No tunnel attachment needed' : activeAttachment ? publishing ? 'HTTPS via relay' : 'ready' : 'select an attachment'}</span>
           <div className="right">
             <Button variant="ghost" onClick={onClose}>Cancel</Button>
             <Button
               variant="primary"
               onClick={() => save.mutate()}
-              disabled={save.isPending || !domain || !activeAttachment || !destinationIp || !destinationPort}
+              disabled={save.isPending || !domain.trim() || ((!gateway || publishing) && !selectedAttachment) || (publishing && !publicIngressAvailable) || !destinationIp.trim() || !Number.isInteger(Number(destinationPort)) || Number(destinationPort) < 1 || Number(destinationPort) > 65535}
             >
               {save.isPending ? 'saving...' : 'Save'}
             </Button>
@@ -681,25 +783,40 @@ function RouteUpsertDialog({
       }
     >
       <div className="col" style={{ gap: 14 }}>
+        {save.isError && <div role="alert" style={{ color: 'var(--err)' }}>{save.error.message}</div>}
+        {attachmentsQ.isError && (!gateway || publishing) && <div role="alert" style={{ color: 'var(--err)' }}>Could not load attachments: {attachmentsQ.error.message}</div>}
+        {publishing && relayServersQ.isError && <div role="alert">Could not load relay addresses: {relayServersQ.error.message}</div>}
         <div className="pf-attach-grid">
           <Field label="Domain">
             <Input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="app.example.com" mono />
           </Field>
-          <Field label="Attachment">
+          {(!gateway || publishing) && <Field label={publishing ? 'Relay attachment' : 'Attachment'} hint={publishing ? 'Select this gateway attachment to the public VPS. All public routes on this gateway share one relay attachment.' : undefined}>
             <Select value={activeAttachment} onChange={(e) => setAttachmentId(e.target.value)}>
-              {attachmentsQ.data?.length ? null : <option value="">No attachments</option>}
-              {(attachmentsQ.data ?? []).map((attachment) => (
-                <option key={attachment.id} value={attachment.id}>{attachment.wg_interface} ({attachment.tunnel_ip})</option>
+              {eligibleAttachments.length ? null : <option value="">{attachmentsQ.isLoading ? 'Loading attachments…' : 'No initialized attachments'}</option>}
+              {eligibleAttachments.map((attachment) => (
+                <option key={attachment.id} value={attachment.id} disabled={publishing && !!existingPublicAttachment && attachment.id !== existingPublicAttachment}>{attachment.wg_interface} ({attachment.tunnel_ip}){publishing ? ` → ${relayNodesQ.data?.find(node => node.tunnel_server_id === attachment.tunnel_server_id)?.name || 'VPS relay'} (${relayServersQ.data?.find(server => server.id === attachment.tunnel_server_id)?.primary_ip || 'address loading'})` : ''}</option>
               ))}
             </Select>
-          </Field>
+          </Field>}
         </div>
+        <Field label="Visibility" hint={gateway ? 'LAN only uses the local listener. Public only uses the VPS relay. Both allows these two paths. TLS, WAF, and cache run on this gateway.' : 'VPS edges serve public routes. Use a gateway edge for LAN-only services.'}>
+          <Select value={visibility} onChange={e => setVisibility(e.target.value as typeof visibility)}>
+            <option value="lan_only" disabled={!gateway}>LAN only</option>
+            <option value="public_only" disabled={gateway && !publicIngressAvailable}>Public only</option>
+            <option value="both" disabled={!gateway || !publicIngressAvailable}>LAN + public</option>
+          </Select>
+        </Field>
+        {gateway && !publicIngressAvailable && <p>Public publishing requires an initialized gateway attachment and VPS WireGuard peer.</p>}
+        {gateway && <div className="card"><div className="card-body col" style={{ gap: 10 }}>
+          {visibility !== 'public_only' && <p>LAN DNS: resolve <span className="mono">{domain.trim() || 'this hostname'}</span> to <span className="mono">{gatewayQ.data?.lan_ip || node.lan_bind_ip || 'the gateway LAN IP'}</span>.{visibility === 'lan_only' ? ' This LAN-only route is excluded from public ingress, including Host and SNI requests.' : ''}</p>}
+          {publishing && <><p>Public DNS: point <span className="mono">{domain.trim() || 'this hostname'}</span> to <span className="mono">{relayServer?.primary_ip || 'the selected VPS public IPv4 address'}</span>. HTTPS uses TCP 443. The VPS redirects HTTP 80 to HTTPS. IPv6 publishing and HTTP/3 are unsupported.</p><p>The public listener uses <span className="mono">{selectedAttachment?.tunnel_ip || 'the selected attachment tunnel IP'}</span>. Publishing is stored as pending if the VPS is offline. Verify applied state before switching DNS.</p></>}
+        </div></div>}
         <div className="pf-attach-grid">
           <Field label="Origin IP">
             <Input value={destinationIp} onChange={(e) => setDestinationIp(e.target.value)} placeholder="192.168.1.10" mono />
           </Field>
           <Field label="Origin port">
-            <Input type="number" value={destinationPort} onChange={(e) => setDestinationPort(e.target.value)} mono />
+            <Input type="number" min={1} max={65535} value={destinationPort} onChange={(e) => setDestinationPort(e.target.value)} mono />
           </Field>
         </div>
         <div className="pf-attach-grid">
@@ -735,7 +852,7 @@ function SecurityEdgePanel({
 }) {
   const qc = useQueryClient()
   const push = useToast()
-  const { canMutate } = useRole()
+  const { isAdmin: canMutate } = useRole()
   const [showCreate, setShowCreate] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [editing, setEditing] = useState<Site | null>(null)
@@ -789,17 +906,26 @@ function SecurityEdgePanel({
         <SitesTable sites={edge.sites} canMutate={canMutate} onEdit={setEditing} />
       </div>
       <EdgeEventGroups rows={eventsQ.data ?? []} loading={eventsQ.isLoading} />
-      {showCreate && (
+      {showCreate && node.role === 'gateway' && (
+        <RouteUpsertDialog node={node} profiles={[]} publicIngressAvailable={edge.public_ingress_available} existingPublicAttachment={routes.find(route => route.visibility !== 'lan_only' && route.attachment_id)?.attachment_id || undefined} onClose={() => setShowCreate(false)} onSaved={() => {
+          qc.invalidateQueries({ queryKey: ['node-edge', node.agent_id] })
+          qc.invalidateQueries({ queryKey: ['edge-routes', node.agent_id] })
+          setShowCreate(false)
+        }} />
+      )}
+      {showCreate && node.role !== 'gateway' && (
         <CreateSiteDialog
+          node={node}
           onClose={() => setShowCreate(false)}
           onSaved={() => qc.invalidateQueries({ queryKey: ['node-edge', node.agent_id] })}
         />
       )}
-      {showImport && node.tunnel_server_id && (
+      {showImport && (
         <TraefikImportDialog
           agentId={node.agent_id}
-          serverId={node.tunnel_server_id}
-          attachments={attachmentsQ.data ?? []}
+          serverId={node.tunnel_server_id || undefined}
+          gateway={node.role === 'gateway'}
+          attachments={(attachmentsQ.data ?? []).filter(attachment => node.role !== 'gateway' || attachment.wg_public_key)}
           onClose={() => setShowImport(false)}
           onImported={() => {
             qc.invalidateQueries({ queryKey: ['node-edge', node.agent_id] })
@@ -833,7 +959,7 @@ function ServerEdgeDefaults({
   const [burst, setBurst] = useState(policy.rate_limit_burst ? String(policy.rate_limit_burst) : '')
   const update = useMutation({
     mutationFn: () =>
-      secApi.updateServerEdgePolicy(policy.server_id, {
+      nodesApi.updateEdgeGlobalPolicy(node.agent_id, {
         rate_limit_rps: rps ? Number(rps) : null,
         rate_limit_burst: burst ? Number(burst) : null,
       }),
@@ -849,7 +975,7 @@ function ServerEdgeDefaults({
     <div className="card" style={{ marginBottom: 14 }}>
       <div className="card-head">
         <div>
-          <div className="title">VPS Edge Defaults</div>
+          <div className="title">{node.role === 'gateway' ? 'Gateway Edge Defaults' : 'VPS Edge Defaults'}</div>
           <div className="scheme">applied before each site policy</div>
         </div>
         {canMutate && (
@@ -860,7 +986,7 @@ function ServerEdgeDefaults({
       </div>
       <div className="card-body">
         <div className="pf-attach-grid">
-          <Field label="Global rate limit" hint="Requests per second across every router on this VPS">
+          <Field label="Global rate limit" hint="Requests per second across every router on this node">
             <Input
               type="number"
               value={rps}
@@ -897,7 +1023,7 @@ function EdgeRateLimitsPanel({
   policy?: EdgeNodePolicy
   routes: EdgeRoute[]
 }) {
-  const { canMutate } = useRole()
+  const { isAdmin: canMutate } = useRole()
   if (!edge) return null
   return (
     <div className="col" style={{ gap: 14 }}>
@@ -1061,7 +1187,7 @@ function EdgeCachePanel({
 }) {
   const qc = useQueryClient()
   const push = useToast()
-  const { canMutate } = useRole()
+  const { isAdmin: canMutate } = useRole()
   const invalidate = () => qc.invalidateQueries({ queryKey: ['edge-cache', node.agent_id] })
   const mode = typeof cache?.policy.mode === 'string' ? cache.policy.mode : 'off'
   const update = useMutation({
@@ -1156,12 +1282,12 @@ function EdgeImportDiffPanel({
 }) {
   const qc = useQueryClient()
   const push = useToast()
-  const { canMutate } = useRole()
+  const { isAdmin: canMutate } = useRole()
   const [showImport, setShowImport] = useState(false)
   const attachmentsQ = useQuery({
-    queryKey: ['tunnel-client-attachments', 'server', node.tunnel_server_id],
-    queryFn: () => attachApi.list({ tunnel_server_id: node.tunnel_server_id! }),
-    enabled: !!node.tunnel_server_id && showImport,
+    queryKey: ['tunnel-client-attachments', 'import', node.agent_id],
+    queryFn: () => attachApi.list(node.role === 'gateway' ? { tunnel_client_id: node.tunnel_client_id! } : { tunnel_server_id: node.tunnel_server_id! }),
+    enabled: !!(node.tunnel_server_id || node.role === 'gateway' && node.tunnel_client_id) && showImport,
   })
   const rollback = useMutation({
     mutationFn: (version: EdgeConfigVersion) => nodesApi.rollbackEdgeVersion(node.agent_id, version.id),
@@ -1220,10 +1346,11 @@ function EdgeImportDiffPanel({
           </table>
         </div>
       </div>
-      {showImport && node.tunnel_server_id && (
+      {showImport && (
         <TraefikImportDialog
           agentId={node.agent_id}
-          serverId={node.tunnel_server_id}
+          serverId={node.tunnel_server_id || undefined}
+          gateway={node.role === 'gateway'}
           attachments={attachmentsQ.data ?? []}
           onClose={() => setShowImport(false)}
           onImported={() => {
@@ -1254,7 +1381,7 @@ function EdgeAdvancedPanel({
 }) {
   const qc = useQueryClient()
   const push = useToast()
-  const { canMutate } = useRole()
+  const { isAdmin: canMutate } = useRole()
   const [showFragment, setShowFragment] = useState(false)
   const validate = useMutation({
     mutationFn: () => nodesApi.validateEdge(node.agent_id),
@@ -1381,7 +1508,7 @@ function FragmentDialog({ node, onClose, onSaved }: { node: Node; onClose: () =>
             <Select value={fragmentType} onChange={(e) => setFragmentType(e.target.value)}>
               <option value="middleware">middleware</option>
               <option value="service">service</option>
-              <option value="router">router</option>
+              <option value="router" disabled={node.role === 'gateway'}>router{node.role === 'gateway' ? ' (use managed routes)' : ''}</option>
               <option value="tls">tls</option>
               <option value="transport">transport</option>
             </Select>
@@ -1449,18 +1576,21 @@ function EdgeEventGroups({ rows, loading }: { rows: SecurityEventGroup[]; loadin
 function TraefikImportDialog({
   agentId,
   serverId,
+  gateway,
   attachments,
   onClose,
   onImported,
 }: {
-  agentId?: string
-  serverId: string
+  agentId: string
+  serverId?: string
+  gateway: boolean
   attachments: import('../lib/types').TunnelClientAttachment[]
   onClose: () => void
   onImported: () => void
 }) {
   const push = useToast()
   const [attachmentId, setAttachmentId] = useState('')
+  const [visibility, setVisibility] = useState<'lan_only' | 'public_only' | 'both'>(gateway ? 'lan_only' : 'public_only')
   const [domainSuffix, setDomainSuffix] = useState('ww.step1.ro')
   const [content, setContent] = useState('')
   const [middlewaresContent, setMiddlewaresContent] = useState('')
@@ -1469,9 +1599,11 @@ function TraefikImportDialog({
   const [preview, setPreview] = useState<TraefikImportPreview | null>(null)
   const activeAttachment = attachmentId || attachments[0]?.id || ''
 
-  const requestBody = (): TraefikImportRequest => ({
+  const needsAttachment = visibility !== 'lan_only'
+  const requestBody = (): NodeTraefikImportRequest => ({
     server_id: serverId,
-    attachment_id: activeAttachment,
+    attachment_id: needsAttachment ? activeAttachment : undefined,
+    visibility,
     content,
     middlewares_content: middlewaresContent || null,
     content_format: 'auto',
@@ -1481,12 +1613,12 @@ function TraefikImportDialog({
   })
 
   const previewImport = useMutation({
-    mutationFn: () => agentId ? nodesApi.previewTraefikImport(agentId, requestBody()) : secApi.previewTraefikImport(requestBody()),
-    onSuccess: setPreview,
+    mutationFn: (body: NodeTraefikImportRequest) => nodesApi.previewTraefikImport(agentId, body),
+    onSuccess: (result, body) => { if (JSON.stringify(body) === JSON.stringify(requestBody())) setPreview(result) },
     onError: (e: Error) => push(e.message, 'err', 'import://'),
   })
   const applyImport = useMutation({
-    mutationFn: () => agentId ? nodesApi.applyTraefikImport(agentId, requestBody(), 'apply') : secApi.importTraefik(requestBody()),
+    mutationFn: () => nodesApi.applyTraefikImport(agentId, requestBody(), 'apply'),
     onSuccess: (result) => {
       push(`imported ${result.created} new, updated ${result.updated}, skipped ${result.skipped}`, 'ok', 'import://')
       onImported()
@@ -1510,15 +1642,15 @@ function TraefikImportDialog({
             <Button variant="ghost" onClick={onClose}>Cancel</Button>
             <Button
               variant="ghost"
-              onClick={() => previewImport.mutate()}
-              disabled={previewImport.isPending || !content || !activeAttachment}
+              onClick={() => previewImport.mutate(requestBody())}
+              disabled={previewImport.isPending || !content || (needsAttachment && !activeAttachment)}
             >
               {previewImport.isPending ? 'previewing...' : 'Preview'}
             </Button>
             <Button
               variant="primary"
               onClick={() => applyImport.mutate()}
-              disabled={applyImport.isPending || !preview?.summary.importable || !activeAttachment}
+              disabled={applyImport.isPending || !preview?.summary.importable || (needsAttachment && !activeAttachment)}
             >
               {applyImport.isPending ? 'importing...' : 'Import'}
             </Button>
@@ -1528,25 +1660,34 @@ function TraefikImportDialog({
     >
       <div className="col" style={{ gap: 14 }}>
         <div className="pf-attach-grid">
+          {gateway && <Field label="Route visibility" hint="Managed listeners replace the imported entrypoints.">
+            <Select value={visibility} onChange={e => { setVisibility(e.target.value as typeof visibility); setPreview(null) }}>
+              <option value="lan_only">LAN only</option>
+              <option value="public_only">Public through VPS relay</option>
+              <option value="both">LAN and public</option>
+            </Select>
+          </Field>}
+          {needsAttachment && (
           <Field label="Attachment" hint="Gateway path these imported upstreams use">
-            <Select value={activeAttachment} onChange={(e) => setAttachmentId(e.target.value)}>
+            <Select value={activeAttachment} onChange={(e) => { setAttachmentId(e.target.value); setPreview(null) }}>
               {attachments.length === 0 && <option value="">No attachments</option>}
               {attachments.map((a) => (
                 <option key={a.id} value={a.id}>{a.wg_interface} ({a.tunnel_ip})</option>
               ))}
             </Select>
           </Field>
+          )}
           <Field label="Template domain" hint="Replaces {{ domain }} in Ansible/Jinja templates">
-            <Input value={domainSuffix} onChange={(e) => setDomainSuffix(e.target.value)} placeholder="ww.step1.ro" mono />
+            <Input value={domainSuffix} onChange={(e) => { setDomainSuffix(e.target.value); setPreview(null) }} placeholder="ww.step1.ro" mono />
           </Field>
         </div>
         <div className="row" style={{ gap: 18, flexWrap: 'wrap' }}>
           <label className="row" style={{ gap: 8, fontSize: 13 }}>
-            <Toggle on={activate} onChange={setActivate} />
+            <Toggle on={activate} onChange={value => { setActivate(value); setPreview(null) }} />
             activate imported routes
           </label>
           <label className="row" style={{ gap: 8, fontSize: 13 }}>
-            <Toggle on={overwrite} onChange={setOverwrite} />
+            <Toggle on={overwrite} onChange={value => { setOverwrite(value); setPreview(null) }} />
             update existing domains
           </label>
         </div>
@@ -1574,6 +1715,8 @@ function TraefikImportDialog({
             placeholder={'http:\\n  middlewares:\\n    secured:\\n      chain:\\n        middlewares:\\n          - internal-only@file'}
           />
         </Field>
+        {previewImport.isError && <div role="alert">Preview failed: {previewImport.error.message}</div>}
+        {applyImport.isError && <div role="alert">Import failed: {applyImport.error.message}</div>}
         {preview && <TraefikImportPreviewTable preview={preview} />}
       </div>
     </Dialog>
@@ -1582,15 +1725,16 @@ function TraefikImportDialog({
 
 function TraefikImportPreviewTable({ preview }: { preview: TraefikImportPreview }) {
   return (
-    <div className="tbl-wrap" style={{ maxHeight: 260, overflow: 'auto' }}>
+    <div className="tbl-wrap" style={{ overflowX: 'auto' }}>
       <table className="tbl">
         <thead>
           <tr>
             <th>Router</th>
             <th>Domain</th>
             <th>Upstream</th>
+            <th>Planned change</th>
             <th>Mapped</th>
-            <th>Warnings</th>
+            <th style={{ width: '30%' }}>Warnings</th>
           </tr>
         </thead>
         <tbody>
@@ -1608,11 +1752,12 @@ function TraefikImportPreviewTable({ preview }: { preview: TraefikImportPreview 
             ].filter((item): item is string => Boolean(item))
             return (
               <tr key={route.router_name} style={{ opacity: route.importable ? 1 : 0.55 }}>
-                <td className="mono">{route.router_name}</td>
-                <td className="mono">{route.domain || '—'}</td>
-                <td className="mono">
+                <td className="mono" style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{route.router_name}</td>
+                <td className="mono" style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{route.domain || '—'}</td>
+                <td className="mono" style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
                   {route.destination_ip ? `${route.upstream_scheme}://${route.destination_ip}:${route.destination_port}` : '—'}
                 </td>
+                <td>{route.action || 'import'}{route.visibility && <div className="scheme">{route.visibility}</div>}{route.managed_entrypoints?.length ? <div className="mono">{route.managed_entrypoints.join(', ')}</div> : null}</td>
                 <td>
                   <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
                     {mapped.length === 0 && <span className="scheme">none</span>}
@@ -1623,8 +1768,7 @@ function TraefikImportPreviewTable({ preview }: { preview: TraefikImportPreview 
                   <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
                     {route.importable && route.warnings.length === 0 && <Badge tone="ok">ready</Badge>}
                     {!route.importable && <Badge tone="err">blocked</Badge>}
-                    {route.warnings.slice(0, 2).map((warning) => <Badge key={warning} tone="warn">{warning}</Badge>)}
-                    {route.warnings.length > 2 && <Badge tone="neutral">+{route.warnings.length - 2}</Badge>}
+                    {route.warnings.map((warning) => <div key={warning} style={{ whiteSpace: 'normal', overflowWrap: 'anywhere', color: 'var(--warn)', fontSize: 12 }}>{warning}</div>)}
                   </div>
                 </td>
               </tr>
@@ -1651,6 +1795,7 @@ function SitesTable({
         <thead>
           <tr>
             <th>Domain</th>
+            <th>Visibility</th>
             <th>Upstream</th>
             <th>WAF</th>
             <th>Protections</th>
@@ -1660,7 +1805,7 @@ function SitesTable({
         </thead>
         <tbody>
           {sites.length === 0 && (
-            <tr><td colSpan={canMutate ? 6 : 5}><div className="tbl-empty"><h3>No sites</h3></div></td></tr>
+            <tr><td colSpan={canMutate ? 7 : 6}><div className="tbl-empty"><h3>No sites</h3></div></td></tr>
           )}
           {sites.map((s) => {
             const cfg = s.edge_config
@@ -1676,17 +1821,18 @@ function SitesTable({
             ].filter((item): item is string => Boolean(item))
             return (
               <tr key={s.id}>
-                <td className="mono">{s.domain || '—'}</td>
-                <td className="mono">{cfg?.upstream_scheme || 'http'}://{s.destination_ip}:{s.destination_port}</td>
-                <td><Badge tone={cfg?.waf_mode === 'block' ? 'ok' : cfg?.waf_mode === 'observe' ? 'warn' : 'neutral'}>{cfg?.waf_mode || 'off'}</Badge></td>
-                <td>
+                <td data-label="Domain" className="mono">{s.domain || '—'}</td>
+                <td data-label="Visibility"><Badge tone={s.visibility === 'lan_only' ? 'peer' : 'info'}>{s.visibility === 'lan_only' ? 'LAN only' : s.visibility === 'both' ? 'LAN + public' : 'Public only'}</Badge></td>
+                <td data-label="Upstream" className="mono">{cfg?.upstream_scheme || 'http'}://{s.destination_ip}:{s.destination_port}</td>
+                <td data-label="WAF"><Badge tone={cfg?.waf_mode === 'block' ? 'ok' : cfg?.waf_mode === 'observe' ? 'warn' : 'neutral'}>{cfg?.waf_mode || 'off'}</Badge></td>
+                <td data-label="Protections">
                   <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
                     {protections.length === 0 && <span className="scheme">none</span>}
                     {protections.map((p) => <Badge key={p} tone="info">{p}</Badge>)}
                     {!!s.effective_policy?.warnings.length && <Badge tone="warn">import warnings</Badge>}
                   </div>
                 </td>
-                <td><Badge tone={s.active ? 'ok' : 'neutral'}>{s.active ? 'active' : 'off'}</Badge></td>
+                <td data-label="State"><Badge tone={s.active ? 'ok' : 'neutral'}>{s.active ? 'active' : 'off'}</Badge></td>
                 {canMutate && (
                   <td>
                     <Button size="sm" variant="ghost" onClick={() => onEdit(s)}>

@@ -161,6 +161,7 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
+        {role && ['admin', 'operator', 'viewer'].includes(role) && <><div className="sb-section">Networking</div><nav className="sb-nav"><NavLink to="/site-links" className={({ isActive }) => `sb-link ${isActive ? 'active' : ''}`}><Ic.forward s={14} /><span>Site Links</span></NavLink></nav></>}
         {visibleSecurityNav.length > 0 && (
           <>
             <div className="sb-section">Security</div>

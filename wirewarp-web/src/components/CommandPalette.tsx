@@ -37,6 +37,7 @@ export function CommandPalette({
       { section: 'Navigate', icon: Ic.agent, label: 'Nodes', hint: 'g n', action: () => navigate('/nodes') },
       { section: 'Navigate', icon: Ic.host, label: 'LAN clients', hint: 'g l', action: () => navigate('/lan-clients') },
       { section: 'Navigate', icon: Ic.forward, label: 'Port forwards', hint: 'g p', action: () => navigate('/port-forwards') },
+      { section: 'Navigate', icon: Ic.forward, label: 'Site Links', hint: '', action: () => navigate('/site-links') },
       { section: 'Navigate', icon: Ic.settings, label: 'Settings', hint: '', action: () => navigate('/settings') },
       { section: 'Actions', icon: Ic.plus, label: 'New port forward', hint: 'N', action: () => navigate('/port-forwards?new=1') },
       ...(canIssueAgentToken

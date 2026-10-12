@@ -10,6 +10,7 @@ import Login from './pages/Login'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
 import Nodes from './pages/Nodes'
+import SiteLinks from './pages/SiteLinks'
 import NodeDetail from './pages/NodeDetail'
 import LanClients from './pages/LanClients'
 import PortForwards from './pages/PortForwards'
@@ -143,6 +144,8 @@ export default function App() {
                 }
               />
               <Route path="agents" element={<Navigate to="/nodes" replace />} />
+              <Route path="site-links" element={<RoleGuard allow={['admin', 'operator', 'viewer']}><SiteLinks /></RoleGuard>} />
+              <Route path="site-links/:id" element={<RoleGuard allow={['admin', 'operator', 'viewer']}><SiteLinks /></RoleGuard>} />
               <Route path="agents/:id" element={<NavigateToNodeParam />} />
               <Route
                 path="tunnel-servers"

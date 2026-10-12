@@ -262,6 +262,11 @@ export interface SystemSettings {
   letsencrypt_dns_resolvers: string[]
   letsencrypt_use_staging: boolean
   letsencrypt_cloudflare_token_set: boolean
+  letsencrypt_rfc2136_nameserver: string | null
+  letsencrypt_rfc2136_tsig_key: string | null
+  letsencrypt_rfc2136_tsig_algorithm: string
+  letsencrypt_rfc2136_secret_set: boolean
+  letsencrypt_dns_delay_seconds: number
 }
 
 export interface SystemSettingsUpdate {
@@ -284,9 +289,125 @@ export interface SystemSettingsUpdate {
   letsencrypt_dns_resolvers?: string[] | null
   letsencrypt_use_staging?: boolean | null
   letsencrypt_cloudflare_api_token?: string | null
+  letsencrypt_rfc2136_nameserver?: string | null
+  letsencrypt_rfc2136_tsig_key?: string | null
+  letsencrypt_rfc2136_tsig_algorithm?: string
+  letsencrypt_rfc2136_tsig_secret?: string | null
+  letsencrypt_dns_delay_seconds?: number
+}
+
+export interface AcmeDnsTestStarted {
+  status: 'running'
+  sent: true
+  command_id: string
+}
+
+export interface AcmeDnsTestStatus {
+  status: 'pending' | 'success' | 'failure'
+  command_id: string
+  result: {
+    ok: boolean
+    stage: string
+    detail: string
+    record_name: string
+    cleanup_ok: boolean
+    authoritative_results: { server: string; ok: boolean; detail: string }[]
+  } | null
 }
 
 export type NodeRole = 'server' | 'gateway' | 'client'
+
+export type SiteLinkDirection = 'a_to_b' | 'b_to_a' | 'bidirectional'
+export interface SiteLinkRetainedState {
+  agent_id: string
+  name: string
+  node_role: 'hub' | 'gateway'
+  connected: boolean
+  revision: number
+  desired_hash: string
+  phase: string
+  last_error: string | null
+  command_id: string | null
+}
+export interface SiteLinkRetainedStates {
+  states: SiteLinkRetainedState[]
+  can_teardown: boolean
+  has_links: boolean
+}
+export interface SiteLinkTeardownRequest {
+  confirm_restore_normal_forwarding: true
+  expected_states: Pick<SiteLinkRetainedState, 'agent_id' | 'revision' | 'desired_hash'>[]
+}
+export interface SiteLinkOptions {
+  gateways: {
+    agent_id: string
+    name: string
+    advertised_subnets: string[]
+    lan_ip: string | null
+    connected: boolean
+    attachments: { attachment_id: string; hub_agent_id: string; hub_name: string; initialized: boolean; hub_connected: boolean }[]
+  }[]
+}
+export interface SiteLinkAccessRule {
+  direction: 'a_to_b' | 'b_to_a'
+  destination_cidrs: string[]
+  protocol: 'tcp' | 'udp' | 'icmp' | 'any'
+  destination_ports: number[]
+}
+export interface SiteLinkCreate {
+  name: string
+  site_a_gateway_id: string
+  site_b_gateway_id: string
+  site_a_attachment_id: string
+  site_b_attachment_id: string
+  hub_agent_id: string
+  site_a_subnets: string[]
+  site_b_subnets: string[]
+  direction: SiteLinkDirection
+  snat_at_a: boolean
+  snat_at_b: boolean
+  access_rules: SiteLinkAccessRule[]
+  enabled: boolean
+}
+export type SiteLinkUpdate = Partial<Pick<SiteLinkCreate, 'name' | 'direction' | 'snat_at_a' | 'snat_at_b' | 'access_rules' | 'enabled'>>
+export interface SiteLink extends SiteLinkCreate {
+  id: string
+  revision: number
+  phase: 'applied' | 'pending'
+  path: string[]
+  agent_states: {
+    agent_id: string
+    connected: boolean
+    revision: number | null
+    desired_hash: string | null
+    applied_revision: number | null
+    applied_hash: string | null
+    phase: string
+    last_error: string | null
+    last_seen: string | null
+    command_id: string | null
+  }[]
+  lan_routing_prerequisite: { status: 'unverified'; detail: string }
+  snat_tradeoff: string
+}
+export interface SiteLinkProbeRequest {
+  direction: 'a_to_b' | 'b_to_a'
+  destination_ip: string
+  destination_port: number
+}
+export interface SiteLinkProbeStarted {
+  command_id: string
+  sent: boolean
+  status: 'pending' | 'disconnected'
+  scope: 'source_gateway_only'
+}
+export interface SiteLinkProbeStatus {
+  command_id: string
+  status: 'pending' | 'success' | 'failure' | 'timeout' | 'disconnected'
+  result: { connected: boolean; error: string | null; duration_ms: number } | null
+  scope: 'source_gateway_only'
+  lan_routing_prerequisite: 'unverified'
+}
 export type EdgeMode = 'tcp_udp_only' | 'security_edge'
 export type EdgeState = 'enabled' | 'disabled'
 export type EdgeInstallPhase = 'disabled' | 'pending' | 'healthy' | 'degraded' | 'unknown'
@@ -319,6 +440,10 @@ export interface Node {
   edge_state: EdgeState | null
   edge_install_phase: EdgeInstallPhase | null
   edge_components: Record<string, EdgeComponent>
+  lan_bind_ip: string | null
+  public_bind_ip: string | null
+  relay_enabled: boolean
+  runtime_mode: 'security_edge' | 'relay_only' | 'disabled'
 }
 
 export type VpnProtocol = 'tcp' | 'udp' | 'icmp' | 'any'
@@ -420,6 +545,48 @@ export type ServiceKind = 'raw' | 'http'
 export type SecurityEventSource = 'crowdsec' | 'appsec' | 'traefik'
 export type EdgePolicy = Record<string, unknown>
 
+export interface EdgeMigrationRequest {
+  source_route_id: string
+  target_agent_id: string
+  target_attachment_id: string
+  visibility: 'public_only' | 'both'
+}
+
+export interface EdgeMigrationStageRequest extends EdgeMigrationRequest {
+  expected_source_fingerprint: string
+}
+
+export interface EdgeMigrationPreview extends Omit<EdgeMigrationRequest, 'target_attachment_id'> {
+  source_agent_id: string
+  domain: string
+  destination_ip: string
+  destination_port: number
+  effective_policy: EdgePolicy
+  preservation: Record<string, string | number | boolean>
+  planned_changes: { public_bind_ip: { before: string | null; after: string; assigned_on_provision: boolean } }
+  source_fingerprint: string
+}
+
+export interface EdgeMigration extends EdgeMigrationRequest {
+  id: string
+  source_agent_id: string
+  stage_route_id: string | null
+  domain: string | null
+  phase: 'staged' | 'provisioning' | 'switched' | 'completed' | 'rollback_pending' | 'rolled_back' | 'cancel_pending' | 'canceled'
+  revision: number
+  stage_desired_hash: string | null
+  stage_version_id: string | null
+  test_command_id: string | null
+  ready_to_switch: boolean
+  runtime_verified: boolean
+  last_error: string | null
+  effective_policy: EdgePolicy
+  prerequisites: string[]
+  stage_applied: boolean
+  probe_status: 'not_run' | 'pending' | 'verified' | 'failed' | 'stale'
+  readiness_detail: string | null
+}
+
 export interface EdgeRouteConfig {
   id: string
   port_forward_id: string
@@ -447,7 +614,7 @@ export interface EdgeRouteConfig {
 }
 
 export interface ServerEdgePolicy {
-  server_id: string
+  server_id: string | null
   agent_id: string
   rate_limit_rps: number | null
   rate_limit_burst: number | null
@@ -464,12 +631,13 @@ export interface SiteEffectivePolicy {
 
 export interface Site {
   id: string
-  attachment_id: string
+  attachment_id: string | null
   tunnel_server_ip_id: string | null
   server_id: string | null
   agent_id: string | null
   protocol: 'tcp' | 'udp'
-  public_port: number
+  public_port: number | null
+  visibility: 'lan_only' | 'public_only' | 'both'
   public_port_end: number | null
   destination_ip: string
   destination_port: number
@@ -529,6 +697,11 @@ export interface NodeEdgeCapabilities {
   last_error: string | null
   unavailable_reason: string | null
   components: Record<string, EdgeComponent>
+  lan_bind_ip: string | null
+  public_bind_ip: string | null
+  public_ingress_available: boolean
+  relay_enabled: boolean
+  runtime_mode: 'security_edge' | 'relay_only' | 'disabled'
 }
 
 export interface NodeEdgeActionResult {
@@ -583,12 +756,16 @@ export interface EdgeNodePolicyUpdate {
 export interface EdgeRoute {
   id: string
   node_id: string
-  server_id: string
-  attachment_id: string
+  server_id: string | null
+  attachment_id: string | null
+  tunnel_server_ip_id: string | null
+  public_port: number | null
+  visibility: 'lan_only' | 'public_only' | 'both'
   domain: string | null
   enabled: boolean
   priority: number
   profile_id: string | null
+  inherit_node_policy: boolean
   destination_ip: string
   destination_port: number
   description: string | null
@@ -599,6 +776,10 @@ export interface EdgeRoute {
 
 export interface EdgeRouteUpsert {
   attachment_id?: string | null
+  domain?: string | null
+  visibility?: 'lan_only' | 'public_only' | 'both'
+  tunnel_server_ip_id?: string | null
+  public_port?: number | null
   enabled?: boolean | null
   priority?: number | null
   profile_id?: string | null
@@ -756,6 +937,8 @@ export interface EdgeConfigVersion {
 }
 
 export interface EdgeDesiredStateResponse {
+  contains_credentials?: boolean
+  sensitive_values_redacted?: boolean
   dry_run: boolean
   changed: boolean
   validation_errors: EdgePolicy[]
@@ -812,11 +995,28 @@ export interface SecurityTopEntry {
 }
 
 export interface SecurityServerStatus {
-  server_id: string
-  agent_id: string | null
-  name: string | null
+  server_id: string | null
+  agent_id: string
+  name: string
+  role: 'server' | 'gateway'
+  placement: 'gateway_edge' | 'vps_edge' | 'vps_relay'
+  runtime_mode: 'security_edge' | 'relay_only' | 'disabled'
+  edge_mode: EdgeMode
+  edge_state: EdgeState
+  edge_install_phase: EdgeInstallPhase
+  routes_count: number
+  active_routes_count: number
+  relay_routes_count: number
   crowdsec_running: boolean
   traefik_running: boolean
+  crowdsec_installed: boolean | null
+  traefik_installed: boolean | null
+  crowdsec_phase: string | null
+  traefik_phase: string | null
+  crowdsec_error: string | null
+  traefik_error: string | null
+  crowdsec_updated_at: string | null
+  traefik_updated_at: string | null
 }
 
 export interface SecurityOverview {
@@ -826,6 +1026,8 @@ export interface SecurityOverview {
   top_attackers: SecurityTopEntry[]
   top_scenarios: SecurityTopEntry[]
   servers: SecurityServerStatus[]
+  http_routes_count: number
+  active_http_routes_count: number
 }
 
 export interface TraefikStatus {
@@ -852,6 +1054,11 @@ export interface NodeEdge {
   crowdsec: CrowdSecStatus
   traefik: TraefikStatus
   sites: Site[]
+  lan_bind_ip: string | null
+  public_bind_ip: string | null
+  public_ingress_available: boolean
+  relay_enabled: boolean
+  runtime_mode: 'security_edge' | 'relay_only' | 'disabled'
 }
 
 export interface TraefikImportRoutePreview {
@@ -869,6 +1076,9 @@ export interface TraefikImportRoutePreview {
   warnings: string[]
   importable: boolean
   existing_site_id: string | null
+  visibility?: 'lan_only' | 'public_only' | 'both'
+  managed_entrypoints?: string[]
+  action?: 'create' | 'update' | 'skip'
 }
 
 export interface TraefikImportPreview {
@@ -890,6 +1100,13 @@ export interface TraefikImportRequest {
   domain_suffix?: string | null
   activate?: boolean
   overwrite?: boolean
+}
+
+export type NodeTraefikImportRequest = Omit<TraefikImportRequest, 'server_id' | 'attachment_id'> & {
+  server_id?: string
+  attachment_id?: string
+  visibility?: 'lan_only' | 'public_only' | 'both'
+  tunnel_server_ip_id?: string | null
 }
 
 export interface TraefikImportResult extends TraefikImportPreview {

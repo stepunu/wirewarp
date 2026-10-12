@@ -27,7 +27,7 @@ function ComponentHealthBadges({ node }: { node: Node }) {
     .map((name) => components[name])
     .filter((component): component is NonNullable<typeof component> => Boolean(component))
 
-  if (node.role !== 'server') return <span className="scheme">—</span>
+  if (node.role === 'client') return <span className="scheme">—</span>
   if (visible.length === 0) return <span className="scheme">no edge components</span>
 
   return (
@@ -295,7 +295,7 @@ function NodeRow({
         <div className="scheme">{node.public_ip || node.agent_id.slice(0, 12)}</div>
       </td>
       <td>
-        {node.role === 'server' ? (
+        {node.role !== 'client' ? (
           <div className="col" style={{ gap: 4 }}>
             <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
               <Badge tone={node.edge_mode === 'security_edge' ? 'accent' : 'neutral'}>

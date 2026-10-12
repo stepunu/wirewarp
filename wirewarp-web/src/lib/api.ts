@@ -113,6 +113,14 @@ export const agents = {
 }
 
 // Unified Nodes
+export const edgeMigrations = {
+  list: () => request<import('./types').EdgeMigration[]>('/edge/migrations'),
+  preview: (data: import('./types').EdgeMigrationRequest) => request<import('./types').EdgeMigrationPreview>('/edge/migrations/preview', { method: 'POST', body: JSON.stringify(data) }),
+  stage: (data: import('./types').EdgeMigrationStageRequest) => request<import('./types').EdgeMigration>('/edge/migrations', { method: 'POST', body: JSON.stringify(data) }),
+  action: (id: string, action: 'provision' | 'test' | 'finalize' | 'rollback' | 'cancel', revision: number) => request<import('./types').EdgeMigration>(`/edge/migrations/${id}/${action}`, { method: 'POST', body: JSON.stringify({ revision }) }),
+  discard: (id: string, revision: number) => request<void>(`/edge/migrations/${id}?revision=${revision}`, { method: 'DELETE' }),
+}
+
 export const nodes = {
   list: () => request<import('./types').Node[]>('/nodes'),
   get: (id: string) => request<import('./types').Node>(`/nodes/${id}`),
@@ -126,7 +134,7 @@ export const nodes = {
     request<import('./types').NodeEdgeCapabilities>(`/nodes/${id}/edge/capabilities`),
   updateEdgeCapabilities: (
     id: string,
-    data: { mode?: import('./types').EdgeMode; state?: import('./types').EdgeState; components?: Record<string, string> },
+    data: { mode?: import('./types').EdgeMode; state?: import('./types').EdgeState; components?: Record<string, string>; lan_bind_ip?: string | null; public_bind_ip?: string | null },
   ) =>
     request<import('./types').NodeEdgeCapabilities>(`/nodes/${id}/edge/capabilities`, {
       method: 'PUT',
@@ -146,6 +154,11 @@ export const nodes = {
     request<import('./types').EdgeNodePolicy>(`/nodes/${id}/edge/policy`),
   updateEdgePolicy: (id: string, data: import('./types').EdgeNodePolicyUpdate) =>
     request<import('./types').EdgeNodePolicy>(`/nodes/${id}/edge/policy`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  updateEdgeGlobalPolicy: (id: string, data: { rate_limit_rps?: number | null; rate_limit_burst?: number | null }) =>
+    request<import('./types').ServerEdgePolicy>(`/nodes/${id}/edge/global-policy`, {
       method: 'PATCH',
       body: JSON.stringify(data),
     }),
@@ -230,8 +243,8 @@ export const nodes = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  edgeDesiredState: (id: string) =>
-    request<import('./types').EdgeDesiredStateResponse>(`/nodes/${id}/edge/desired-state`),
+  edgeDesiredState: (id: string, params: { include_sensitive?: boolean } = {}) =>
+    request<import('./types').EdgeDesiredStateResponse>(`/nodes/${id}/edge/desired-state${qs(params)}`),
   putEdgeDesiredState: (
     id: string,
     data: Record<string, unknown>,
@@ -241,14 +254,14 @@ export const nodes = {
       `/nodes/${id}/edge/desired-state${qs(params)}`,
       { method: 'PUT', body: JSON.stringify(data) },
     ),
-  previewTraefikImport: (id: string, data: Omit<import('./types').TraefikImportRequest, 'server_id'> & { server_id?: string }) =>
+  previewTraefikImport: (id: string, data: import('./types').NodeTraefikImportRequest) =>
     request<import('./types').TraefikImportPreview>(`/nodes/${id}/edge/import/traefik/preview`, {
       method: 'POST',
       body: JSON.stringify(data),
     }),
   applyTraefikImport: (
     id: string,
-    data: Omit<import('./types').TraefikImportRequest, 'server_id'> & { server_id?: string },
+    data: import('./types').NodeTraefikImportRequest,
     mode: 'apply' | 'upsert' = 'apply',
   ) =>
     request<import('./types').TraefikImportResult>(`/nodes/${id}/edge/import/traefik/${mode}`, {
@@ -314,6 +327,19 @@ export const tunnelServerIPs = {
 }
 
 // Tunnel Clients
+export const siteLinks = {
+  retainedState: () => request<import('./types').SiteLinkRetainedStates>('/site-links/retained-state'),
+  teardown: (data: import('./types').SiteLinkTeardownRequest) => request<import('./types').SiteLinkRetainedStates>('/site-links/teardown', { method: 'POST', body: JSON.stringify(data) }),
+  options: () => request<import('./types').SiteLinkOptions>('/site-links/options'),
+  list: () => request<import('./types').SiteLink[]>('/site-links'),
+  get: (id: string) => request<import('./types').SiteLink>(`/site-links/${id}`),
+  create: (data: import('./types').SiteLinkCreate) => request<import('./types').SiteLink>('/site-links', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: import('./types').SiteLinkUpdate) => request<import('./types').SiteLink>(`/site-links/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  del: (id: string) => request<void>(`/site-links/${id}`, { method: 'DELETE' }),
+  test: (id: string, data: import('./types').SiteLinkProbeRequest) => request<import('./types').SiteLinkProbeStarted>(`/site-links/${id}/test`, { method: 'POST', body: JSON.stringify(data) }),
+  testStatus: (id: string, commandId: string) => request<import('./types').SiteLinkProbeStatus>(`/site-links/${id}/test/${commandId}`),
+}
+
 export const tunnelClients = {
   list: () => request<import('./types').TunnelClient[]>('/tunnel-clients'),
   get: (id: string) => request<import('./types').TunnelClient>(`/tunnel-clients/${id}`),
@@ -474,6 +500,13 @@ export const portForwards = {
 // Settings
 export const settings = {
   get: () => request<import('./types').SystemSettings>('/settings'),
+  testAcmeDns: (data: { agent_id: string; domain: string }) =>
+    request<import('./types').AcmeDnsTestStarted>('/settings/acme/test', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  acmeDnsTestStatus: (commandId: string) =>
+    request<import('./types').AcmeDnsTestStatus>(`/settings/acme/test/${commandId}`),
   update: (data: import('./types').SystemSettingsUpdate) =>
     request<import('./types').SystemSettings>('/settings', {
       method: 'PATCH',

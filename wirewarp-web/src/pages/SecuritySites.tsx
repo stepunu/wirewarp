@@ -1,7 +1,9 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   security as secApi,
+  nodes as nodesApi,
   tunnelClientAttachments as attachApi,
 } from '../lib/api'
 import {
@@ -17,7 +19,7 @@ import {
 import { Ic } from '../components/icons'
 import { useRole } from '../hooks/useRole'
 import { useToast } from '../components/Toasts'
-import type { Site, SiteCreate, WafMode } from '../lib/types'
+import type { Node, Site, SiteCreate, WafMode } from '../lib/types'
 
 const WAF_TONES: Record<WafMode, 'ok' | 'warn' | 'neutral'> = {
   block: 'ok',
@@ -34,7 +36,7 @@ const WAF_LABELS: Record<WafMode, string> = {
 export default function SecuritySites() {
   const [filter, setFilter] = useState('')
   const [showCreate, setShowCreate] = useState(false)
-  const { canMutate } = useRole()
+  const { isAdmin: canMutate } = useRole()
 
   const q = useQuery({
     queryKey: ['sites'],
@@ -43,6 +45,7 @@ export default function SecuritySites() {
   })
 
   const sites = q.data ?? []
+  const nodesQ = useQuery({ queryKey: ['nodes'], queryFn: nodesApi.list })
 
   const filtered = sites.filter((s) => {
     if (!filter) return true
@@ -89,17 +92,21 @@ export default function SecuritySites() {
           <thead>
             <tr>
               <th>Domain</th>
+              <th>Edge node</th>
+              <th>Visibility</th>
               <th>Upstream</th>
               <th style={{ width: 100 }}>Run mode</th>
               <th>Features</th>
               <th style={{ width: 80 }}>State</th>
               <th style={{ width: 100 }}>Added</th>
+              {canMutate && <th />}
             </tr>
           </thead>
           <tbody>
-            {filtered.length === 0 && (
+            {q.isError && <tr><td colSpan={canMutate ? 9 : 8}><div className="card-body" role="alert" style={{ color: 'var(--err)' }}>Could not load sites: {q.error.message}</div></td></tr>}
+            {!q.isError && filtered.length === 0 && (
               <tr>
-                <td colSpan={6}>
+                <td colSpan={canMutate ? 9 : 8}>
                   <div className="tbl-empty">
                     <h3>{q.isLoading ? 'Loading…' : 'No sites'}</h3>
                     <p>Add an HTTP site to route it through the Traefik WAF.</p>
@@ -108,7 +115,7 @@ export default function SecuritySites() {
               </tr>
             )}
             {filtered.map((s) => (
-              <SiteRow key={s.id} site={s} canMutate={canMutate} />
+              <SiteRow key={s.id} site={s} canMutate={canMutate} node={nodesQ.data?.find(node => node.agent_id === s.agent_id)} />
             ))}
           </tbody>
         </table>
@@ -119,7 +126,7 @@ export default function SecuritySites() {
   )
 }
 
-function SiteRow({ site, canMutate }: { site: Site; canMutate: boolean }) {
+function SiteRow({ site, canMutate, node }: { site: Site; canMutate: boolean; node?: Node }) {
   const qc = useQueryClient()
   const push = useToast()
   const cfg = site.edge_config
@@ -148,12 +155,14 @@ function SiteRow({ site, canMutate }: { site: Site; canMutate: boolean }) {
 
   return (
     <tr style={{ opacity: site.active ? 1 : 0.55 }}>
-      <td className="mono">{site.domain ?? '—'}</td>
-      <td className="mono">{site.destination_ip}:{site.destination_port}</td>
-      <td>
+      <td className="mono" data-label="Domain">{site.domain ?? '—'}</td>
+      <td data-label="Edge node">{site.agent_id ? <Link to={`/nodes/${site.agent_id}`}>{node?.name || site.agent_id.slice(0, 8)}{node ? ` (${node.role})` : ''}</Link> : '—'}</td>
+      <td data-label="Visibility"><Badge tone={site.visibility === 'lan_only' ? 'peer' : 'info'}>{site.visibility === 'lan_only' ? 'LAN only' : site.visibility === 'both' ? 'LAN + public' : 'Public only'}</Badge></td>
+      <td className="mono" data-label="Upstream">{site.destination_ip}:{site.destination_port}</td>
+      <td data-label="Run mode">
         <Badge tone={WAF_TONES[wafMode]}>{WAF_LABELS[wafMode]}</Badge>
       </td>
-      <td>
+      <td data-label="Features">
         <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
           {features.length === 0 && (
             <span style={{ color: 'var(--fg-3)', fontSize: 12 }}>none</span>
@@ -163,10 +172,10 @@ function SiteRow({ site, canMutate }: { site: Site; canMutate: boolean }) {
           ))}
         </div>
       </td>
-      <td>
+      <td data-label="State">
         <Badge tone={site.active ? 'ok' : 'neutral'}>{site.active ? 'active' : 'off'}</Badge>
       </td>
-      <td className="mono" style={{ color: 'var(--fg-3)' }}>{relTime(site.created_at)}</td>
+      <td className="mono" data-label="Added" style={{ color: 'var(--fg-3)' }}>{relTime(site.created_at)}</td>
       {canMutate && (
         <td onClick={(e) => e.stopPropagation()}>
           <div className="row-actions">
@@ -195,7 +204,7 @@ function SiteRow({ site, canMutate }: { site: Site; canMutate: boolean }) {
   )
 }
 
-export function CreateSiteDialog({ onClose, onSaved }: { onClose: () => void; onSaved?: () => void }) {
+export function CreateSiteDialog({ onClose, onSaved, node }: { onClose: () => void; onSaved?: () => void; node?: Node }) {
   const qc = useQueryClient()
   const push = useToast()
   const [domain, setDomain] = useState('')
@@ -203,14 +212,26 @@ export function CreateSiteDialog({ onClose, onSaved }: { onClose: () => void; on
   const [destPort, setDestPort] = useState('80')
   const [wafMode, setWafMode] = useState<WafMode>('observe')
   const [attachmentId, setAttachmentId] = useState('')
+  const [nodeId, setNodeId] = useState(node?.agent_id ?? '')
+  const nodesQ = useQuery({ queryKey: ['nodes'], queryFn: nodesApi.list })
+  const selectedNode = node ?? nodesQ.data?.find(candidate => candidate.agent_id === nodeId)
+  const gateway = selectedNode?.role === 'gateway'
 
   const attachQ = useQuery({
-    queryKey: ['tunnel-client-attachments'],
-    queryFn: () => attachApi.list(),
+    queryKey: ['tunnel-client-attachments', selectedNode?.tunnel_server_id],
+    queryFn: () => attachApi.list({ tunnel_server_id: selectedNode?.tunnel_server_id ?? undefined }),
+    enabled: !gateway,
   })
 
   const create = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
+      if (gateway && selectedNode) {
+        await nodesApi.createEdgeRoute(selectedNode.agent_id, {
+          domain: domain.trim(), visibility: 'lan_only', destination_ip: destIp.trim(), destination_port: Number(destPort),
+          enabled: true, policy: { waf_mode: wafMode },
+        })
+        return
+      }
       const body: SiteCreate = {
         attachment_id: attachmentId,
         protocol: 'tcp',
@@ -220,10 +241,12 @@ export function CreateSiteDialog({ onClose, onSaved }: { onClose: () => void; on
         domain,
         waf_mode: wafMode,
       }
-      return secApi.createSite(body)
+      await secApi.createSite(body)
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['sites'] })
+      qc.invalidateQueries({ queryKey: ['node-edge'] })
+      qc.invalidateQueries({ queryKey: ['edge-routes'] })
       onSaved?.()
       push('site created', 'ok', 'security://')
       onClose()
@@ -234,7 +257,7 @@ export function CreateSiteDialog({ onClose, onSaved }: { onClose: () => void; on
   return (
     <Dialog
       title="Add site"
-      scheme="POST /api/security/sites"
+      scheme={gateway ? 'LAN gateway site' : 'Public VPS site'}
       onClose={onClose}
       width={520}
       footer={
@@ -245,7 +268,7 @@ export function CreateSiteDialog({ onClose, onSaved }: { onClose: () => void; on
             <Button
               variant="primary"
               onClick={() => create.mutate()}
-              disabled={create.isPending || !domain || !destIp || !attachmentId}
+              disabled={create.isPending || !domain.trim() || !destIp.trim() || (!gateway && !attachmentId) || Number(destPort) < 1 || Number(destPort) > 65535 || !Number.isInteger(Number(destPort))}
             >
               {create.isPending ? 'creating…' : 'Create site'}
             </Button>
@@ -254,10 +277,25 @@ export function CreateSiteDialog({ onClose, onSaved }: { onClose: () => void; on
       }
     >
       <div className="col" style={{ gap: 14 }}>
-        <Field label="Domain" hint="Public hostname (e.g. app.example.com)">
+        {create.isError && <div role="alert" style={{ color: 'var(--err)' }}>{create.error.message}</div>}
+        {nodesQ.isError && <div role="alert" style={{ color: 'var(--err)' }}>Could not load edge nodes: {nodesQ.error.message}</div>}
+        {!node && <Field label="Edge node" hint="Gateway edges serve LAN routes directly. VPS edges use tunnel attachments for public services.">
+          <Select value={nodeId} onChange={e => { setNodeId(e.target.value); setAttachmentId('') }}>
+            <option value="">VPS via tunnel attachment</option>
+            {(nodesQ.data ?? []).filter(candidate => candidate.role !== 'client').map(candidate => <option key={candidate.agent_id} value={candidate.agent_id} disabled={candidate.edge_mode !== 'security_edge' || candidate.edge_state !== 'enabled'}>{candidate.name} ({candidate.role}{candidate.edge_state === 'enabled' ? '' : ', edge disabled'})</option>)}
+          </Select>
+        </Field>}
+        {gateway && <Field label="Visibility" hint="LAN-only routes need no tunnel attachment. Public relay publishing is not available yet.">
+          <Select value="lan_only" onChange={() => {}}>
+            <option value="lan_only">LAN only</option>
+            <option value="public_only" disabled>Public only (relay unavailable)</option>
+            <option value="both" disabled>LAN + public (relay unavailable)</option>
+          </Select>
+        </Field>}
+        <Field label="Domain" hint={gateway ? 'Hostname resolved to this gateway by your LAN DNS.' : 'Public hostname (e.g. app.example.com)'}>
           <Input value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="app.example.com" />
         </Field>
-        <Field label="Tunnel attachment" hint="Which tunnel client attachment this site routes through">
+        {!gateway && <Field label="Tunnel attachment" hint="Which tunnel client attachment this site routes through">
           <Select value={attachmentId} onChange={(e) => setAttachmentId(e.target.value)}>
             <option value="">— select —</option>
             {(attachQ.data ?? []).map((a) => (
@@ -266,12 +304,13 @@ export function CreateSiteDialog({ onClose, onSaved }: { onClose: () => void; on
               </option>
             ))}
           </Select>
-        </Field>
+        </Field>}
+        {attachQ.isError && !gateway && <div role="alert" style={{ color: 'var(--err)' }}>Could not load attachments: {attachQ.error.message}</div>}
         <Field label="Destination IP" hint="LAN IP of the upstream service">
           <Input value={destIp} onChange={(e) => setDestIp(e.target.value)} placeholder="192.168.1.10" mono />
         </Field>
         <Field label="Destination port">
-          <Input value={destPort} onChange={(e) => setDestPort(e.target.value)} type="number" mono />
+          <Input value={destPort} onChange={(e) => setDestPort(e.target.value)} type="number" min={1} max={65535} mono />
         </Field>
         <Field label="WAF mode" hint="off = pass-through, observe = log only, block = active WAF">
           <Select value={wafMode} onChange={(e) => setWafMode(e.target.value as WafMode)}>

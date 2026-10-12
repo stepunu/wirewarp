@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { settings as settingsApi } from '../lib/api'
+import { nodes as nodesApi, settings as settingsApi } from '../lib/api'
 import { Button, Field, Input, Select, Tabs, Toggle } from '../components/ui'
 import { Ic } from '../components/icons'
 import { useToast } from '../components/Toasts'
@@ -9,6 +9,7 @@ import type {
   LdapConfig,
   OidcConfig,
   Role,
+  SystemSettingsUpdate,
 } from '../lib/types'
 
 type Tab = 'general' | 'letsencrypt' | 'auth' | 'appearance'
@@ -99,6 +100,11 @@ function LetsEncryptTab() {
   const [dnsResolvers, setDnsResolvers] = useState('1.1.1.1:53')
   const [useStaging, setUseStaging] = useState(false)
   const [cfToken, setCfToken] = useState('')
+  const [nameserver, setNameserver] = useState('')
+  const [tsigKey, setTsigKey] = useState('')
+  const [tsigAlgorithm, setTsigAlgorithm] = useState('hmac-sha256')
+  const [tsigSecret, setTsigSecret] = useState('')
+  const [dnsDelay, setDnsDelay] = useState('30')
 
   useEffect(() => {
     if (!dataQ.data) return
@@ -114,15 +120,23 @@ function LetsEncryptTab() {
     setDnsResolvers((dataQ.data.letsencrypt_dns_resolvers ?? ['1.1.1.1:53']).join(', '))
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setUseStaging(dataQ.data.letsencrypt_use_staging)
+    setNameserver(dataQ.data.letsencrypt_rfc2136_nameserver ?? '')
+    setTsigKey(dataQ.data.letsencrypt_rfc2136_tsig_key ?? '')
+    setTsigAlgorithm(dataQ.data.letsencrypt_rfc2136_tsig_algorithm ?? 'hmac-sha256')
+    setDnsDelay(String(dataQ.data.letsencrypt_dns_delay_seconds ?? 30))
   }, [dataQ.data])
 
   const save = useMutation({
     mutationFn: () => {
+      const delay = Number(dnsDelay)
+      if (challenge === 'dns-01' && dnsProvider === 'rfc2136' && (!dnsDelay.trim() || !Number.isInteger(delay) || delay < 0 || delay > 600)) {
+        throw new Error('Propagation delay must be a whole number from 0 to 600 seconds.')
+      }
       const resolvers = dnsResolvers
         .split(',')
         .map((v) => v.trim())
         .filter(Boolean)
-      const payload: Record<string, unknown> = {
+      const payload: SystemSettingsUpdate = {
         letsencrypt_enabled: enabled,
         letsencrypt_email: email.trim() || null,
         letsencrypt_challenge: challenge,
@@ -130,16 +144,43 @@ function LetsEncryptTab() {
         letsencrypt_dns_resolvers: resolvers.length ? resolvers : ['1.1.1.1:53'],
         letsencrypt_use_staging: useStaging,
       }
-      if (cfToken.trim()) payload.letsencrypt_cloudflare_api_token = cfToken.trim()
+      if (challenge === 'dns-01') {
+        if (dnsProvider === 'rfc2136') {
+          payload.letsencrypt_dns_delay_seconds = delay
+          payload.letsencrypt_rfc2136_nameserver = nameserver.trim() || null
+          payload.letsencrypt_rfc2136_tsig_key = tsigKey.trim() || null
+          payload.letsencrypt_rfc2136_tsig_algorithm = tsigAlgorithm
+          if (tsigSecret.trim()) payload.letsencrypt_rfc2136_tsig_secret = tsigSecret.trim()
+        } else if (dnsProvider === 'cloudflare' && cfToken.trim()) {
+          payload.letsencrypt_cloudflare_api_token = cfToken.trim()
+        }
+      }
       return settingsApi.update(payload)
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['settings'] })
       setCfToken('')
+      setTsigSecret('')
       push("let's encrypt settings saved", 'ok', 'settings://letsencrypt')
     },
     onError: (e: Error) => push(e.message, 'err', 'settings://letsencrypt'),
   })
+
+  if (dataQ.isPending) return <div className="card"><div className="card-body">Loading certificate settings…</div></div>
+  if (dataQ.isError) return <div className="card"><div className="card-body" role="alert">{dataQ.error.message}</div></div>
+
+  const stored = dataQ.data
+  const unsaved = enabled !== stored.letsencrypt_enabled
+    || email.trim() !== (stored.letsencrypt_email ?? '')
+    || challenge !== stored.letsencrypt_challenge
+    || dnsProvider !== (stored.letsencrypt_dns_provider ?? 'cloudflare')
+    || JSON.stringify(dnsResolvers.split(',').map(v => v.trim()).filter(Boolean)) !== JSON.stringify(stored.letsencrypt_dns_resolvers)
+    || useStaging !== stored.letsencrypt_use_staging
+    || nameserver.trim() !== (stored.letsencrypt_rfc2136_nameserver ?? '')
+    || tsigKey.trim() !== (stored.letsencrypt_rfc2136_tsig_key ?? '')
+    || tsigAlgorithm !== stored.letsencrypt_rfc2136_tsig_algorithm
+    || Number(dnsDelay) !== stored.letsencrypt_dns_delay_seconds
+    || !!tsigSecret.trim() || !!cfToken.trim()
 
   return (
     <div className="card">
@@ -195,13 +236,14 @@ function LetsEncryptTab() {
               <div>
                 <div style={{ fontWeight: 500 }}>DNS-01 provider</div>
                 <div style={{ color: 'var(--fg-2)', fontSize: 12 }}>
-                  Cloudflare credentials used only by Traefik certificate issuance.
+                  Credentials used only for Traefik certificate issuance. DNS record sync is configured separately.
                 </div>
               </div>
               <div className="col" style={{ gap: 12, maxWidth: 520 }}>
                 <Field label="Provider">
                   <Select value={dnsProvider} onChange={(e) => setDnsProvider(e.target.value)}>
                     <option value="cloudflare">Cloudflare</option>
+                    <option value="rfc2136">Knot / RFC2136</option>
                   </Select>
                 </Field>
                 <Field label="Resolvers" hint="Comma-separated DNS resolvers Traefik uses while checking propagation.">
@@ -212,7 +254,18 @@ function LetsEncryptTab() {
                     placeholder="1.1.1.1:53, 1.0.0.1:53"
                   />
                 </Field>
-                <Field
+                {dnsProvider === 'rfc2136' && <Field label="Propagation delay (seconds)" hint="Wait before checking DNS propagation. Allow time for primary-to-secondary replication.">
+                  <Input
+                    mono
+                    type="number"
+                    min={0}
+                    max={600}
+                    step={1}
+                    value={dnsDelay}
+                    onChange={(e) => setDnsDelay(e.target.value)}
+                  />
+                </Field>}
+                {dnsProvider === 'cloudflare' && <Field
                   label={
                     dataQ.data?.letsencrypt_cloudflare_token_set
                       ? 'Cloudflare API token (saved — leave blank to keep, type to replace)'
@@ -227,7 +280,39 @@ function LetsEncryptTab() {
                     onChange={(e) => setCfToken(e.target.value)}
                     placeholder={dataQ.data?.letsencrypt_cloudflare_token_set ? '••••••••' : 'paste token here'}
                   />
-                </Field>
+                </Field>}
+                {dnsProvider === 'rfc2136' && (
+                  <>
+                    <Field label="Update server" hint="Writable primary, in host:port format. The node running Traefik must reach this server.">
+                      <Input mono value={nameserver} onChange={(e) => setNameserver(e.target.value)} placeholder="ns1.step1.ro:53" />
+                    </Field>
+                    <Field label="TSIG key name" hint="Name of the key allowed to update ACME challenge TXT records on the primary.">
+                      <Input mono value={tsigKey} onChange={(e) => setTsigKey(e.target.value)} placeholder="acme-key" />
+                    </Field>
+                    <Field label="TSIG algorithm">
+                      <Select value={tsigAlgorithm} onChange={(e) => setTsigAlgorithm(e.target.value)}>
+                        <option value="hmac-sha256">HMAC-SHA256</option>
+                        <option value="hmac-sha512">HMAC-SHA512</option>
+                        <option value="hmac-sha384">HMAC-SHA384</option>
+                      </Select>
+                    </Field>
+                    <Field
+                      label="TSIG secret"
+                      hint={dataQ.data?.letsencrypt_rfc2136_secret_set
+                        ? 'Saved. Leave blank to keep it, or enter a new base64 secret to replace it.'
+                        : 'Base64 secret used to sign DNS updates. Restrict the key to ACME challenge TXT records.'}
+                    >
+                      <Input
+                        mono
+                        type="password"
+                        autoComplete="new-password"
+                        value={tsigSecret}
+                        onChange={(e) => setTsigSecret(e.target.value)}
+                        placeholder={dataQ.data?.letsencrypt_rfc2136_secret_set ? '••••••••' : 'paste secret here'}
+                      />
+                    </Field>
+                  </>
+                )}
               </div>
             </div>
           </>
@@ -238,8 +323,98 @@ function LetsEncryptTab() {
             {save.isPending ? 'saving…' : 'Save changes'}
           </Button>
         </div>
+        {challenge === 'dns-01' && dnsProvider === 'rfc2136' && (
+          <AcmeDnsTest
+            unsaved={unsaved || save.isPending}
+            credentialsReady={!!stored.letsencrypt_rfc2136_nameserver && !!stored.letsencrypt_rfc2136_tsig_key && stored.letsencrypt_rfc2136_secret_set}
+          />
+        )}
       </div>
     </div>
+  )
+}
+
+function AcmeDnsTest({ unsaved, credentialsReady }: { unsaved: boolean; credentialsReady: boolean }) {
+  const nodesQ = useQuery({ queryKey: ['nodes'], queryFn: nodesApi.list })
+  const [agentId, setAgentId] = useState('')
+  const [domain, setDomain] = useState('')
+  const [test, setTest] = useState<{ commandId: string; nodeName: string; domain: string } | null>(null)
+  const [timedOut, setTimedOut] = useState(false)
+  const eligible = (nodesQ.data ?? []).filter(node => node.role === 'server' || node.role === 'gateway')
+  const selected = eligible.find(node => node.agent_id === agentId)
+  const resultQ = useQuery({
+    queryKey: ['acme-dns-test', test?.commandId],
+    queryFn: () => settingsApi.acmeDnsTestStatus(test!.commandId),
+    enabled: !!test,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: query => timedOut || query.state.error || (query.state.data && query.state.data.status !== 'pending') ? false : 2000,
+  })
+  const running = !!test && (!resultQ.data || resultQ.data.status === 'pending')
+  useEffect(() => {
+    if (!test || !running) return
+    const timer = window.setTimeout(() => setTimedOut(true), 120000)
+    return () => window.clearTimeout(timer)
+  }, [test, running])
+  const start = useMutation({
+    mutationFn: () => settingsApi.testAcmeDns({ agent_id: agentId, domain: domain.trim() }),
+    onSuccess: data => {
+      setTimedOut(false)
+      setTest({ commandId: data.command_id, nodeName: selected?.name ?? agentId, domain: domain.trim() })
+    },
+  })
+  const busy = start.isPending || running
+  const result = resultQ.data?.result
+  return (
+    <>
+      <div className="hr" />
+      <div className="settings-row" style={{ padding: '8px 0' }}>
+        <div>
+          <div style={{ fontWeight: 500 }}>Test DNS challenge</div>
+          <div style={{ color: 'var(--fg-2)', fontSize: 12 }}>
+            Runs on the selected node using saved settings. Temporarily writes a public ACME TXT record, checks authoritative DNS, then removes its own value.
+            {' '}Tests support propagation delays up to 90 seconds. Certificate issuance supports up to 600 seconds.
+          </div>
+        </div>
+        <div className="col" style={{ gap: 12, maxWidth: 520 }}>
+          {unsaved && <div role="status">Save your changes first, including any new secret, before testing.</div>}
+          {!credentialsReady && !unsaved && <div role="status">Save the update server, TSIG key name, and secret before testing.</div>}
+          {nodesQ.isError && <div role="alert">Could not load nodes: {nodesQ.error.message}</div>}
+          <Field label="Test from node" hint="Choose the node that will run Traefik. It must reach the writable DNS primary.">
+            <Select value={agentId} onChange={e => setAgentId(e.target.value)} disabled={busy || nodesQ.isPending}>
+              <option value="">{nodesQ.isPending ? 'Loading nodes…' : 'Select a node'}</option>
+              {eligible.map(node => <option key={node.agent_id} value={node.agent_id} disabled={node.status !== 'connected'}>{node.name} ({node.role}, {node.status})</option>)}
+            </Select>
+          </Field>
+          {nodesQ.isSuccess && !eligible.length && <div>No server or gateway nodes are available.</div>}
+          <Field label="Test domain" hint="Domain whose _acme-challenge TXT record this key is allowed to update.">
+            <Input mono value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com" disabled={busy} />
+          </Field>
+          <Button onClick={() => start.mutate()} disabled={busy || unsaved || !credentialsReady || selected?.status !== 'connected' || !domain.trim()}>
+            {busy ? 'Testing…' : 'Test DNS challenge'}
+          </Button>
+          {start.isError && <div role="alert">Could not start test: {start.error.message}</div>}
+          {test && (
+            <div className="col" style={{ gap: 8, overflowWrap: 'anywhere' }} aria-live="polite">
+              <div>Source: {test.nodeName}. Domain: {test.domain}.</div>
+              {running && !timedOut && !resultQ.isError && <div>Waiting for update, propagation, and cleanup results…</div>}
+              {timedOut && running && <div role="alert">No final result within 120 seconds. The remote test may still be running. Refresh to check its result.</div>}
+              {resultQ.isError && <div role="alert">Could not read test result: {resultQ.error.message}</div>}
+              {resultQ.data && resultQ.data.status !== 'pending' && <div>Test {resultQ.data.status === 'success' ? 'passed' : 'failed'}.</div>}
+              {result && (
+                <>
+                  <div>Stage: {result.stage}. {result.detail}</div>
+                  <div>Record: {result.record_name}</div>
+                  {result.authoritative_results.map((server, index) => <div key={`${server.server}-${index}`}>{server.server}: {server.ok ? 'verified' : 'failed'}. {server.detail}</div>)}
+                  <div role={result.cleanup_ok ? 'status' : 'alert'}>Cleanup: {result.cleanup_ok ? 'confirmed' : 'failed; the test TXT value may remain'}</div>
+                </>
+              )}
+              {(timedOut || resultQ.isError) && <Button onClick={() => resultQ.refetch()} disabled={resultQ.isFetching}>{resultQ.isFetching ? 'Refreshing…' : 'Refresh test result'}</Button>}
+            </div>
+          )}
+        </div>
+      </div>
+    </>
   )
 }
 
