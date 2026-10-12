@@ -1,13 +1,30 @@
+import base64
+import binascii
+import asyncio
+from datetime import datetime, timedelta, timezone
 from typing import Any
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from cryptography.fernet import InvalidToken
+from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import log_auth_event, require_role
 from app.database import get_db
 from app.models.system_settings import SystemSettings
+from app.models.agent import Agent
+from app.models.command_log import CommandLog
+from app.models.tunnel_client import TunnelClient
 from app.realtime.events import emit_edge_changed, emit_security_changed
 from app.models.user import User
+from app.schemas.acme import (
+    DNSChallengeResult,
+    DNSChallengeTestRead,
+    DNSChallengeTestRequest,
+    DNSChallengeTestStarted,
+)
 from app.schemas.system_settings import (
     AuthTestRequest,
     AuthTestResponse,
@@ -21,10 +38,15 @@ from app.services.secrets import (
     encrypt_oidc_config,
     encrypt_secret,
     looks_like_fernet,
+    get_letsencrypt_rfc2136_tsig_secret,
 )
+from app.services.agent_commands import send_command
+from app.services.edge_ops import redact_edge_desired_state
+from app.websocket.hub import manager
 
 
 router = APIRouter()
+dns_test_lock = asyncio.Lock()
 
 
 LET_ENCRYPT_FIELDS = {
@@ -35,6 +57,11 @@ LET_ENCRYPT_FIELDS = {
     "letsencrypt_dns_resolvers",
     "letsencrypt_use_staging",
     "letsencrypt_cloudflare_api_token",
+    "letsencrypt_rfc2136_nameserver",
+    "letsencrypt_rfc2136_tsig_key",
+    "letsencrypt_rfc2136_tsig_algorithm",
+    "letsencrypt_rfc2136_tsig_secret",
+    "letsencrypt_dns_delay_seconds",
 }
 
 
@@ -85,6 +112,16 @@ async def update_settings(
 ):
     row = await _get_or_create(db)
     payload = body.model_dump(exclude_unset=True)
+    if "letsencrypt_rfc2136_tsig_secret" in payload:
+        secret = body.letsencrypt_rfc2136_tsig_secret
+        value = secret.get_secret_value() if secret is not None else None
+        if value:
+            try:
+                if not base64.b64decode(value, validate=True):
+                    raise ValueError
+            except (ValueError, binascii.Error):
+                raise HTTPException(status_code=422, detail="TSIG secret must be valid base64") from None
+        payload["letsencrypt_rfc2136_tsig_secret"] = encrypt_secret(value) if value else None
 
     auth_provider_changed = False
     config_changed = False
@@ -127,6 +164,12 @@ async def update_settings(
         else:
             setattr(row, field, val)
 
+    if letsencrypt_changed:
+        from app.models.edge_node import EdgeNode
+        from app.services.edge_ops import build_edge_desired_state
+        gateways = (await db.scalars(select(TunnelClient.agent_id).join(EdgeNode, EdgeNode.agent_id == TunnelClient.agent_id).where(TunnelClient.is_gateway.is_(True), EdgeNode.edge_mode == "security_edge", EdgeNode.edge_state == "enabled"))).all()
+        for agent_id in gateways:
+            await build_edge_desired_state(agent_id, db)
     await db.commit()
     await db.refresh(row)
 
@@ -150,6 +193,101 @@ async def update_settings(
         emit_security_changed()
 
     return row
+
+
+@router.post("/acme/test", response_model=DNSChallengeTestStarted)
+async def test_dns_challenge(
+    body: DNSChallengeTestRequest,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(require_role("admin")),
+):
+    row = await _get_or_create(db)
+    if row.letsencrypt_challenge != "dns-01" or row.letsencrypt_dns_provider != "rfc2136":
+        raise HTTPException(status_code=409, detail="Save Knot / RFC2136 DNS-01 settings before testing")
+    if row.letsencrypt_dns_delay_seconds > 90:
+        raise HTTPException(status_code=409, detail="The DNS test supports delays up to 90 seconds. Save a shorter delay before testing")
+    try:
+        secret = await get_letsencrypt_rfc2136_tsig_secret(db)
+    except InvalidToken:
+        raise HTTPException(status_code=409, detail="The saved TSIG secret could not be decrypted. Re-enter and save it before testing") from None
+    if not row.letsencrypt_rfc2136_nameserver or not row.letsencrypt_rfc2136_tsig_key or not secret:
+        raise HTTPException(status_code=409, detail="Save the update server, TSIG key, and TSIG secret before testing")
+    agent = await db.get(Agent, body.agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    gateway = await db.scalar(select(TunnelClient).where(TunnelClient.agent_id == body.agent_id))
+    if agent.type != "server" and not (gateway and gateway.is_gateway):
+        raise HTTPException(status_code=409, detail="Select a server or gateway node for the DNS test")
+    if not manager.is_connected(str(agent.id)):
+        raise HTTPException(status_code=409, detail="Selected node is disconnected")
+    params = {
+        "domain": body.domain,
+        "dns_delay_seconds": row.letsencrypt_dns_delay_seconds,
+        "credentials": {
+            "rfc2136_nameserver": row.letsencrypt_rfc2136_nameserver,
+            "rfc2136_tsig_key": row.letsencrypt_rfc2136_tsig_key,
+            "rfc2136_tsig_algorithm": row.letsencrypt_rfc2136_tsig_algorithm,
+            "rfc2136_tsig_secret": secret,
+        },
+    }
+    # Serialize admission in this single-process control server. A recent
+    # unacknowledged command prevents overlapping tests at the same owner.
+    async with dns_test_lock:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=150)
+        recent = (await db.scalars(select(CommandLog).where(
+            CommandLog.command_type == "acme_dns_test",
+            CommandLog.success.is_(None),
+            CommandLog.executed_at >= cutoff,
+        ))).all()
+        if any((log.params or {}).get("domain") == body.domain for log in recent):
+            raise HTTPException(status_code=409, detail="A DNS test for this domain is already running")
+        sent, command_id = await send_command(
+            agent_id=str(agent.id), command_type="acme_dns_test", params=params,
+            db=db, actor_user_id=actor.id, log_params=redact_edge_desired_state(params),
+        )
+    if not sent:
+        log = await db.get(CommandLog, uuid.UUID(command_id))
+        log.success = False
+        log.output = "Node disconnected before the DNS test was sent"
+        await db.commit()
+        raise HTTPException(status_code=409, detail=log.output)
+    return DNSChallengeTestStarted(command_id=command_id)
+
+
+@router.get("/acme/test/{command_id}", response_model=DNSChallengeTestRead)
+async def dns_challenge_test_result(
+    command_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role("admin")),
+):
+    log = await db.get(CommandLog, command_id)
+    if log is None or log.command_type != "acme_dns_test":
+        raise HTTPException(status_code=404, detail="DNS test not found")
+    if log.success is None:
+        started_at = log.executed_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        if started_at < datetime.now(timezone.utc) - timedelta(seconds=150):
+            return DNSChallengeTestRead(
+                status="failure", command_id=str(log.id),
+                result=DNSChallengeResult(
+                    ok=False, stage="timeout",
+                    detail="No final result from the node. Cleanup is unconfirmed. Check the TXT record before retrying.",
+                    record_name="_acme-challenge." + (log.params or {}).get("domain", ""),
+                    cleanup_ok=False, authoritative_results=[],
+                ),
+            )
+        return DNSChallengeTestRead(status="pending", command_id=str(log.id))
+    try:
+        result = DNSChallengeResult.model_validate_json(log.output or "")
+    except ValidationError:
+        result = DNSChallengeResult(
+            ok=False, stage="agent", detail=log.output or "Node returned no DNS test result",
+            record_name="_acme-challenge." + (log.params or {}).get("domain", ""),
+            cleanup_ok=False, authoritative_results=[],
+        )
+    status = "success" if log.success and result.ok and result.cleanup_ok else "failure"
+    return DNSChallengeTestRead(status=status, command_id=str(log.id), result=result)
 
 
 @router.post("/auth/test", response_model=AuthTestResponse)

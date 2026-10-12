@@ -58,11 +58,28 @@ class TopAttacker(BaseModel):
 
 
 class ServerStatus(BaseModel):
-    server_id: uuid.UUID
-    agent_id: uuid.UUID | None = None
+    server_id: uuid.UUID | None = None
+    agent_id: uuid.UUID
     name: str
+    role: str
+    placement: str
+    runtime_mode: str
+    edge_mode: str
+    edge_state: str
+    edge_install_phase: str
+    routes_count: int
+    active_routes_count: int
+    relay_routes_count: int
     crowdsec_running: bool
     traefik_running: bool
+    crowdsec_installed: bool | None = None
+    traefik_installed: bool | None = None
+    crowdsec_phase: str | None = None
+    traefik_phase: str | None = None
+    crowdsec_error: str | None = None
+    traefik_error: str | None = None
+    crowdsec_updated_at: datetime | None = None
+    traefik_updated_at: datetime | None = None
 
 
 class SecurityKPIs(BaseModel):
@@ -81,6 +98,8 @@ class SecurityOverview(BaseModel):
     top_attackers: list[TopAttacker]
     top_scenarios: list[TopItem]
     servers: list[ServerStatus]
+    http_routes_count: int = 0
+    active_http_routes_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +108,7 @@ class SecurityOverview(BaseModel):
 
 class EdgeRouteConfigRead(BaseModel):
     id: uuid.UUID
+    route_id: uuid.UUID | None = None
     port_forward_id: uuid.UUID
     waf_mode: str
     rate_limit_rps: int | None = None
@@ -145,7 +165,7 @@ class SiteEffectivePolicy(BaseModel):
 
 
 class ServerEdgePolicyRead(BaseModel):
-    server_id: uuid.UUID
+    server_id: uuid.UUID | None = None
     agent_id: uuid.UUID
     rate_limit_rps: int | None = None
     rate_limit_burst: int | None = None
@@ -162,12 +182,13 @@ class ServerEdgePolicyUpdate(BaseModel):
 
 class SiteRead(BaseModel):
     id: uuid.UUID
-    attachment_id: uuid.UUID
+    attachment_id: uuid.UUID | None = None
     tunnel_server_ip_id: uuid.UUID | None = None
     server_id: uuid.UUID | None = None
     agent_id: uuid.UUID | None = None
     protocol: str = "tcp"
-    public_port: int = 443
+    public_port: int | None = 443
+    visibility: str = "public_only"
     public_port_end: int | None = None
     domain: str | None
     destination_ip: str
@@ -255,6 +276,9 @@ class TraefikImportRoutePreview(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     importable: bool = False
     existing_site_id: uuid.UUID | None = None
+    visibility: str | None = None
+    managed_entrypoints: list[str] = Field(default_factory=list)
+    action: str | None = None
 
 
 class TraefikImportSummary(BaseModel):

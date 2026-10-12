@@ -326,6 +326,14 @@ async def update_tunnel_server(
         for field, value in body.model_dump(exclude_none=True).items()
         if getattr(server, field) != value
     }
+    if changes:
+        from app.services.site_link_ops import lock_site_links, ensure_no_site_link_teardown
+        await lock_site_links(db)
+        await ensure_no_site_link_teardown(db, agent_ids={server.agent_id})
+    if any(field in changes for field in ("tunnel_network", "wg_interface")):
+        from app.services.site_link_topology import require_unlinked_agent, require_unpublished_server
+        await require_unlinked_agent(db, server.agent_id)
+        await require_unpublished_server(db, server.id)
     for field, value in changes.items():
         setattr(server, field, value)
     if not changes:
@@ -428,6 +436,9 @@ async def rebase_tunnel_network(
     new_network = body.tunnel_network
     if new_network == server.tunnel_network:
         return _to_read(server)
+    from app.services.site_link_topology import require_unlinked_agent, require_unpublished_server
+    await require_unlinked_agent(db, server.agent_id)
+    await require_unpublished_server(db, server.id)
 
     # Connectivity precheck: every agent that needs to receive a reconfig
     # command must be currently connected. Walks attachments now (one row

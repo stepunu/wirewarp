@@ -12,9 +12,10 @@ from app.models.edge_node_policy import EdgeNodePolicy
 from app.models.edge_path_rule import EdgePathRule
 from app.models.edge_profile import EdgeProfile
 from app.models.edge_route_config import EdgeRouteConfig
-from app.models.port_forward import PortForward
-from app.models.tunnel_client_attachment import TunnelClientAttachment
+from app.models.http_route import HTTPRoute
+from app.models.edge_node import EdgeNode
 from app.models.tunnel_server import TunnelServer
+from app.services.edge_ownership import get_edge_owner
 from app.schemas.edge import (
     EdgeEffectivePolicyRead,
     EdgeNodePolicyRead,
@@ -123,15 +124,11 @@ async def node_policy_read(db: AsyncSession, policy: EdgeNodePolicy) -> EdgeNode
     )
 
 
-async def server_for_route(db: AsyncSession, route: PortForward) -> TunnelServer | None:
-    return await db.scalar(
-        select(TunnelServer)
-        .join(TunnelClientAttachment, TunnelClientAttachment.tunnel_server_id == TunnelServer.id)
-        .where(TunnelClientAttachment.id == route.attachment_id)
-    )
+async def server_for_route(db: AsyncSession, route: HTTPRoute) -> EdgeNode:
+    return await get_edge_owner(db, route.agent_id)
 
 
-async def route_edge_config(db: AsyncSession, route: PortForward) -> EdgeRouteConfig:
+async def route_edge_config(db: AsyncSession, route: HTTPRoute) -> EdgeRouteConfig:
     ec = await db.scalar(select(EdgeRouteConfig).where(EdgeRouteConfig.port_forward_id == route.id))
     if ec is None:
         ec = EdgeRouteConfig(id=uuid.uuid4(), port_forward_id=route.id)
@@ -146,7 +143,7 @@ def route_desired_policy(ec: EdgeRouteConfig | None) -> dict[str, Any]:
 
 async def route_effective_policy(
     db: AsyncSession,
-    route: PortForward,
+    route: HTTPRoute,
     ec: EdgeRouteConfig | None = None,
     *,
     path_rule: EdgePathRule | None = None,
@@ -154,29 +151,29 @@ async def route_effective_policy(
     server = await server_for_route(db, route)
     if server is None:
         raise HTTPException(status_code=404, detail="Route server not found")
-    node_policy = await get_or_create_node_policy(db, server.agent_id)
+    node_policy = await db.get(EdgeNodePolicy, server.agent_id)
+    if ec is not None and not ec.inherit_node_policy:
+        node_policy = None
     profile_policy = {}
-    profile_id = ec.profile_id if ec and ec.profile_id else node_policy.default_profile_id
+    profile_id = ec.profile_id if ec and ec.profile_id else node_policy.default_profile_id if node_policy else None
     if profile_id:
         profile = await db.get(EdgeProfile, profile_id)
         if profile is not None:
             profile_policy = profile.policy_json or {}
     desired = route_desired_policy(ec)
     path_policy = path_rule.policy_json if path_rule is not None else None
-    effective = deep_merge(
-        GLOBAL_EDGE_DEFAULTS,
-        node_policy.policy_json or {},
-        profile_policy,
-        desired,
-        path_policy,
-    )
+    from app.services.edge_render import effective_render_policy
+    try:
+        effective = await effective_render_policy(db, route, ec, path_rule)
+    except ValueError as exc:
+        raise HTTPException(422, detail={"code":"edge_policy_invalid", "detail":str(exc)}) from exc
     return EdgeEffectivePolicyRead(
         route_id=route.id,
         desired=desired,
         effective=effective,
         sources={
             "global": GLOBAL_EDGE_DEFAULTS,
-            "node": node_policy.policy_json or {},
+            "node": (node_policy.policy_json or {}) if node_policy else {},
             "profile": profile_policy,
             "route": desired,
             **({"path_rule": path_policy or {}} if path_rule is not None else {}),
@@ -184,22 +181,27 @@ async def route_effective_policy(
     )
 
 
-async def route_read(db: AsyncSession, route: PortForward, ec: EdgeRouteConfig | None = None) -> EdgeRouteRead:
+async def route_read(db: AsyncSession, route: HTTPRoute, ec: EdgeRouteConfig | None = None) -> EdgeRouteRead:
     if ec is None:
         ec = await db.scalar(select(EdgeRouteConfig).where(EdgeRouteConfig.port_forward_id == route.id))
-    server = await server_for_route(db, route)
-    if server is None:
-        raise HTTPException(status_code=404, detail="Route server not found")
+    owner = await server_for_route(db, route)
+    server = await db.scalar(select(TunnelServer).where(TunnelServer.agent_id == owner.agent_id))
+    from app.models.http_public_ingress import HTTPPublicIngress
+    ingress = await db.get(HTTPPublicIngress, route.id)
     effective = await route_effective_policy(db, route, ec)
     return EdgeRouteRead(
         id=route.id,
-        node_id=server.agent_id,
-        server_id=server.id,
-        attachment_id=route.attachment_id,
+        node_id=owner.agent_id,
+        server_id=server.id if server else None,
+        attachment_id=ingress.attachment_id if ingress else None,
+        public_port=ingress.public_port if ingress else None,
+        tunnel_server_ip_id=ingress.tunnel_server_ip_id if ingress else None,
+        visibility=route.visibility,
         domain=route.domain,
         enabled=route.active,
         priority=ec.priority if ec else 0,
         profile_id=ec.profile_id if ec else None,
+        inherit_node_policy=ec.inherit_node_policy if ec else True,
         destination_ip=route.destination_ip,
         destination_port=route.destination_port,
         description=route.description,

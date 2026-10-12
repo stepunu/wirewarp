@@ -169,6 +169,7 @@ async def test_patch_letsencrypt_cloudflare_token_encrypts(client, db):
 
 @pytest.mark.asyncio
 async def test_patch_letsencrypt_settings_dispatches_server_edge(client, session_maker, fake_manager):
+    from app.models.edge_node import EdgeNode
     agent = Agent(
         id=uuid.uuid4(),
         name="edge-1",
@@ -184,11 +185,9 @@ async def test_patch_letsencrypt_settings_dispatches_server_edge(client, session
                 id=uuid.uuid4(),
                 agent_id=agent.id,
                 tunnel_network="10.21.0.0/24",
-                edge_mode="security_edge",
-                edge_state="enabled",
-                edge_install_phase="healthy",
             )
         )
+        s.add(EdgeNode(agent_id=agent.id, edge_mode="security_edge", edge_state="enabled", edge_install_phase="healthy"))
         await s.commit()
 
     fake_manager.online.add(str(agent.id))

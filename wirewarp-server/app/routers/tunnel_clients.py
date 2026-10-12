@@ -207,6 +207,10 @@ async def _update_tunnel_client_locked(
     resulting_vm_network = changes.get("vm_network", client.vm_network)
     resulting_lan_ip = changes.get("lan_ip", client.lan_ip)
     resulting_is_gateway = changes.get("is_gateway", client.is_gateway)
+    if any(field in changes for field in ("is_gateway", "vm_network", "lan_ip")):
+        from app.services.site_link_topology import require_unlinked_agent, require_unlinked_client_hubs
+        await require_unlinked_agent(db, client.agent_id)
+        await require_unlinked_client_hubs(db, client.id)
     network = None
     if resulting_vm_network is not None:
         try:
@@ -305,6 +309,8 @@ async def _update_tunnel_client_locked(
                 if server is not None:
                     await dispatch_reconcile_lan_snat(server, db)
         await reconcile_client_attachments(client.id, db)
+        from app.services.site_link_topology import refresh_site_link_topology
+        await refresh_site_link_topology(db)
     except Exception:
         await db.rollback()
         logger.exception(

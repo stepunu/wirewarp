@@ -8,7 +8,9 @@ from sqlalchemy import select
 
 from app.models.agent import Agent
 from app.models.edge_route_config import EdgeRouteConfig
-from app.models.port_forward import PortForward
+from app.models.http_route import HTTPRoute
+from app.models.http_public_ingress import HTTPPublicIngress
+from app.models.edge_node import EdgeNode
 from app.models.security_event import SecurityEvent
 from app.models.system_settings import SystemSettings
 from app.models.tunnel_client import TunnelClient
@@ -39,9 +41,6 @@ async def _server_with_attachment(session_maker):
             id=uuid.uuid4(),
             agent_id=server_agent.id,
             tunnel_network="10.21.0.0/24",
-            edge_mode="security_edge",
-            edge_state="enabled",
-            edge_install_phase="healthy",
         )
         gateway = TunnelClient(
             id=uuid.uuid4(),
@@ -49,7 +48,7 @@ async def _server_with_attachment(session_maker):
             is_gateway=True,
             vm_network="192.168.20.0/24",
         )
-        s.add_all([server, gateway])
+        s.add_all([server, gateway, EdgeNode(agent_id=server_agent.id, edge_mode="security_edge", edge_state="enabled", edge_install_phase="healthy")])
         await s.commit()
         attachment = TunnelClientAttachment(
             id=uuid.uuid4(),
@@ -245,9 +244,7 @@ async def test_traefik_import_apply_creates_wirewarp_owned_sites_and_dispatches(
     async with session_maker() as s:
         rows = (
             await s.execute(
-                select(PortForward)
-                .where(PortForward.service_kind == "http")
-                .order_by(PortForward.domain)
+                select(HTTPRoute).order_by(HTTPRoute.domain)
             )
         ).scalars().all()
         assert [row.domain for row in rows] == ["media.ww.step1.ro", "px.infra.ww.step1.ro"]
@@ -270,18 +267,16 @@ async def test_server_edge_policy_renders_global_rate_limit_before_site_limit(
 ) -> None:
     agent_id, server_id, attachment_id = await _server_with_attachment(session_maker)
     async with session_maker() as s:
-        server = await s.get(TunnelServer, server_id)
+        server = await s.get(EdgeNode, agent_id)
         assert server is not None
         server.edge_rate_limit_rps = 100
         server.edge_rate_limit_burst = 200
-        pf = PortForward(
+        pf = HTTPRoute(
             id=uuid.uuid4(),
-            attachment_id=attachment_id,
-            protocol="tcp",
-            public_port=443,
+            agent_id=agent_id, visibility="public_only",
+            public_ingress=HTTPPublicIngress(attachment_id=attachment_id, public_port=443),
             destination_ip="192.168.20.151",
             destination_port=8096,
-            service_kind="http",
             domain="media.ww.step1.ro",
             active=True,
         )
@@ -312,14 +307,12 @@ async def test_forward_auth_render_strips_unsupported_response_body_limit(
 ) -> None:
     agent_id, _server_id, attachment_id = await _server_with_attachment(session_maker)
     async with session_maker() as s:
-        pf = PortForward(
+        pf = HTTPRoute(
             id=uuid.uuid4(),
-            attachment_id=attachment_id,
-            protocol="tcp",
-            public_port=443,
+            agent_id=agent_id, visibility="public_only",
+            public_ingress=HTTPPublicIngress(attachment_id=attachment_id, public_port=443),
             destination_ip="192.168.20.150",
             destination_port=8989,
-            service_kind="http",
             domain="sonarr.home.step1.ro",
             active=True,
         )
@@ -373,14 +366,12 @@ async def test_letsencrypt_routes_share_default_wildcard_certificate(
             "px.infra.step1.ro",
             "media.ww.step1.ro",
         ):
-            pf = PortForward(
+            pf = HTTPRoute(
                 id=uuid.uuid4(),
-                attachment_id=attachment_id,
-                protocol="tcp",
-                public_port=443,
+                agent_id=agent_id, visibility="public_only",
+                public_ingress=HTTPPublicIngress(attachment_id=attachment_id, public_port=443),
                 destination_ip="192.168.20.151",
                 destination_port=8096,
-                service_kind="http",
                 domain=domain,
                 active=True,
             )
@@ -425,18 +416,16 @@ async def test_node_edge_includes_server_policy_and_effective_site_policy(
 ) -> None:
     agent_id, server_id, attachment_id = await _server_with_attachment(session_maker)
     async with session_maker() as s:
-        server = await s.get(TunnelServer, server_id)
+        server = await s.get(EdgeNode, agent_id)
         assert server is not None
         server.edge_rate_limit_rps = 25
         server.edge_rate_limit_burst = 50
-        pf = PortForward(
+        pf = HTTPRoute(
             id=uuid.uuid4(),
-            attachment_id=attachment_id,
-            protocol="tcp",
-            public_port=443,
+            agent_id=agent_id, visibility="public_only",
+            public_ingress=HTTPPublicIngress(attachment_id=attachment_id, public_port=443),
             destination_ip="192.168.20.151",
             destination_port=8096,
-            service_kind="http",
             domain="media.ww.step1.ro",
             active=True,
         )

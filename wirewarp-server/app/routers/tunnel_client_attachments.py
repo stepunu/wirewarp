@@ -129,6 +129,8 @@ async def create_attachment(
 
     ordinal = await allocate_attachment_ordinal(client.id, db)
     tunnel_ip = body.tunnel_ip or await allocate_attachment_ip(server.id, db)
+    from app.services.site_link_topology import validate_managed_hub_peer
+    await validate_managed_hub_peer(db, server, client, tunnel_ip)
 
     att = TunnelClientAttachment(
         tunnel_client_id=client.id,
@@ -172,11 +174,15 @@ async def update_attachment(
     changes = body.model_dump(exclude_none=True)
     if not changes:
         return att
+    from app.services.site_link_topology import require_unpublished_attachment
+    await require_unpublished_attachment(db, att.id)
 
     client = await db.scalar(select(TunnelClient).where(TunnelClient.id == att.tunnel_client_id))
     server = await db.scalar(select(TunnelServer).where(TunnelServer.id == att.tunnel_server_id))
     if client is None or server is None:
         raise HTTPException(status_code=409, detail="Attachment has dangling client or server")
+    from app.services.site_link_topology import validate_managed_hub_peer
+    await validate_managed_hub_peer(db, server, client, changes.get("tunnel_ip", att.tunnel_ip), exclude_attachment_id=att.id)
     if not manager.is_connected(str(client.agent_id)) or not manager.is_connected(
         str(server.agent_id)
     ):

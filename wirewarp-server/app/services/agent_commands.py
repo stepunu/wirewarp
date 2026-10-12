@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -39,6 +40,12 @@ VALID_COMMAND_TYPES = {
     "edge_disable",
     "edge_cache_purge",
     "edge_cache_test",
+    "edge_route_test",
+    "acme_dns_test",
+    "edge_node_role",
+    "site_link_desired_state",
+    "site_link_test",
+    "site_link_teardown",
 }
 
 
@@ -117,6 +124,40 @@ async def send_command(
     if command_type not in VALID_COMMAND_TYPES:
         raise ValueError(f"Unknown command type: {command_type}")
 
+    try:
+        agent_uuid = uuid.UUID(agent_id) if isinstance(agent_id, str) else agent_id
+    except (TypeError, ValueError):
+        agent_uuid = None
+    if command_type in {"wg_init", "wg_attach", "wg_detach", "wg_add_peer", "wg_remove_peer", "wg_update_endpoint", "gateway_up", "gateway_down", "edge_node_role", "vpn_endpoint_up", "vpn_endpoint_down"} and agent_uuid is not None:
+        from app.services.site_link_ops import lock_site_links, ensure_no_site_link_teardown
+        from app.models.tunnel_client_attachment import TunnelClientAttachment
+        from app.models.tunnel_server import TunnelServer
+        scope = {agent_uuid}
+        if command_type in {"wg_attach", "wg_detach", "wg_update_endpoint"} and params.get("attachment_id"):
+            try:
+                attachment_id = uuid.UUID(str(params["attachment_id"]))
+            except (ValueError, TypeError):
+                attachment_id = None
+            related_hub = await db.scalar(select(TunnelServer.agent_id).join(TunnelClientAttachment, TunnelClientAttachment.tunnel_server_id == TunnelServer.id).where(TunnelClientAttachment.id == attachment_id)) if attachment_id else None
+            if related_hub:
+                scope.add(related_hub)
+        await lock_site_links(db)
+        await ensure_no_site_link_teardown(db, agent_ids=scope)
+    if command_type == "wg_add_peer" and agent_uuid is not None:
+        from app.models.site_link import SiteLinkAgentState
+        from app.models.tunnel_client import TunnelClient
+        from app.models.tunnel_client_attachment import TunnelClientAttachment
+        from app.models.tunnel_server import TunnelServer
+        if await db.get(SiteLinkAgentState, agent_uuid) is not None:
+            gateway_peer = await db.scalar(select(TunnelClientAttachment.id).join(
+                TunnelClient, TunnelClient.id == TunnelClientAttachment.tunnel_client_id,
+            ).join(TunnelServer, TunnelServer.id == TunnelClientAttachment.tunnel_server_id).where(
+                TunnelServer.agent_id == agent_uuid, TunnelClient.is_gateway.is_(True),
+                TunnelClientAttachment.wg_public_key == params.get("public_key"),
+            ).limit(1))
+            if gateway_peer is not None:
+                params = dict(params, site_link_guard_required=True)
+
     command_uuid = uuid.uuid4()
     command_id = str(command_uuid)
     message = {
@@ -124,11 +165,6 @@ async def send_command(
         "type": command_type,
         "params": params,
     }
-
-    try:
-        agent_uuid = uuid.UUID(agent_id) if isinstance(agent_id, str) else agent_id
-    except (TypeError, ValueError):
-        agent_uuid = None
 
     # Log before sending — success/output filled in when command_result arrives
     log = CommandLog(
@@ -139,6 +175,7 @@ async def send_command(
         params=log_params if log_params is not None else params,
         success=None,
         output=None,
+        executed_at=datetime.now(timezone.utc),
     )
     db.add(log)
     await db.commit()

@@ -113,6 +113,16 @@ async def get_letsencrypt_cloudflare_api_token(db: AsyncSession) -> str | None:
         return raw
 
 
+async def get_letsencrypt_rfc2136_tsig_secret(db: AsyncSession) -> str | None:
+    """Read encrypted RFC2136 credentials. Invalid ciphertext must not be sent."""
+    from app.models.system_settings import SystemSettings
+
+    row = await db.get(SystemSettings, 1)
+    if row is None or not row.letsencrypt_rfc2136_tsig_secret:
+        return None
+    return decrypt_secret(row.letsencrypt_rfc2136_tsig_secret)
+
+
 # Keys inside the OIDC / LDAP JSONB blobs that hold secrets and must be
 # encrypted on save / decrypted on read. Anything not listed is stored as
 # plaintext (issuer URL, group mappings, etc).

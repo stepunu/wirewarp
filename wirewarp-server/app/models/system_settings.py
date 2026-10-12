@@ -55,3 +55,12 @@ class SystemSettings(Base):
         Boolean, nullable=False, default=False, server_default="false"
     )
     letsencrypt_cloudflare_api_token: Mapped[str | None] = mapped_column(String, nullable=True)
+    letsencrypt_rfc2136_nameserver: Mapped[str | None] = mapped_column(String, nullable=True)
+    letsencrypt_rfc2136_tsig_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    letsencrypt_rfc2136_tsig_algorithm: Mapped[str] = mapped_column(
+        String, nullable=False, default="hmac-sha256", server_default="hmac-sha256"
+    )
+    letsencrypt_rfc2136_tsig_secret: Mapped[str | None] = mapped_column(String, nullable=True)
+    letsencrypt_dns_delay_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=30, server_default="30"
+    )

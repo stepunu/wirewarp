@@ -15,7 +15,7 @@ class EdgeFragment(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False)
-    route_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("port_forwards.id", ondelete="CASCADE"), nullable=True)
+    route_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("http_routes.id", ondelete="CASCADE"), nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     fragment_type: Mapped[str] = mapped_column(String, nullable=False)
     content: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

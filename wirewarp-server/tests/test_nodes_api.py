@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.models.agent import Agent
 from app.models.command_log import CommandLog
+from app.models.edge_config_version import EdgeConfigVersion
 from app.models.crowdsec_snapshot import CrowdSecSnapshot
 from app.models.edge_route_config import EdgeRouteConfig
 from app.models.port_forward import PortForward
@@ -30,10 +31,9 @@ def _agent(agent_type: str, name: str) -> Agent:
     )
 
 
-def _enable_security_edge(server: TunnelServer) -> None:
-    server.edge_mode = "security_edge"
-    server.edge_state = "enabled"
-    server.edge_install_phase = "healthy"
+def _enable_security_edge(server: TunnelServer):
+    from app.models.edge_node import EdgeNode
+    return EdgeNode(agent_id=server.agent_id, edge_mode="security_edge", edge_state="enabled", edge_install_phase="healthy")
 
 
 @pytest.fixture
@@ -114,7 +114,7 @@ async def test_nodes_list_derives_server_gateway_client_roles(client, session_ma
         s.add_all([server_agent, gateway_agent, client_agent])
         await s.commit()
         server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
-        _enable_security_edge(server)
+        s.add(_enable_security_edge(server))
         s.add(server)
         s.add(TunnelClient(id=uuid.uuid4(), agent_id=gateway_agent.id, is_gateway=True, vm_network="192.168.1.0/24"))
         s.add(TunnelClient(id=uuid.uuid4(), agent_id=client_agent.id, is_gateway=False))
@@ -148,8 +148,9 @@ async def test_nodes_list_derives_server_gateway_client_roles(client, session_ma
     assert by_name["edge-1"]["edge_components"]["traefik"]["running"] is True
     assert by_name["edge-1"]["edge_components"]["appsec"]["phase"] == "healthy"
     assert by_name["gw-1"]["role"] == "gateway"
-    assert by_name["gw-1"]["edge_mode"] is None
-    assert by_name["gw-1"]["edge_components"] == {}
+    assert by_name["gw-1"]["edge_mode"] == "tcp_udp_only"
+    assert all(component["desired"] == "disabled" for component in by_name["gw-1"]["edge_components"].values())
+    assert by_name["road-1"]["edge_components"] == {}
     assert by_name["road-1"]["role"] == "client"
 
 
@@ -160,7 +161,7 @@ async def test_node_edge_rolls_up_component_phases(client, session_maker) -> Non
         s.add(agent)
         await s.commit()
         server = TunnelServer(id=uuid.uuid4(), agent_id=agent.id, tunnel_network="10.21.0.0/24")
-        _enable_security_edge(server)
+        s.add(_enable_security_edge(server))
         s.add(server)
         s.add(
             CrowdSecSnapshot(
@@ -329,7 +330,7 @@ async def test_edge_reconcile_dispatches_unified_desired_state(client, session_m
         s.add_all([server_agent, gateway_agent])
         await s.commit()
         server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
-        _enable_security_edge(server)
+        s.add(_enable_security_edge(server))
         client_row = TunnelClient(id=uuid.uuid4(), agent_id=gateway_agent.id, is_gateway=True)
         s.add_all([server, client_row])
         await s.commit()
@@ -344,16 +345,13 @@ async def test_edge_reconcile_dispatches_unified_desired_state(client, session_m
         )
         s.add(att)
         await s.commit()
-        pf = PortForward(
-            id=uuid.uuid4(),
-            attachment_id=att.id,
-            protocol="tcp",
-            public_port=443,
-            destination_ip="192.168.1.10",
-            destination_port=8080,
-            service_kind="http",
-            domain="app.example.com",
-            active=True,
+        from app.models.http_route import HTTPRoute
+        from app.models.http_public_ingress import HTTPPublicIngress
+        pf = HTTPRoute(
+            id=uuid.uuid4(), agent_id=server_agent.id, visibility="public_only",
+            public_ingress=HTTPPublicIngress(attachment_id=att.id, public_port=443),
+            destination_ip="192.168.1.10", destination_port=8080,
+            domain="app.example.com", active=True,
         )
         s.add(pf)
         await s.flush()
@@ -367,13 +365,24 @@ async def test_edge_reconcile_dispatches_unified_desired_state(client, session_m
     assert fake_manager.sent
     msg = fake_manager.sent[-1]["message"]
     assert msg["type"] == "edge_desired_state"
+    assert msg["params"]["runtime_mode"] == "security_edge"
+    assert msg["params"]["public_ingress"] == []
     assert set(msg["params"]) == {
+        "runtime_mode",
+        "public_ingress",
         "whitelist",
         "traefik_static_config",
         "traefik_dynamic_config",
         "nginx_cache_config",
         "traefik_acme",
+        "desired_hash",
+        "config_version_id",
     }
+    async with session_maker() as s:
+        version = await s.get(EdgeConfigVersion, uuid.UUID(msg["params"]["config_version_id"]))
+        assert version.agent_id == server_agent.id
+        assert version.desired_hash == msg["params"]["desired_hash"]
+        assert version.source_snapshot["agent_id"] == str(server_agent.id)
     router = msg["params"]["traefik_dynamic_config"]["http"]["routers"]["app-example-com"]
     assert router["tls"] == {}
     middleware = msg["params"]["traefik_dynamic_config"]["http"]["middlewares"]["crowdsec-bouncer"]
@@ -387,7 +396,7 @@ async def test_edge_reconcile_sends_acme_token_but_redacts_command_log(client, s
         s.add(server_agent)
         await s.commit()
         server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
-        _enable_security_edge(server)
+        s.add(_enable_security_edge(server))
         s.add(server)
         settings = await s.get(SystemSettings, 1)
         if settings is None:
@@ -430,8 +439,8 @@ async def test_security_sites_filter_by_agent_id_and_default_observe(client, ses
         await s.commit()
         server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
         other = TunnelServer(id=uuid.uuid4(), agent_id=other_agent.id, tunnel_network="10.22.0.0/24")
-        _enable_security_edge(server)
-        _enable_security_edge(other)
+        s.add(_enable_security_edge(server))
+        s.add(_enable_security_edge(other))
         client_row = TunnelClient(id=uuid.uuid4(), agent_id=gateway_agent.id, is_gateway=True)
         s.add_all([server, other, client_row])
         await s.commit()
@@ -496,7 +505,7 @@ async def test_security_site_rejects_conflicting_raw_edge_forward(client, sessio
         s.add_all([server_agent, gateway_agent])
         await s.commit()
         server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
-        _enable_security_edge(server)
+        s.add(_enable_security_edge(server))
         client_row = TunnelClient(id=uuid.uuid4(), agent_id=gateway_agent.id, is_gateway=True)
         s.add_all([server, client_row])
         await s.commit()
@@ -547,7 +556,7 @@ async def test_antibot_requires_configured_captcha_keys(client, session_maker) -
         s.add_all([server_agent, gateway_agent])
         await s.commit()
         server = TunnelServer(id=uuid.uuid4(), agent_id=server_agent.id, tunnel_network="10.21.0.0/24")
-        _enable_security_edge(server)
+        s.add(_enable_security_edge(server))
         client_row = TunnelClient(id=uuid.uuid4(), agent_id=gateway_agent.id, is_gateway=True)
         s.add_all([server, client_row])
         await s.commit()

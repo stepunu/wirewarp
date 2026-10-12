@@ -359,8 +359,21 @@ async def handle_command_result(agent_id: str, msg: dict, db: AsyncSession) -> N
             log.output = output
             command_type = log.command_type
             command_params = log.params or {}
+            if command_type == "edge_desired_state" and command_params.get("config_version_id"):
+                from app.models.edge_config_version import EdgeConfigVersion
+                try:
+                    version_id = uuid.UUID(command_params["config_version_id"])
+                except (ValueError, TypeError):
+                    version_id = None
+                version = await db.get(EdgeConfigVersion, version_id) if version_id else None
+                if version and str(version.agent_id) == str(agent_id) and version.desired_hash == command_params.get("desired_hash"):
+                    version.agent_result = "applied" if success is True else "failed"
+                    version.applied_at = datetime.now(timezone.utc) if success is True else None
             await db.commit()
             emit_audit_changed()
+            if command_type == "site_link_teardown":
+                from app.services.site_link_ops import acknowledge_site_link_teardown
+                await acknowledge_site_link_teardown(agent_id, log.id, db)
 
     result = await db.execute(select(Agent).where(Agent.id == agent_id))
     agent = result.scalar_one_or_none()
@@ -425,6 +438,8 @@ async def handle_command_result(agent_id: str, msg: dict, db: AsyncSession) -> N
                     await db.commit()
                     emit_tunnel_client_changed()
                     if att.wg_public_key:
+                        from app.services.site_link_topology import refresh_site_link_topology
+                        await refresh_site_link_topology(db)
                         await dispatch_add_peer_for_attachment(att, db)
 
 
@@ -836,4 +851,8 @@ async def dispatch(agent_id: str, msg: dict, db: AsyncSession) -> None:
         await handle_edge_access_events(agent_id, msg, db)
     elif msg_type == "edge_cache_status":
         await handle_edge_cache_status(agent_id, msg, db)
+    elif msg_type == "site_link_state":
+        from app.services.site_link_ops import acknowledge_site_link_state
+
+        await acknowledge_site_link_state(agent_id, msg, db)
     # Unknown message types are silently ignored

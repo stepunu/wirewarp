@@ -10,7 +10,7 @@ import yaml
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.port_forward import PortForward
+from app.models.http_route import HTTPRoute
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
 from app.schemas.security import (
@@ -67,6 +67,11 @@ async def preview_traefik_import(
         raise ValueError("Tunnel server not found")
 
     config = _parse_import_request_config(request)
+    existing = await _existing_sites_by_domain(db, request.server_id)
+    return preview_traefik_config(config, existing, overwrite=request.overwrite)
+
+
+def preview_traefik_config(config: dict, existing: dict[str, uuid.UUID], *, overwrite: bool) -> TraefikImportPreview:
     http = config.get("http") if isinstance(config, dict) else {}
     if not isinstance(http, dict):
         http = {}
@@ -79,7 +84,6 @@ async def preview_traefik_import(
         else {}
     )
 
-    existing = await _existing_sites_by_domain(db, request.server_id)
     previews: list[TraefikImportRoutePreview] = []
     for router_name, router in sorted(routers.items()):
         if not isinstance(router, dict):
@@ -92,7 +96,7 @@ async def preview_traefik_import(
                 middlewares,
                 transports,
                 existing,
-                overwrite=request.overwrite,
+                overwrite=overwrite,
             )
         )
 
@@ -284,21 +288,13 @@ async def _existing_sites_by_domain(
     db: AsyncSession,
     server_id: uuid.UUID,
 ) -> dict[str, uuid.UUID]:
-    att_ids = (
-        await db.execute(
-            select(TunnelClientAttachment.id).where(
-                TunnelClientAttachment.tunnel_server_id == server_id
-            )
-        )
-    ).scalars().all()
-    if not att_ids:
+    owner_id = await db.scalar(select(TunnelServer.agent_id).where(TunnelServer.id == server_id))
+    if owner_id is None:
         return {}
     rows = (
         await db.execute(
-            select(PortForward.id, PortForward.domain).where(
-                PortForward.attachment_id.in_(att_ids),
-                PortForward.service_kind == "http",
-                PortForward.domain.is_not(None),
+            select(HTTPRoute.id, HTTPRoute.domain).where(
+                HTTPRoute.agent_id == owner_id,
             )
         )
     ).all()

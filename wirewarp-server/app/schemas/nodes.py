@@ -42,6 +42,10 @@ class NodeRead(BaseModel):
     edge_state: str | None = None
     edge_install_phase: str | None = None
     edge_components: dict[str, EdgeComponentRead] = Field(default_factory=dict)
+    lan_bind_ip: str | None = None
+    public_bind_ip: str | None = None
+    relay_enabled: bool = False
+    runtime_mode: str = "disabled"
 
 
 class NodeEdgeCapabilitiesRead(BaseModel):
@@ -52,12 +56,19 @@ class NodeEdgeCapabilitiesRead(BaseModel):
     last_error: str | None = None
     components: dict[str, EdgeComponentRead]
     unavailable_reason: str | None = None
+    lan_bind_ip: str | None = None
+    public_bind_ip: str | None = None
+    public_ingress_available: bool = True
+    relay_enabled: bool = False
+    runtime_mode: str = "disabled"
 
 
 class NodeEdgeCapabilitiesUpdate(BaseModel):
     mode: str | None = None
     state: str | None = None
     components: dict[str, str] | None = None
+    lan_bind_ip: str | None = None
+    public_bind_ip: str | None = None
 
 
 class NodeEdgeActionResult(BaseModel):
@@ -75,6 +86,11 @@ class NodeEdgeRead(BaseModel):
     last_error: str | None = None
     unavailable_reason: str | None = None
     components: dict[str, EdgeComponentRead]
+    lan_bind_ip: str | None = None
+    public_bind_ip: str | None = None
+    public_ingress_available: bool = True
+    relay_enabled: bool = False
+    runtime_mode: str = "disabled"
     policy: ServerEdgePolicyRead
     crowdsec: CrowdSecSnapshotRead
     traefik: TraefikStatusRead

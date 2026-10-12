@@ -20,11 +20,12 @@ from app.database import get_db
 from app.models.agent import Agent
 from app.models.crowdsec_snapshot import CrowdSecSnapshot
 from app.models.edge_route_config import EdgeRouteConfig
-from app.models.port_forward import PortForward
+from app.models.http_route import HTTPRoute
+from app.models.http_public_ingress import HTTPPublicIngress
+from app.models.edge_node import EdgeNode
 from app.models.security_event import SecurityEvent
 from app.models.system_settings import SystemSettings
 from app.models.traefik_snapshot import TraefikSnapshot
-from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server import TunnelServer
 from app.models.user import User
 from app.realtime.events import emit_edge_changed, emit_security_changed
@@ -58,11 +59,14 @@ from app.services.edge_port_conflicts import (
 )
 from app.services.edge_ops import (
     dispatch_edge_desired_state,
-    dispatch_edge_for_attachment,
     edge_feature_disabled_detail,
     edge_unavailable_reason,
     site_server_context,
 )
+from app.services.edge_ownership import get_edge_owner
+from app.services.edge_render import validate_edge_configuration
+from app.schemas.edge import EdgeRouteUpsert
+from pydantic import ValidationError
 from app.services.secrets import get_captcha_secret_key
 from app.services.traefik_importer import preview_traefik_import
 
@@ -144,29 +148,60 @@ async def security_overview(
     access_series: list[TimePoint] = []
     block_series: list[TimePoint] = []
 
-    # Per-server status
+    from app.models.tunnel_client import TunnelClient
+    from app.services.edge_relay_ops import load_relay_routes
+    from app.services.edge_ops import edge_runtime_mode
+
+    # Capabilities belong to the agent. Gateways do not need a VPS attachment.
     server_rows = (
         await db.execute(
-            select(TunnelServer, Agent)
-            .join(Agent, Agent.id == TunnelServer.agent_id)
+            select(Agent, TunnelServer, TunnelClient, EdgeNode, CrowdSecSnapshot, TraefikSnapshot)
+            .outerjoin(TunnelServer, TunnelServer.agent_id == Agent.id)
+            .outerjoin(TunnelClient, TunnelClient.agent_id == Agent.id)
+            .outerjoin(EdgeNode, EdgeNode.agent_id == Agent.id)
+            .outerjoin(CrowdSecSnapshot, CrowdSecSnapshot.agent_id == Agent.id)
+            .outerjoin(TraefikSnapshot, TraefikSnapshot.agent_id == Agent.id)
+            .where((Agent.type == "server") | TunnelClient.is_gateway.is_(True))
+            .order_by(Agent.name, Agent.id)
         )
     ).all()
+    route_counts = dict((await db.execute(
+        select(HTTPRoute.agent_id, sa_func.count(HTTPRoute.id)).group_by(HTTPRoute.agent_id)
+    )).all())
+    active_route_counts = dict((await db.execute(
+        select(HTTPRoute.agent_id, sa_func.count(HTTPRoute.id)).where(HTTPRoute.active.is_(True)).group_by(HTTPRoute.agent_id)
+    )).all())
 
     servers: list[ServerStatus] = []
-    for ts, agent in server_rows:
-        cs = await db.scalar(
-            select(CrowdSecSnapshot).where(CrowdSecSnapshot.agent_id == agent.id)
-        )
-        tk = await db.scalar(
-            select(TraefikSnapshot).where(TraefikSnapshot.agent_id == agent.id)
-        )
+    for agent, ts, _gateway, owner, cs, tk in server_rows:
+        role = "server" if agent.type == "server" else "gateway"
+        runtime_mode = edge_runtime_mode(owner) if owner else "disabled"
+        relay_only = runtime_mode == "relay_only"
+        relay_routes = await load_relay_routes(db, agent.id) if ts else []
         servers.append(
             ServerStatus(
-                server_id=ts.id,
+                server_id=ts.id if ts else None,
                 agent_id=agent.id,
-                name=agent.name or agent.hostname or str(ts.id),
+                name=agent.name or agent.hostname or str(agent.id),
+                role=role,
+                placement="gateway_edge" if role == "gateway" else "vps_relay" if relay_only else "vps_edge",
+                runtime_mode=runtime_mode,
+                edge_mode=owner.edge_mode if owner else "tcp_udp_only",
+                edge_state=owner.edge_state if owner else "disabled",
+                edge_install_phase=owner.edge_install_phase if owner else "disabled",
+                routes_count=route_counts.get(agent.id, 0),
+                active_routes_count=active_route_counts.get(agent.id, 0),
+                relay_routes_count=len(relay_routes),
                 crowdsec_running=bool(cs and cs.running),
                 traefik_running=bool(tk and tk.running),
+                crowdsec_installed=cs.installed if cs else None,
+                traefik_installed=tk.installed if tk else None,
+                crowdsec_phase=cs.phase if cs else None,
+                traefik_phase=tk.phase if tk else None,
+                crowdsec_error=(cs.last_error or cs.error) if cs else None,
+                traefik_error=(tk.last_error or tk.error) if tk else None,
+                crowdsec_updated_at=cs.updated_at if cs else None,
+                traefik_updated_at=tk.updated_at if tk else None,
             )
         )
 
@@ -186,6 +221,8 @@ async def security_overview(
         top_attackers=top_attackers,
         top_scenarios=top_scenarios,
         servers=servers,
+        http_routes_count=sum(node.routes_count for node in servers),
+        active_http_routes_count=sum(node.active_routes_count for node in servers),
     )
 
 
@@ -275,11 +312,11 @@ async def _captcha_configured(db: AsyncSession) -> bool:
 
 
 def _site_read(
-    pf: PortForward,
+    pf: HTTPRoute,
     *,
     server_id: uuid.UUID | None = None,
     agent_id: uuid.UUID | None = None,
-    server: TunnelServer | None = None,
+    server: EdgeNode | None = None,
 ) -> SiteRead:
     from app.schemas.security import EdgeRouteConfigRead
 
@@ -288,6 +325,7 @@ def _site_read(
         ec = pf.edge_route_config
         ec_read = EdgeRouteConfigRead(
             id=ec.id,
+            route_id=ec.route_id,
             port_forward_id=ec.port_forward_id,
             waf_mode=ec.waf_mode,
             rate_limit_rps=ec.rate_limit_rps,
@@ -310,17 +348,16 @@ def _site_read(
         )
     return SiteRead(
         id=pf.id,
-        attachment_id=pf.attachment_id,
-        tunnel_server_ip_id=pf.tunnel_server_ip_id,
+        attachment_id=pf.public_ingress.attachment_id if pf.public_ingress else None,
+        tunnel_server_ip_id=pf.public_ingress.tunnel_server_ip_id if pf.public_ingress else None,
         server_id=server_id,
         agent_id=agent_id,
-        protocol=pf.protocol,
-        public_port=pf.public_port,
-        public_port_end=pf.public_port_end,
+        protocol="tcp",
+        public_port=pf.public_ingress.public_port if pf.public_ingress else None,
+        visibility=pf.visibility,
         domain=pf.domain,
         destination_ip=pf.destination_ip,
         destination_port=pf.destination_port,
-        destination_port_end=pf.destination_port_end,
         active=pf.active,
         description=pf.description,
         service_kind=pf.service_kind,
@@ -330,13 +367,13 @@ def _site_read(
     )
 
 
-def _safe_route_name(pf: PortForward) -> str:
+def _safe_route_name(pf: HTTPRoute) -> str:
     return (pf.domain or str(pf.id)).replace(".", "-").replace(":", "-")
 
 
 def _effective_site_policy(
-    pf: PortForward,
-    server: TunnelServer | None,
+    pf: HTTPRoute,
+    server: EdgeNode | None,
 ) -> SiteEffectivePolicy:
     ec = pf.edge_route_config
     safe_name = _safe_route_name(pf)
@@ -370,30 +407,13 @@ def _effective_site_policy(
     )
 
 
-def _server_edge_policy_read(server: TunnelServer) -> ServerEdgePolicyRead:
+def _server_edge_policy_read(server: TunnelServer, owner: EdgeNode) -> ServerEdgePolicyRead:
     return ServerEdgePolicyRead(
         server_id=server.id,
         agent_id=server.agent_id,
-        rate_limit_rps=server.edge_rate_limit_rps,
-        rate_limit_burst=server.edge_rate_limit_burst,
+        rate_limit_rps=owner.edge_rate_limit_rps,
+        rate_limit_burst=owner.edge_rate_limit_burst,
     )
-
-
-async def _get_server_agent_for_pf(pf: PortForward, db: AsyncSession) -> str | None:
-    """Return the agent_id (str) of the tunnel server that owns this port_forward."""
-    att = await db.scalar(
-        select(TunnelClientAttachment).where(
-            TunnelClientAttachment.id == pf.attachment_id
-        )
-    )
-    if att is None:
-        return None
-    ts = await db.scalar(
-        select(TunnelServer).where(TunnelServer.id == att.tunnel_server_id)
-    )
-    if ts is None:
-        return None
-    return str(ts.agent_id)
 
 
 async def _ensure_security_edge_enabled_for_attachment(
@@ -406,17 +426,17 @@ async def _ensure_security_edge_enabled_for_attachment(
     server = await db.get(TunnelServer, server_id)
     if server is None:
         raise HTTPException(status_code=404, detail="Tunnel server not found")
-    if edge_unavailable_reason(server):
-        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(server))
+    owner = await get_edge_owner(db, server.agent_id)
+    if edge_unavailable_reason(owner):
+        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(owner))
     return server
 
 
-async def _ensure_security_edge_enabled_for_site(
-    pf: PortForward,
-    db: AsyncSession,
-) -> TunnelServer:
-    server = await _ensure_security_edge_enabled_for_attachment(pf.attachment_id, db)
-    return server
+async def _ensure_security_edge_enabled_for_site(pf: HTTPRoute, db: AsyncSession) -> EdgeNode:
+    owner = await get_edge_owner(db, pf.agent_id)
+    if edge_unavailable_reason(owner):
+        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(owner))
+    return owner
 
 
 def _validate_rate_limit(rps: int | None, burst: int | None) -> None:
@@ -435,7 +455,7 @@ async def get_server_edge_policy(
     server = await db.get(TunnelServer, server_id)
     if server is None:
         raise HTTPException(status_code=404, detail="Tunnel server not found")
-    return _server_edge_policy_read(server)
+    return _server_edge_policy_read(server, await get_edge_owner(db, server.agent_id))
 
 
 @router.patch("/servers/{server_id}/edge-policy", response_model=ServerEdgePolicyRead)
@@ -448,22 +468,24 @@ async def update_server_edge_policy(
     server = await db.get(TunnelServer, server_id)
     if server is None:
         raise HTTPException(status_code=404, detail="Tunnel server not found")
-    if edge_unavailable_reason(server):
-        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(server))
+    owner = await get_edge_owner(db, server.agent_id)
+    if edge_unavailable_reason(owner):
+        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(owner))
     fields = body.model_fields_set
-    rps = body.rate_limit_rps if "rate_limit_rps" in fields else server.edge_rate_limit_rps
-    burst = body.rate_limit_burst if "rate_limit_burst" in fields else server.edge_rate_limit_burst
+    rps = body.rate_limit_rps if "rate_limit_rps" in fields else owner.edge_rate_limit_rps
+    burst = body.rate_limit_burst if "rate_limit_burst" in fields else owner.edge_rate_limit_burst
     _validate_rate_limit(rps, burst)
     if "rate_limit_rps" in fields:
-        server.edge_rate_limit_rps = body.rate_limit_rps
+        owner.edge_rate_limit_rps = body.rate_limit_rps
     if "rate_limit_burst" in fields:
-        server.edge_rate_limit_burst = body.rate_limit_burst
+        owner.edge_rate_limit_burst = body.rate_limit_burst
+    await validate_edge_configuration(server.agent_id, db)
     await db.commit()
-    await db.refresh(server)
+    await db.refresh(owner)
     await dispatch_edge_desired_state(server.agent_id, db, actor_user_id=user.id)
     emit_edge_changed()
     emit_security_changed()
-    return _server_edge_policy_read(server)
+    return _server_edge_policy_read(server, await get_edge_owner(db, server.agent_id))
 
 
 @router.post("/traefik/import/preview", response_model=TraefikImportPreview)
@@ -498,8 +520,9 @@ async def import_traefik_routes(
     server = await db.get(TunnelServer, body.server_id)
     if server is None:
         raise HTTPException(status_code=404, detail="Tunnel server not found")
-    if edge_unavailable_reason(server):
-        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(server))
+    owner = await get_edge_owner(db, server.agent_id)
+    if edge_unavailable_reason(owner):
+        raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(owner))
 
     created = 0
     updated = 0
@@ -508,25 +531,24 @@ async def import_traefik_routes(
         if not route.importable:
             skipped += 1
             continue
-        pf = await db.get(PortForward, route.existing_site_id) if route.existing_site_id else None
+        pf = await db.get(HTTPRoute, route.existing_site_id) if route.existing_site_id else None
         if pf is None:
-            pf = PortForward(
+            pf = HTTPRoute(
                 id=uuid.uuid4(),
-                attachment_id=body.attachment_id,
-                protocol="tcp",
-                public_port=443,
+                agent_id=server.agent_id,
+                visibility="public_only",
                 destination_ip=route.destination_ip or "",
                 destination_port=route.destination_port or 80,
                 description=f"Imported from Traefik router {route.router_name}",
                 active=body.activate,
-                service_kind="http",
                 domain=route.domain,
             )
             db.add(pf)
             await db.flush()
             created += 1
         else:
-            pf.attachment_id = body.attachment_id
+            if pf.agent_id != server.agent_id:
+                raise HTTPException(status_code=400, detail="Imported route belongs to another node")
             pf.destination_ip = route.destination_ip or pf.destination_ip
             pf.destination_port = route.destination_port or pf.destination_port
             pf.active = body.activate
@@ -535,8 +557,15 @@ async def import_traefik_routes(
                 pf.description = f"Imported from Traefik router {route.router_name}"
             updated += 1
 
+        ingress = await db.get(HTTPPublicIngress, pf.id)
+        if ingress is None:
+            ingress = HTTPPublicIngress(route_id=pf.id, attachment_id=body.attachment_id, active=body.activate)
+            db.add(ingress)
+        else:
+            ingress.attachment_id = body.attachment_id
+            ingress.active = body.activate
         ec = await db.scalar(
-            select(EdgeRouteConfig).where(EdgeRouteConfig.port_forward_id == pf.id)
+            select(EdgeRouteConfig).where(EdgeRouteConfig.route_id == pf.id)
         )
         if ec is None:
             ec = EdgeRouteConfig(id=uuid.uuid4(), port_forward_id=pf.id)
@@ -558,7 +587,9 @@ async def import_traefik_routes(
         ec.imported_service_name = route.service_name
         ec.imported_middlewares = route.middlewares
         ec.import_warnings = route.warnings or None
+        _sync_legacy_policy(ec, {"waf_mode", "rate_limit_rps", "rate_limit_burst", "antibot", "auth_mode", "auth_config", "ip_allow", "ip_deny", "geo_block", "tls_source"})
 
+    await validate_edge_configuration(server.agent_id, db)
     await db.commit()
     await dispatch_edge_desired_state(server.agent_id, db, actor_user_id=user.id)
     emit_edge_changed()
@@ -616,47 +647,48 @@ async def list_sites(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_ops_role),
 ):
-    """All HTTP port_forwards joined with their edge_route_config."""
-    q = (
-        select(PortForward)
-        .options(selectinload(PortForward.edge_route_config))
-        .where(PortForward.service_kind == "http")
-        .order_by(PortForward.created_at.desc())
-    )
-    scope_server: TunnelServer | None = None
+    q = select(HTTPRoute).options(selectinload(HTTPRoute.edge_route_config), selectinload(HTTPRoute.public_ingress)).order_by(HTTPRoute.created_at.desc())
+    if server_id is not None:
+        server = await db.get(TunnelServer, server_id)
+        if server is None:
+            return []
+        q = q.where(HTTPRoute.agent_id == server.agent_id)
     if agent_id is not None:
-        scope_server = await db.scalar(
-            select(TunnelServer).where(TunnelServer.agent_id == agent_id)
-        )
-        if scope_server is None:
-            return []
-    elif server_id is not None:
-        scope_server = await db.scalar(
-            select(TunnelServer).where(TunnelServer.id == server_id)
-        )
-        if scope_server is None:
-            return []
-    if scope_server is not None:
-        att_ids = (
-            await db.execute(
-                select(TunnelClientAttachment.id).where(
-                    TunnelClientAttachment.tunnel_server_id == scope_server.id
-                )
-            )
-        ).scalars().all()
-        if not att_ids:
-            return []
-        q = q.where(PortForward.attachment_id.in_(att_ids))
-
+        q = q.where(HTTPRoute.agent_id == agent_id)
     rows = (await db.execute(q)).scalars().all()
-    out: list[SiteRead] = []
-    for pf in rows:
-        sid, aid = await site_server_context(pf, db)
-        site_server = scope_server
-        if site_server is None and sid is not None:
-            site_server = await db.get(TunnelServer, sid)
-        out.append(_site_read(pf, server_id=sid, agent_id=aid, server=site_server))
+    out = []
+    for route in rows:
+        sid, aid = await site_server_context(route, db)
+        owner = await get_edge_owner(db, route.agent_id)
+        out.append(_site_read(route, server_id=sid, agent_id=aid, server=owner))
     return out
+
+
+def _sync_legacy_policy(ec: EdgeRouteConfig, fields: set[str]) -> None:
+    policy = dict(ec.policy_json or {})
+    for field in ("waf_mode", "antibot", "auth_mode", "auth_config", "ip_allow", "ip_deny", "geo_block", "tls_source"):
+        if field in fields:
+            policy[field] = getattr(ec, field)
+    if fields.intersection({"rate_limit_rps", "rate_limit_burst"}):
+        rate = dict(policy.get("rate_limit") or {})
+        if "rate_limit_rps" in fields:
+            rate["requests"] = ec.rate_limit_rps
+        if "rate_limit_burst" in fields:
+            rate["burst"] = ec.rate_limit_burst
+        policy["rate_limit"] = rate
+    ec.policy_json = policy
+
+
+def _legacy_upsert(body: SiteCreate | SiteUpdate) -> EdgeRouteUpsert:
+    payload = body.model_dump(exclude_unset=True)
+    allowed = {"attachment_id", "tunnel_server_ip_id", "domain", "destination_ip", "destination_port", "description", "upstream_scheme", "upstream_insecure_skip_verify"}
+    values = {key: value for key, value in payload.items() if key in allowed}
+    if "active" in payload:
+        values["enabled"] = payload["active"]
+    try:
+        return EdgeRouteUpsert.model_validate(values)
+    except ValidationError:
+        raise HTTPException(status_code=422, detail="Invalid HTTP route configuration") from None
 
 
 @router.post("/sites", response_model=SiteRead, status_code=201)
@@ -665,62 +697,31 @@ async def create_site(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role("admin")),
 ):
-    """Create an HTTP port_forward + edge_route_config, then sync Traefik."""
     server = await _ensure_security_edge_enabled_for_attachment(body.attachment_id, db)
     if body.antibot and not await _captcha_configured(db):
         raise HTTPException(status_code=400, detail="CAPTCHA provider keys must be configured before enabling anti-bot")
-    await _ensure_site_does_not_shadow_raw_edge_forward(
-        db=db,
-        attachment_id=body.attachment_id,
-        active=True,
-    )
+    _validate_rate_limit(body.rate_limit_rps, body.rate_limit_burst)
+    await _ensure_site_does_not_shadow_raw_edge_forward(db=db, attachment_id=body.attachment_id, active=True)
+    if await db.scalar(select(HTTPRoute.id).where(HTTPRoute.agent_id == server.agent_id, HTTPRoute.domain == body.domain)):
+        raise HTTPException(status_code=409, detail="An HTTP route with this domain already exists on this node")
+    from app.routers.nodes import _upsert_node_route
 
-    pf = PortForward(
-        id=uuid.uuid4(),
-        attachment_id=body.attachment_id,
-        tunnel_server_ip_id=body.tunnel_server_ip_id,
-        protocol="tcp",
-        public_port=443,  # Traefik handles TLS; raw port unused by iptables
-        destination_ip=body.destination_ip,
-        destination_port=body.destination_port,
-        description=body.description,
-        active=True,
-        service_kind="http",
-        domain=body.domain,
-    )
-    db.add(pf)
-    await db.flush()  # obtain pf.id before creating edge config
-
-    ec = EdgeRouteConfig(
-        id=uuid.uuid4(),
-        port_forward_id=pf.id,
-        waf_mode=body.waf_mode,
-        rate_limit_rps=body.rate_limit_rps,
-        rate_limit_burst=body.rate_limit_burst,
-        antibot=body.antibot,
-        auth_mode=body.auth_mode,
-        auth_config=body.auth_config,
-        ip_allow=body.ip_allow,
-        ip_deny=body.ip_deny,
-        geo_block=body.geo_block,
-        tls_source=body.tls_source,
-        upstream_scheme=body.upstream_scheme,
-        upstream_insecure_skip_verify=body.upstream_insecure_skip_verify,
-    )
-    db.add(ec)
+    route = await _upsert_node_route(server.agent_id, body.domain, _legacy_upsert(body), db, user, commit=False)
+    ec = route.edge_route_config
+    config_fields = {"waf_mode", "rate_limit_rps", "rate_limit_burst", "antibot", "auth_mode", "auth_config", "ip_allow", "ip_deny", "geo_block", "tls_source", "upstream_scheme", "upstream_insecure_skip_verify"}
+    for field in config_fields:
+        setattr(ec, field, getattr(body, field))
+    _sync_legacy_policy(ec, config_fields)
+    await validate_edge_configuration(route.agent_id, db)
     await db.commit()
-
-    await db.refresh(pf)
-    await db.refresh(ec)
-    pf.edge_route_config = ec  # type: ignore[assignment]
-
-    agent_id = await _get_server_agent_for_pf(pf, db)
-    if agent_id:
-        await dispatch_edge_desired_state(agent_id, db, actor_user_id=user.id)
-
+    await db.refresh(route)
+    await db.refresh(route, ["public_ingress"])
+    route.edge_route_config = ec
+    await dispatch_edge_desired_state(route.agent_id, db, actor_user_id=user.id)
+    emit_edge_changed()
     emit_security_changed()
-    sid, aid = await site_server_context(pf, db)
-    return _site_read(pf, server_id=sid, agent_id=aid, server=server)
+    owner = await get_edge_owner(db, server.agent_id)
+    return _site_read(route, server_id=server.id, agent_id=server.agent_id, server=owner)
 
 
 @router.patch("/sites/{port_forward_id}", response_model=SiteRead)
@@ -730,67 +731,50 @@ async def update_site(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role("admin")),
 ):
-    pf = await db.scalar(
-        select(PortForward)
-        .options(selectinload(PortForward.edge_route_config))
-        .where(PortForward.id == port_forward_id, PortForward.service_kind == "http")
-    )
-    if pf is None:
+    route = await db.scalar(select(HTTPRoute).options(selectinload(HTTPRoute.edge_route_config), selectinload(HTTPRoute.public_ingress)).where(HTTPRoute.id == port_forward_id))
+    if route is None:
         raise HTTPException(status_code=404, detail="Site not found")
-    server = await _ensure_security_edge_enabled_for_site(pf, db)
+    owner = await _ensure_security_edge_enabled_for_site(route, db)
     if body.antibot is True and not await _captcha_configured(db):
         raise HTTPException(status_code=400, detail="CAPTCHA provider keys must be configured before enabling anti-bot")
+    fields = body.model_fields_set
+    ec = route.edge_route_config
+    _validate_rate_limit(body.rate_limit_rps if "rate_limit_rps" in fields else ec.rate_limit_rps if ec else None, body.rate_limit_burst if "rate_limit_burst" in fields else ec.rate_limit_burst if ec else None)
+    active = body.active if body.active is not None else route.active
+    if route.public_ingress:
+        await _ensure_site_does_not_shadow_raw_edge_forward(db=db, attachment_id=route.public_ingress.attachment_id, active=active, exclude_port_forward_id=route.id)
+    if "domain" in fields:
+        from app.schemas.system_settings import valid_dns_name
+        if body.domain is None or not valid_dns_name(body.domain) or "_" in body.domain:
+            raise HTTPException(status_code=422, detail="HTTP route domain must be a valid DNS name")
+        duplicate = await db.scalar(select(HTTPRoute.id).where(HTTPRoute.agent_id == route.agent_id, HTTPRoute.domain == body.domain, HTTPRoute.id != route.id))
+        if duplicate:
+            raise HTTPException(status_code=409, detail="An HTTP route with this domain already exists on this node")
+    from app.routers.nodes import _upsert_node_route
 
-    body_fields = body.model_fields_set
-    next_active = body.active if "active" in body_fields and body.active is not None else pf.active
-    await _ensure_site_does_not_shadow_raw_edge_forward(
-        db=db,
-        attachment_id=pf.attachment_id,
-        active=next_active,
-        exclude_port_forward_id=pf.id,
-    )
-
-    # Update port_forward fields. Nullable fields may be explicitly cleared;
-    # non-null transport fields only update when a concrete value is supplied.
-    for field in ("domain", "description"):
-        if field in body_fields:
-            setattr(pf, field, getattr(body, field))
-    for field in ("destination_ip", "destination_port", "active"):
-        val = getattr(body, field, None)
-        if field in body_fields and val is not None:
-            setattr(pf, field, val)
-
-    # Update or create edge_route_config
-    ec = pf.edge_route_config
-    if ec is None:
-        ec = EdgeRouteConfig(id=uuid.uuid4(), port_forward_id=pf.id)
-        db.add(ec)
-    for field in (
-        "rate_limit_rps", "rate_limit_burst", "auth_config",
-        "ip_allow", "ip_deny", "geo_block",
-    ):
-        if field in body_fields:
-            setattr(ec, field, getattr(body, field))
-    for field in (
-        "waf_mode", "antibot", "auth_mode", "tls_source",
-        "upstream_scheme", "upstream_insecure_skip_verify",
-    ):
-        val = getattr(body, field, None)
-        if field in body_fields and val is not None:
-            setattr(ec, field, val)
-
+    route = await _upsert_node_route(route.agent_id, route.domain, _legacy_upsert(body), db, user, commit=False, route_id=route.id)
+    if "domain" in fields:
+        route.domain = body.domain
+    if "description" in fields:
+        route.description = body.description
+    ec = route.edge_route_config
+    nullable = {"rate_limit_rps", "rate_limit_burst", "auth_config", "ip_allow", "ip_deny", "geo_block"}
+    config_fields = nullable | {"waf_mode", "antibot", "auth_mode", "tls_source", "upstream_scheme", "upstream_insecure_skip_verify"}
+    for field in fields.intersection(config_fields):
+        value = getattr(body, field)
+        if field in nullable or value is not None:
+            setattr(ec, field, value)
+    _sync_legacy_policy(ec, fields.intersection(config_fields))
+    await validate_edge_configuration(route.agent_id, db)
     await db.commit()
-    await db.refresh(pf)
-    ec = pf.edge_route_config or ec
-    pf.edge_route_config = ec  # type: ignore[assignment]
-
-    agent_id = await _get_server_agent_for_pf(pf, db)
-    if agent_id:
-        await dispatch_edge_desired_state(agent_id, db, actor_user_id=user.id)
-
+    await db.refresh(route)
+    await db.refresh(route, ["public_ingress"])
+    route.edge_route_config = ec
+    await dispatch_edge_desired_state(route.agent_id, db, actor_user_id=user.id)
+    emit_edge_changed()
     emit_security_changed()
-    sid, aid = await site_server_context(pf, db)
-    return _site_read(pf, server_id=sid, agent_id=aid, server=server)
+    sid, aid = await site_server_context(route, db)
+    return _site_read(route, server_id=sid, agent_id=aid, server=owner)
 
 
 @router.delete("/sites/{port_forward_id}", status_code=204)
@@ -799,20 +783,17 @@ async def delete_site(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role("admin")),
 ):
-    pf = await db.scalar(
-        select(PortForward).where(
-            PortForward.id == port_forward_id, PortForward.service_kind == "http"
-        )
-    )
-    if pf is None:
+    route = await db.get(HTTPRoute, port_forward_id)
+    if route is None:
         raise HTTPException(status_code=404, detail="Site not found")
-    await _ensure_security_edge_enabled_for_site(pf, db)
-    agent_id = await _get_server_agent_for_pf(pf, db)
-    attachment_id = pf.attachment_id
-    await db.delete(pf)
+    await _ensure_security_edge_enabled_for_site(route, db)
+    from app.services.edge_migration import ensure_route_not_referenced
+    await ensure_route_not_referenced(db, route.id)
+    agent_id = route.agent_id
+    await db.delete(route)
     await db.commit()
-    if agent_id:
-        await dispatch_edge_for_attachment(attachment_id, db, actor_user_id=user.id)
+    await dispatch_edge_desired_state(agent_id, db, actor_user_id=user.id)
+    emit_edge_changed()
     emit_security_changed()
 
 
@@ -886,22 +867,14 @@ async def list_certs(
     later enhancement that requires reading Traefik's acme.json.
     TODO: surface real ACME status from the agent once available.
     """
-    q = select(PortForward).where(
-        PortForward.service_kind == "http",
-        PortForward.domain.is_not(None),
+    q = select(HTTPRoute).where(
+        HTTPRoute.domain.is_not(None),
     )
     if server_id is not None:
         ts = await db.scalar(select(TunnelServer).where(TunnelServer.id == server_id))
         if ts is None:
             raise HTTPException(status_code=404, detail="Tunnel server not found")
-        att_ids = (
-            await db.execute(
-                select(TunnelClientAttachment.id).where(
-                    TunnelClientAttachment.tunnel_server_id == ts.id
-                )
-            )
-        ).scalars().all()
-        q = q.where(PortForward.attachment_id.in_(att_ids))
+        q = q.where(HTTPRoute.agent_id == ts.agent_id)
 
     rows = (await db.execute(q)).scalars().all()
     return [

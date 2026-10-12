@@ -123,7 +123,9 @@ async def test_create_raw_edge_forward_allowed_when_edge_disabled(client, db, fa
     # Operator disables edge on the node. The http edge site row stays
     # active=true in the DB, but Traefik is no longer running on the
     # server — so a raw 80/443 forward must now be accepted.
-    server.edge_state = "disabled"
+    from app.models.edge_node import EdgeNode
+    owner = await db.get(EdgeNode, server.agent_id)
+    owner.edge_state = "disabled"
     await db.commit()
 
     res = await client.post(

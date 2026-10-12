@@ -1,6 +1,6 @@
 """Per-HTTP-route edge configuration.
 
-Keyed 1:1 to a port_forwards row (service_kind='http'). Stores WAF
+Keyed 1:1 to an independently owned HTTP route. Stores WAF
 mode, rate-limit, antibot, auth, ACL, geo-block, and TLS source so
 the server can render a complete Traefik dynamic config.
 """
@@ -17,7 +17,7 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, synonym
 
 from app.database import Base
 
@@ -28,9 +28,9 @@ class EdgeRouteConfig(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    port_forward_id: Mapped[uuid.UUID] = mapped_column(
+    route_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("port_forwards.id", ondelete="CASCADE"),
+        ForeignKey("http_routes.id", ondelete="CASCADE"),
         nullable=False,
         unique=True,
     )
@@ -66,6 +66,7 @@ class EdgeRouteConfig(Base):
     )
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     policy_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    inherit_node_policy: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -76,6 +77,8 @@ class EdgeRouteConfig(Base):
         nullable=False,
     )
 
-    port_forward: Mapped["PortForward"] = relationship(  # noqa: F821
-        "PortForward", back_populates="edge_route_config"
+    port_forward_id = synonym("route_id")
+    route: Mapped["HTTPRoute"] = relationship(  # noqa: F821
+        "HTTPRoute", back_populates="edge_route_config"
     )
+    port_forward = synonym("route")

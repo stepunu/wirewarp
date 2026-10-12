@@ -17,7 +17,7 @@ from app.models.edge_path_rule import EdgePathRule
 from app.models.edge_profile import EdgeProfile
 from app.models.edge_route_config import EdgeRouteConfig
 from app.models.edge_upstream_pool import EdgeUpstreamPool
-from app.models.port_forward import PortForward
+from app.models.http_route import HTTPRoute
 from app.models.user import User
 from app.realtime.events import emit_edge_changed, emit_security_changed
 from app.schemas.edge import (
@@ -36,13 +36,14 @@ from app.schemas.edge import (
     EdgeUpstreamPoolUpsert,
 )
 from app.services.agent_commands import send_command
+from app.services.edge_ownership import is_gateway_edge
+from app.services.edge_render import validate_edge_configuration, validate_render_policy
+from app.models.edge_node import EdgeNode
+from app.models.edge_node_policy import EdgeNodePolicy
 from app.services.edge_ops import (
     dispatch_edge_desired_state,
-    dispatch_edge_for_attachment,
-    site_server_context,
 )
 from app.services.edge_resources import (
-    apply_policy_to_edge_config,
     get_profile_by_id_or_slug,
     profile_read,
     route_edge_config,
@@ -52,6 +53,48 @@ from app.services.edge_resources import (
 )
 
 router = APIRouter()
+
+
+async def _profile_nodes(profile_id, db):
+    route_nodes = await db.scalars(select(HTTPRoute.agent_id).join(EdgeRouteConfig).where(EdgeRouteConfig.profile_id == profile_id))
+    policy_nodes = await db.scalars(select(EdgeNodePolicy.agent_id).where(EdgeNodePolicy.default_profile_id == profile_id))
+    return set(route_nodes.all()) | set(policy_nodes.all())
+
+
+async def _validate_profile(profile, db):
+    if profile.scope not in {"global", "node"} or (profile.scope == "global") != (profile.agent_id is None):
+        raise HTTPException(422, "Global profiles have no node owner. Node profiles require an owner")
+    try:
+        validate_render_policy(profile.policy_json or {})
+    except ValueError as exc:
+        raise HTTPException(422, detail={"code":"edge_policy_invalid", "detail":str(exc)}) from exc
+    nodes = await _profile_nodes(profile.id, db)
+    await _validate_profile_nodes(nodes, db)
+    return nodes
+
+
+async def _validate_profile_nodes(nodes, db):
+    for agent_id in nodes:
+        node = await db.get(EdgeNode, agent_id)
+        if node and node.edge_mode == "security_edge" and node.edge_state == "enabled":
+            await validate_edge_configuration(agent_id, db)
+
+
+async def _dispatch_profile_nodes(nodes, db, actor_id):
+    for agent_id in nodes:
+        await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor_id)
+
+
+async def _fragment_error(db: AsyncSession, agent_id: uuid.UUID, fragment_type: str, route_id: uuid.UUID | None) -> dict | None:
+    if route_id is not None:
+        route = await db.get(HTTPRoute, route_id)
+        if route is None or route.agent_id != agent_id:
+            return {"code": "route_node_mismatch", "field": "route_id"}
+    if await is_gateway_edge(db, agent_id) and fragment_type == "router":
+        return {"code": "gateway_router_fragment_unavailable", "detail": "Use managed routes to enforce LAN and public visibility on gateway edges."}
+    if fragment_type not in {"middleware", "service", "router", "tls", "transport"}:
+        return {"code": "invalid_fragment"}
+    return None
 
 
 def _upstream_pool_read(row: EdgeUpstreamPool) -> EdgeUpstreamPoolRead:
@@ -156,6 +199,7 @@ async def create_profile(
         policy_json=body.policy,
     )
     db.add(profile)
+    await _validate_profile(profile, db)
     await db.commit()
     await db.refresh(profile)
     return profile_read(profile)
@@ -178,7 +222,7 @@ async def put_profile(
     profile_id_or_slug: str,
     body: EdgeProfileUpsert,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_role("admin")),
+    actor: User = Depends(require_role("admin")),
 ):
     profile = await get_profile_by_id_or_slug(db, profile_id_or_slug)
     if profile is None:
@@ -194,8 +238,11 @@ async def put_profile(
     profile.scope = body.scope
     profile.agent_id = body.agent_id
     profile.policy_json = body.policy
+    nodes = await _validate_profile(profile, db)
     await db.commit()
     await db.refresh(profile)
+    await _dispatch_profile_nodes(nodes, db, actor.id)
+    emit_edge_changed()
     return profile_read(profile)
 
 
@@ -203,13 +250,20 @@ async def put_profile(
 async def delete_profile(
     profile_id_or_slug: str,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_role("admin")),
+    actor: User = Depends(require_role("admin")),
 ):
     profile = await get_profile_by_id_or_slug(db, profile_id_or_slug)
     if profile is None:
         raise HTTPException(status_code=404, detail="Edge profile not found")
+    actor_id = actor.id
+    nodes = await _profile_nodes(profile.id, db)
     await db.delete(profile)
+    await db.flush()
+    db.expire_all()
+    await _validate_profile_nodes(nodes, db)
     await db.commit()
+    await _dispatch_profile_nodes(nodes, db, actor_id)
+    emit_edge_changed()
 
 
 @router.get("/upstream-pools/{pool_id}", response_model=EdgeUpstreamPoolRead)
@@ -240,6 +294,7 @@ async def update_upstream_pool(
     row.servers = body.servers
     row.health_check = body.health_check
     row.policy_json = body.policy
+    await validate_edge_configuration(row.agent_id, db)
     await db.commit()
     await db.refresh(row)
     await dispatch_edge_desired_state(row.agent_id, db, actor_user_id=actor.id)
@@ -258,6 +313,7 @@ async def delete_upstream_pool(
         raise HTTPException(status_code=404, detail="Edge upstream pool not found")
     agent_id = row.agent_id
     await db.delete(row)
+    await validate_edge_configuration(agent_id, db)
     await db.commit()
     await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
     emit_edge_changed()
@@ -270,9 +326,9 @@ async def get_route(
     _: User = Depends(require_ops_role),
 ):
     route = await db.scalar(
-        select(PortForward)
-        .options(selectinload(PortForward.edge_route_config))
-        .where(PortForward.id == route_id, PortForward.service_kind == "http")
+        select(HTTPRoute)
+        .options(selectinload(HTTPRoute.edge_route_config))
+        .where(HTTPRoute.id == route_id)
     )
     if route is None:
         raise HTTPException(status_code=404, detail="Edge route not found")
@@ -288,44 +344,18 @@ async def update_route(
     actor: User = Depends(require_role("admin")),
 ):
     route = await db.scalar(
-        select(PortForward)
-        .options(selectinload(PortForward.edge_route_config))
-        .where(PortForward.id == route_id, PortForward.service_kind == "http")
+        select(HTTPRoute)
+        .options(selectinload(HTTPRoute.edge_route_config))
+        .where(HTTPRoute.id == route_id)
     )
     if route is None:
         raise HTTPException(status_code=404, detail="Edge route not found")
-    if body.attachment_id is not None:
-        route.attachment_id = body.attachment_id
-    if body.enabled is not None:
-        route.active = body.enabled
-    if body.destination_ip is not None:
-        route.destination_ip = body.destination_ip
-    if body.destination_port is not None:
-        route.destination_port = body.destination_port
-    if body.description is not None:
-        route.description = body.description
-    ec = await route_edge_config(db, route)
-    if body.profile_id is not None:
-        ec.profile_id = body.profile_id
-    if body.profile is not None:
-        profile = await get_profile_by_id_or_slug(db, body.profile)
-        if profile is None:
-            raise HTTPException(status_code=404, detail="Edge profile not found")
-        ec.profile_id = profile.id
-    if body.priority is not None:
-        ec.priority = body.priority
-    if body.upstream_scheme is not None:
-        ec.upstream_scheme = body.upstream_scheme
-    if body.upstream_insecure_skip_verify is not None:
-        ec.upstream_insecure_skip_verify = body.upstream_insecure_skip_verify
-    if body.policy is not None:
-        apply_policy_to_edge_config(ec, body.policy)
-    await db.commit()
-    await db.refresh(route)
-    await dispatch_edge_for_attachment(route.attachment_id, db, actor_user_id=actor.id)
-    emit_edge_changed()
-    emit_security_changed()
-    return await route_read(db, route, ec)
+    if body.domain is not None and body.domain != route.domain:
+        raise HTTPException(status_code=409, detail={"code": "route_domain_rename_unsupported", "field": "domain"})
+    from app.routers.nodes import _upsert_node_route
+
+    route = await _upsert_node_route(route.agent_id, route.domain, body, db, actor, route_id=route.id)
+    return await route_read(db, route, route.edge_route_config)
 
 
 @router.delete("/routes/{route_id}", status_code=204)
@@ -334,13 +364,15 @@ async def delete_route(
     db: AsyncSession = Depends(get_db),
     actor: User = Depends(require_role("admin")),
 ):
-    route = await db.get(PortForward, route_id)
-    if route is None or route.service_kind != "http":
+    route = await db.get(HTTPRoute, route_id)
+    if route is None:
         raise HTTPException(status_code=404, detail="Edge route not found")
-    attachment_id = route.attachment_id
+    from app.services.edge_migration import ensure_route_not_referenced
+    await ensure_route_not_referenced(db, route.id)
+    agent_id = route.agent_id
     await db.delete(route)
     await db.commit()
-    await dispatch_edge_for_attachment(attachment_id, db, actor_user_id=actor.id)
+    await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
     emit_edge_changed()
     emit_security_changed()
 
@@ -368,6 +400,9 @@ async def update_fragment(
     row = await db.get(EdgeFragment, fragment_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Edge fragment not found")
+    error = await _fragment_error(db, row.agent_id, body.fragment_type, body.route_id)
+    if error is not None:
+        raise HTTPException(status_code=409 if error["code"] == "gateway_router_fragment_unavailable" else 400, detail=error)
     row.name = body.name
     row.fragment_type = body.fragment_type
     row.content = body.content
@@ -375,6 +410,7 @@ async def update_fragment(
     row.enabled = body.enabled
     row.validation_state = "valid" if isinstance(body.content, dict) else "invalid"
     row.last_error = None if row.validation_state == "valid" else "Fragment content must be an object."
+    await validate_edge_configuration(row.agent_id, db)
     await db.commit()
     await db.refresh(row)
     await dispatch_edge_desired_state(row.agent_id, db, actor_user_id=actor.id)
@@ -393,6 +429,7 @@ async def delete_fragment(
         raise HTTPException(status_code=404, detail="Edge fragment not found")
     agent_id = row.agent_id
     await db.delete(row)
+    await validate_edge_configuration(agent_id, db)
     await db.commit()
     await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
     emit_edge_changed()
@@ -407,8 +444,10 @@ async def validate_fragment(
     row = await db.get(EdgeFragment, fragment_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Edge fragment not found")
-    valid = isinstance(row.content, dict) and row.fragment_type in {"middleware", "service", "router", "tls", "transport"}
-    return {"valid": valid, "errors": [] if valid else [{"code": "invalid_fragment"}]}
+    error = await _fragment_error(db, row.agent_id, row.fragment_type, row.route_id)
+    if not isinstance(row.content, dict):
+        error = {"code": "invalid_fragment"}
+    return {"valid": error is None, "errors": [] if error is None else [error]}
 
 
 @router.get("/routes/{route_id}/effective", response_model=EdgeEffectivePolicyRead)
@@ -418,9 +457,9 @@ async def get_route_effective(
     _: User = Depends(require_ops_role),
 ):
     route = await db.scalar(
-        select(PortForward)
-        .options(selectinload(PortForward.edge_route_config))
-        .where(PortForward.id == route_id, PortForward.service_kind == "http")
+        select(HTTPRoute)
+        .options(selectinload(HTTPRoute.edge_route_config))
+        .where(HTTPRoute.id == route_id)
     )
     if route is None:
         raise HTTPException(status_code=404, detail="Edge route not found")
@@ -433,8 +472,8 @@ async def validate_route(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_ops_role),
 ):
-    route = await db.get(PortForward, route_id)
-    if route is None or route.service_kind != "http":
+    route = await db.get(HTTPRoute, route_id)
+    if route is None:
         raise HTTPException(status_code=404, detail="Edge route not found")
     return {"valid": True, "warnings": []}
 
@@ -445,8 +484,8 @@ async def preview_route_cache(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_ops_role),
 ):
-    route = await db.get(PortForward, route_id)
-    if route is None or route.service_kind != "http":
+    route = await db.get(HTTPRoute, route_id)
+    if route is None:
         raise HTTPException(status_code=404, detail="Edge route not found")
     ec = await route_edge_config(db, route)
     policy = dict(ec.policy_json or {})
@@ -459,12 +498,10 @@ async def purge_route_cache(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_role("admin")),
 ):
-    route = await db.get(PortForward, route_id)
-    if route is None or route.service_kind != "http":
+    route = await db.get(HTTPRoute, route_id)
+    if route is None:
         raise HTTPException(status_code=404, detail="Edge route not found")
-    _server_id, agent_id = await site_server_context(route, db)
-    if agent_id is None:
-        raise HTTPException(status_code=404, detail="Edge route owner not found")
+    agent_id = route.agent_id
     snapshot = await db.scalar(
         select(EdgeCacheSnapshot).where(
             EdgeCacheSnapshot.agent_id == agent_id,
@@ -489,9 +526,9 @@ async def list_path_rules(
     _: User = Depends(require_ops_role),
 ):
     route = await db.scalar(
-        select(PortForward)
-        .options(selectinload(PortForward.edge_route_config))
-        .where(PortForward.id == route_id, PortForward.service_kind == "http")
+        select(HTTPRoute)
+        .options(selectinload(HTTPRoute.edge_route_config))
+        .where(HTTPRoute.id == route_id)
     )
     if route is None:
         raise HTTPException(status_code=404, detail="Edge route not found")
@@ -513,9 +550,9 @@ async def create_path_rule(
     actor: User = Depends(require_role("admin")),
 ):
     route = await db.scalar(
-        select(PortForward)
-        .options(selectinload(PortForward.edge_route_config))
-        .where(PortForward.id == route_id, PortForward.service_kind == "http")
+        select(HTTPRoute)
+        .options(selectinload(HTTPRoute.edge_route_config))
+        .where(HTTPRoute.id == route_id)
     )
     if route is None:
         raise HTTPException(status_code=404, detail="Edge route not found")
@@ -529,9 +566,10 @@ async def create_path_rule(
         policy_json=body.policy,
     )
     db.add(row)
+    await validate_edge_configuration(route.agent_id, db)
     await db.commit()
     await db.refresh(row)
-    await dispatch_edge_for_attachment(route.attachment_id, db, actor_user_id=actor.id)
+    await dispatch_edge_desired_state(route.agent_id, db, actor_user_id=actor.id)
     emit_edge_changed()
     return await _path_rule_read(db, route, row)
 
@@ -546,9 +584,9 @@ async def get_path_rule(
     if row is None:
         raise HTTPException(status_code=404, detail="Edge path rule not found")
     route = await db.scalar(
-        select(PortForward)
-        .options(selectinload(PortForward.edge_route_config))
-        .where(PortForward.id == row.route_id, PortForward.service_kind == "http")
+        select(HTTPRoute)
+        .options(selectinload(HTTPRoute.edge_route_config))
+        .where(HTTPRoute.id == row.route_id)
     )
     if route is None:
         raise HTTPException(status_code=404, detail="Edge route not found")
@@ -567,9 +605,9 @@ async def update_path_rule(
     if row is None:
         raise HTTPException(status_code=404, detail="Edge path rule not found")
     route = await db.scalar(
-        select(PortForward)
-        .options(selectinload(PortForward.edge_route_config))
-        .where(PortForward.id == row.route_id, PortForward.service_kind == "http")
+        select(HTTPRoute)
+        .options(selectinload(HTTPRoute.edge_route_config))
+        .where(HTTPRoute.id == row.route_id)
     )
     if route is None:
         raise HTTPException(status_code=404, detail="Edge route not found")
@@ -578,9 +616,10 @@ async def update_path_rule(
     row.priority = body.priority
     row.enabled = body.enabled
     row.policy_json = body.policy
+    await validate_edge_configuration(route.agent_id, db)
     await db.commit()
     await db.refresh(row)
-    await dispatch_edge_for_attachment(route.attachment_id, db, actor_user_id=actor.id)
+    await dispatch_edge_desired_state(route.agent_id, db, actor_user_id=actor.id)
     emit_edge_changed()
     return await _path_rule_read(db, route, row)
 
@@ -594,18 +633,18 @@ async def delete_path_rule(
     row = await db.get(EdgePathRule, rule_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Edge path rule not found")
-    route = await db.get(PortForward, row.route_id)
-    attachment_id = route.attachment_id if route is not None else None
+    route = await db.get(HTTPRoute, row.route_id)
+    agent_id = route.agent_id if route is not None else None
     await db.delete(row)
     await db.commit()
-    if attachment_id is not None:
-        await dispatch_edge_for_attachment(attachment_id, db, actor_user_id=actor.id)
+    if agent_id is not None:
+        await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
     emit_edge_changed()
 
 
 async def _path_rule_read(
     db: AsyncSession,
-    route: PortForward,
+    route: HTTPRoute,
     row: EdgePathRule,
 ) -> EdgePathRuleRead:
     effective = await route_effective_policy(db, route, route.edge_route_config, path_rule=row)

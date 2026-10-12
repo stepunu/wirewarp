@@ -30,8 +30,17 @@ from app.models.edge_fragment import EdgeFragment
 from app.models.edge_config_version import EdgeConfigVersion
 from app.models.traefik_snapshot import TraefikSnapshot
 from app.models.security_event import SecurityEvent
+from app.models.edge_node import EdgeNode
+from app.models.http_route import HTTPRoute
+from app.models.http_public_ingress import HTTPPublicIngress
+from app.models.site_link import SiteLink, SiteLinkAgentState, SiteLinkAgentGeneration
+from app.models.edge_migration import EdgeMigration
 
 __all__ = [
+    "EdgeMigration",
+    "EdgeNode",
+    "HTTPRoute",
+    "HTTPPublicIngress",
     "Agent",
     "RegistrationToken",
     "TunnelServer",

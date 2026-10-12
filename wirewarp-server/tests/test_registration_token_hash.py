@@ -91,7 +91,7 @@ async def test_ws_register_uses_hashed_lookup(client, db, fake_manager, session_
 
     # Patch dispatch_wg_init / send_command to no-ops so the post-register
     # replay path doesn't blow up without a real connected agent.
-    with patch.object(main_module, "send_command") as cmd:
+    with patch("app.services.agent_replay.send_command") as cmd:
         cmd.return_value = (False, "noop")
         await main_module.agent_websocket(ws)
 
@@ -197,7 +197,7 @@ async def test_ws_agent_ping_gets_application_pong(db, fake_manager, session_mak
         def query_params(self):
             return {}
 
-    with patch.object(main_module, "send_command") as cmd:
+    with patch("app.services.agent_replay.send_command") as cmd:
         cmd.return_value = (False, "noop")
         await main_module.agent_websocket(FakeWS())
 

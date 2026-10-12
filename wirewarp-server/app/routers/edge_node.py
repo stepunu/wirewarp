@@ -5,6 +5,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import require_ops_role, require_role
@@ -15,10 +16,10 @@ from app.models.edge_config_version import EdgeConfigVersion
 from app.models.edge_fragment import EdgeFragment
 from app.models.edge_node_policy import EdgeNodePolicy
 from app.models.edge_profile import EdgeProfile
+from app.models.edge_path_rule import EdgePathRule
 from app.models.edge_upstream_pool import EdgeUpstreamPool
-from app.models.port_forward import PortForward
-from app.models.tunnel_client_attachment import TunnelClientAttachment
-from app.models.tunnel_server import TunnelServer
+from app.models.edge_node import EdgeNode
+from app.models.http_route import HTTPRoute
 from app.models.user import User
 from app.realtime.events import emit_edge_changed
 from app.schemas.edge import (
@@ -34,35 +35,33 @@ from app.schemas.edge import (
     EdgeRenderedRead,
     EdgeUpstreamPoolRead,
     EdgeUpstreamPoolUpsert,
+    NodeTraefikImportRequest,
 )
-from app.schemas.security import TraefikImportRequest
 from app.services.edge_ops import (
     dispatch_edge_desired_state,
     edge_feature_disabled_detail,
     edge_unavailable_reason,
     set_component_desired,
+    redact_edge_desired_state,
 )
 from app.services.agent_commands import send_command
+from app.services.edge_ownership import get_edge_owner, is_gateway_edge
 from app.services.edge_resources import (
-    apply_policy_to_edge_config,
     get_profile_by_id_or_slug,
-    route_edge_config,
     slugify,
 )
 from app.services.edge_cache_ops import nginx_cache_backend_available
 from app.services.edge_runtime import desired_state_snapshot, rendered_edge_config, stable_json
+from app.services.edge_render import validate_edge_configuration
 
 router = APIRouter()
 
 
-async def _server_for_agent(agent_id: uuid.UUID, db: AsyncSession) -> TunnelServer:
-    server = await db.scalar(select(TunnelServer).where(TunnelServer.agent_id == agent_id))
-    if server is None:
-        raise HTTPException(status_code=404, detail="Server node not found")
-    return server
+async def _server_for_agent(agent_id: uuid.UUID, db: AsyncSession) -> EdgeNode:
+    return await get_edge_owner(db, agent_id)
 
 
-def _ensure_enabled(server: TunnelServer) -> None:
+def _ensure_enabled(server: EdgeNode) -> None:
     if edge_unavailable_reason(server):
         raise HTTPException(status_code=409, detail=edge_feature_disabled_detail(server))
 
@@ -206,6 +205,7 @@ async def patch_node_cache(
         db,
         {"nginx_cache": "enabled" if body.mode == "proxy_cache" else "disabled"},
     )
+    await validate_edge_configuration(agent_id, db)
     await db.commit()
     await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
     emit_edge_changed()
@@ -323,6 +323,7 @@ async def create_node_upstream_pool(
         policy_json=body.policy,
     )
     db.add(row)
+    await validate_edge_configuration(agent_id, db)
     await db.commit()
     await db.refresh(row)
     await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
@@ -333,13 +334,16 @@ async def create_node_upstream_pool(
 @router.get("/{agent_id}/edge/rendered", response_model=EdgeRenderedRead)
 async def get_rendered(
     agent_id: uuid.UUID,
+    include_sensitive: bool = False,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_ops_role),
 ):
     server = await _server_for_agent(agent_id, db)
     _ensure_enabled(server)
     rendered, _version = await rendered_edge_config(agent_id, db)
-    return EdgeRenderedRead(**rendered)
+    if include_sensitive and _.role != "admin":
+        raise HTTPException(403, "Sensitive configuration export requires an administrator")
+    return EdgeRenderedRead(**(rendered if include_sensitive else redact_edge_desired_state(rendered)))
 
 
 @router.post("/{agent_id}/edge/validate")
@@ -349,6 +353,7 @@ async def validate_node_edge(
     _: User = Depends(require_ops_role),
 ):
     await _server_for_agent(agent_id, db)
+    await validate_edge_configuration(agent_id, db)
     return {"valid": True, "errors": [], "warnings": []}
 
 
@@ -381,6 +386,9 @@ async def rollback_version(
     version = await db.get(EdgeConfigVersion, version_id)
     if version is None or version.agent_id != agent_id:
         raise HTTPException(status_code=404, detail="Config version not found")
+    from app.services.edge_config_snapshots import restore_edge_source
+    await restore_edge_source(version, db)
+    await db.commit()
     sent, command_id = await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
     return {"sent": sent, "command_id": command_id, "version_id": version_id}
 
@@ -407,6 +415,12 @@ async def create_fragment(
 ):
     server = await _server_for_agent(agent_id, db)
     _ensure_enabled(server)
+    if await is_gateway_edge(db, agent_id) and body.fragment_type == "router":
+        raise HTTPException(status_code=409, detail={"code": "gateway_router_fragment_unavailable", "detail": "Use managed routes to enforce LAN and public visibility on gateway edges."})
+    if body.route_id is not None:
+        route = await db.get(HTTPRoute, body.route_id)
+        if route is None or route.agent_id != agent_id:
+            raise HTTPException(status_code=400, detail={"code": "route_node_mismatch", "field": "route_id"})
     state = "valid" if isinstance(body.content, dict) and body.fragment_type in {"middleware", "service", "router", "tls", "transport"} else "invalid"
     row = EdgeFragment(
         id=uuid.uuid4(),
@@ -420,6 +434,7 @@ async def create_fragment(
         last_error=None if state == "valid" else "Unsupported fragment type or content.",
     )
     db.add(row)
+    await validate_edge_configuration(agent_id, db)
     await db.commit()
     await db.refresh(row)
     await dispatch_edge_desired_state(agent_id, db, actor_user_id=actor.id)
@@ -431,113 +446,190 @@ async def _apply_desired_state_body(
     agent_id: uuid.UUID,
     body: dict,
     db: AsyncSession,
+    *,
+    prune: bool = False,
 ) -> None:
+    await _server_for_agent(agent_id, db)
+    gateway = await is_gateway_edge(db, agent_id)
     profiles = body.get("profiles")
+    if profiles is not None and not isinstance(profiles, list):
+        raise HTTPException(422, "Profiles must be a list")
     if isinstance(profiles, list):
         for item in profiles:
             if not isinstance(item, dict):
-                continue
+                raise HTTPException(422, "Each profile must be an object")
             name = str(item.get("name") or item.get("slug") or "Edge profile")
             slug = str(item.get("slug") or slugify(name))
             profile = await get_profile_by_id_or_slug(db, item.get("id") or slug)
+            if profile is not None and profile.agent_id != agent_id:
+                if profile.name != name or profile.slug != slug or (profile.policy_json or {}) != item.get("policy", {}):
+                    raise HTTPException(409, "Edit shared or other-node profiles through the profile API")
+                continue
+            if item.get("agent_id") not in {None, str(agent_id)} or item.get("scope", "node") != "node":
+                raise HTTPException(422, "Imported profiles must belong to the node in the request URL")
             if profile is None:
-                profile = EdgeProfile(id=uuid.uuid4(), name=name, slug=slug)
+                try:
+                    profile_id = uuid.UUID(str(item["id"])) if item.get("id") else uuid.uuid4()
+                except ValueError:
+                    raise HTTPException(422, "Invalid profile ID") from None
+                profile = EdgeProfile(id=profile_id, name=name, slug=slug)
                 db.add(profile)
             profile.name = name
             profile.slug = slug
             profile.description = item.get("description")
-            profile.scope = str(item.get("scope") or "global")
-            profile.agent_id = uuid.UUID(str(item["agent_id"])) if item.get("agent_id") else None
+            profile.scope = "node"
+            profile.agent_id = agent_id
             profile.policy_json = item.get("policy") if isinstance(item.get("policy"), dict) else {}
+            from app.services.edge_render import validate_render_policy
+            try:
+                validate_render_policy(profile.policy_json)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
 
-    server = await _server_for_agent(agent_id, db)
-    att_ids = (
-        await db.execute(
-            select(TunnelClientAttachment.id).where(TunnelClientAttachment.tunnel_server_id == server.id)
-        )
-    ).scalars().all()
     routes = body.get("routes")
+    if routes is None:
+        routes = []
     if not isinstance(routes, list):
-        return
+        raise HTTPException(status_code=422, detail="Routes must be a list of managed route objects")
+    from app.routers.nodes import _upsert_node_route
+    from app.schemas.edge import EdgeRouteUpsert
+    from pydantic import ValidationError
     for item in routes:
         if not isinstance(item, dict):
-            continue
+            raise HTTPException(status_code=422, detail="Each route must be a managed route object")
         route = None
+        new_route_id = None
         if item.get("id"):
             try:
                 route_id = uuid.UUID(str(item["id"]))
             except ValueError:
-                route_id = None
-            if route_id is not None:
-                route = await db.get(PortForward, route_id)
-                if route is not None and route.attachment_id not in att_ids:
-                    raise HTTPException(status_code=400, detail={"code": "route_node_mismatch", "field": "id"})
-        if route is None and item.get("domain") and att_ids:
+                raise HTTPException(status_code=422, detail="Invalid route ID") from None
+            route = await db.get(HTTPRoute, route_id)
+            if route is None:
+                new_route_id = route_id
+            elif route.agent_id != agent_id:
+                raise HTTPException(status_code=400, detail={"code": "route_node_mismatch", "field": "id"})
+        if route is None and item.get("domain"):
             route = await db.scalar(
-                select(PortForward).where(
-                    PortForward.attachment_id.in_(att_ids),
-                    PortForward.service_kind == "http",
-                    PortForward.domain == str(item["domain"]),
+                select(HTTPRoute).where(
+                    HTTPRoute.agent_id == agent_id,
+                    HTTPRoute.domain == str(item["domain"]),
                 )
             )
-        if route is None:
-            attachment_id = item.get("attachment_id")
-            if not attachment_id:
-                continue
-            route = PortForward(
-                id=uuid.uuid4(),
-                attachment_id=uuid.UUID(str(attachment_id)),
-                protocol="tcp",
-                public_port=int(item.get("public_port") or 443),
-                destination_ip=str(item.get("destination_ip") or "127.0.0.1"),
-                destination_port=int(item.get("destination_port") or 80),
-                active=bool(item.get("enabled", True)),
-                service_kind="http",
-                domain=item.get("domain"),
-                description=item.get("description"),
-            )
-            db.add(route)
-            await db.flush()
-        if "domain" in item:
-            route.domain = item.get("domain")
-        if "enabled" in item:
-            route.active = bool(item.get("enabled"))
-        if "destination_ip" in item and item.get("destination_ip") is not None:
-            route.destination_ip = str(item["destination_ip"])
-        if "destination_port" in item and item.get("destination_port") is not None:
-            route.destination_port = int(item["destination_port"])
-        if "description" in item:
-            route.description = item.get("description")
-        ec = await route_edge_config(db, route)
-        if item.get("profile_id"):
-            profile = await db.get(EdgeProfile, uuid.UUID(str(item["profile_id"])))
-            if profile is None:
-                raise HTTPException(status_code=404, detail="Edge profile not found")
-            ec.profile_id = profile.id
-        elif item.get("profile"):
-            profile = await get_profile_by_id_or_slug(db, str(item["profile"]))
-            if profile is None:
-                raise HTTPException(status_code=404, detail="Edge profile not found")
-            ec.profile_id = profile.id
-        if "priority" in item and item.get("priority") is not None:
-            ec.priority = int(item["priority"])
-        if "upstream_scheme" in item and item.get("upstream_scheme"):
-            ec.upstream_scheme = str(item["upstream_scheme"])
-        if "upstream_insecure_skip_verify" in item:
-            ec.upstream_insecure_skip_verify = bool(item.get("upstream_insecure_skip_verify"))
-        if isinstance(item.get("policy"), dict):
-            apply_policy_to_edge_config(ec, item["policy"])
+        if route is not None and item.get("domain") and item["domain"] != route.domain:
+            raise HTTPException(status_code=400, detail={"code": "route_domain_mismatch", "field": "domain"})
+        if new_route_id and route is not None:
+            raise HTTPException(409, "The imported route ID conflicts with an existing hostname")
+        try:
+            upsert = EdgeRouteUpsert.model_validate(item)
+        except ValidationError:
+            raise HTTPException(status_code=422, detail="Invalid managed route configuration") from None
+        await _upsert_node_route(agent_id, route.domain if route else item.get("domain"), upsert, db, actor=None, commit=False, route_id=route.id if route else None, validate_config=False, new_route_id=new_route_id)
+    from app.schemas.edge import EdgeFragmentCreate, EdgePathRuleCreate, EdgeNodePolicyUpdate
+    from app.routers.edge import _fragment_error
+    for key, model, schema in (
+        ("upstream_pools", EdgeUpstreamPool, EdgeUpstreamPoolUpsert),
+        ("path_rules", EdgePathRule, EdgePathRuleCreate),
+        ("fragments", EdgeFragment, EdgeFragmentCreate),
+    ):
+        if key not in body:
+            continue
+        if not isinstance(body[key], list):
+            raise HTTPException(422, f"{key} must be a list")
+        wanted = set()
+        for item in body[key]:
+            if not isinstance(item, dict):
+                raise HTTPException(422, f"Each {key} item must be an object")
+            try:
+                parsed = schema.model_validate(item)
+                resource_id = uuid.UUID(str(item["id"])) if item.get("id") else uuid.uuid4()
+            except (ValueError, ValidationError):
+                raise HTTPException(422, f"Invalid {key} resource") from None
+            row = await db.get(model, resource_id)
+            if row is not None:
+                if model is EdgePathRule:
+                    owner = await db.get(HTTPRoute, row.route_id)
+                    owns = owner is not None and owner.agent_id == agent_id
+                else:
+                    owns = row.agent_id == agent_id
+                if not owns:
+                    raise HTTPException(409, "Imported resource belongs to another node")
+            route_id = None
+            if model is EdgePathRule or model is EdgeFragment and parsed.route_id:
+                try:
+                    route_id = uuid.UUID(str(item.get("route_id")))
+                except ValueError:
+                    raise HTTPException(422, "A valid route_id is required") from None
+                route = await db.get(HTTPRoute, route_id)
+                if route is None or route.agent_id != agent_id:
+                    raise HTTPException(409, "Imported resource route belongs to another node")
+            if model is EdgeFragment:
+                error = await _fragment_error(db, agent_id, parsed.fragment_type, parsed.route_id)
+                if error:
+                    raise HTTPException(409, error)
+            if row is None:
+                row = model(id=resource_id)
+                if model is not EdgePathRule:
+                    row.agent_id = agent_id
+                db.add(row)
+            for field, value in parsed.model_dump().items():
+                if field == "policy":
+                    row.policy_json = value
+                else:
+                    setattr(row, field, value)
+            if model is EdgePathRule:
+                row.route_id = route_id
+            if model is EdgeFragment:
+                row.validation_state = "valid"
+                row.last_error = None
+            wanted.add(resource_id)
+        await db.flush()
+        if prune:
+            selector = model.route_id.in_(select(HTTPRoute.id).where(HTTPRoute.agent_id == agent_id)) if model is EdgePathRule else model.agent_id == agent_id
+            for row in (await db.scalars(select(model).where(selector))).all():
+                if row.id not in wanted:
+                    await db.delete(row)
+    if "node_policy" in body and body["node_policy"] is None:
+        policy = await db.get(EdgeNodePolicy, agent_id)
+        if policy is not None:
+            await db.delete(policy)
+    elif "node_policy" in body:
+        try:
+            update = EdgeNodePolicyUpdate.model_validate(body["node_policy"])
+        except ValidationError:
+            raise HTTPException(422, "Invalid node policy") from None
+        policy = await db.get(EdgeNodePolicy, agent_id)
+        if policy is None:
+            policy = EdgeNodePolicy(agent_id=agent_id)
+            db.add(policy)
+        for field, value in update.model_dump(exclude_unset=True).items():
+            setattr(policy, "policy_json" if field == "policy" else field, value)
+    if prune and "routes" in body:
+        ids = {str(item["id"]) for item in routes if item.get("id")}
+        domains = {str(item.get("domain", "")).lower().rstrip(".") for item in routes}
+        from app.services.edge_migration import ensure_route_not_referenced
+        for row in (await db.scalars(select(HTTPRoute).where(HTTPRoute.agent_id == agent_id))).all():
+            if str(row.id) not in ids and row.domain.lower().rstrip(".") not in domains:
+                await ensure_route_not_referenced(db, row.id)
+                await db.delete(row)
 
 
 @router.get("/{agent_id}/edge/desired-state", response_model=EdgeDesiredStateResponse)
 async def get_desired_state(
     agent_id: uuid.UUID,
+    include_sensitive: bool = False,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(require_ops_role),
 ):
     await _server_for_agent(agent_id, db)
     snapshot = await desired_state_snapshot(agent_id, db)
-    return EdgeDesiredStateResponse(**snapshot)
+    redacted = redact_edge_desired_state(snapshot)
+    contains_credentials = redacted != snapshot
+    if include_sensitive and _.role != "admin":
+        raise HTTPException(403, "Sensitive configuration export requires an administrator")
+    return EdgeDesiredStateResponse(contains_credentials=contains_credentials,
+                                   sensitive_values_redacted=contains_credentials and not include_sensitive,
+                                   **(snapshot if include_sensitive else redacted))
 
 
 @router.put("/{agent_id}/edge/desired-state", response_model=EdgeDesiredStateResponse)
@@ -553,27 +645,47 @@ async def put_desired_state(
 ):
     server = await _server_for_agent(agent_id, db)
     _ensure_enabled(server)
+    def has_redacted(value):
+        if isinstance(value, dict):
+            return any(has_redacted(item) for item in value.values())
+        if isinstance(value, list):
+            return any(has_redacted(item) for item in value)
+        return value == "[redacted]"
+    if has_redacted(body):
+        raise HTTPException(422, "A masked configuration cannot be imported. Use an administrator sensitive export or supply the credentials")
     before = await desired_state_snapshot(agent_id, db)
     diff = None
     if return_diff:
-        diff = stable_json({"before": before, "after": body, "prune": prune})
+        diff = stable_json(redact_edge_desired_state({"before": before, "after": body, "prune": prune}))
+    savepoint = await db.begin_nested()
+    try:
+        await _apply_desired_state_body(agent_id, body, db, prune=prune)
+        await validate_edge_configuration(agent_id, db)
+        after = await desired_state_snapshot(agent_id, db)
+    except (HTTPException, IntegrityError) as exc:
+        await savepoint.rollback()
+        if dry_run or not apply:
+            detail = exc.detail if isinstance(exc, HTTPException) else "Conflicting resource IDs or names"
+            return EdgeDesiredStateResponse(dry_run=True, changed=stable_json(before) != stable_json(body),
+                                            diff=diff, validation_errors=[{"detail":detail}], **before)
+        if isinstance(exc, IntegrityError):
+            raise HTTPException(409, "Conflicting resource IDs or names") from exc
+        raise
     if dry_run or not apply:
-        return EdgeDesiredStateResponse(
-            dry_run=dry_run,
-            changed=stable_json(before) != stable_json(body),
-            diff=diff,
-            **before,
-        )
-    await _apply_desired_state_body(agent_id, body, db)
+        await savepoint.rollback()
+        return EdgeDesiredStateResponse(dry_run=True, changed=stable_json(before) != stable_json(after),
+                                        diff=stable_json(redact_edge_desired_state({"before":before, "after":after, "prune":prune})) if return_diff else None,
+                                        **after)
+    await savepoint.commit()
     await db.commit()
-    await dispatch_edge_desired_state(agent_id, db, actor_user_id=_.id)
+    sent, _command_id = await dispatch_edge_desired_state(agent_id, db, actor_user_id=_.id)
     emit_edge_changed()
     after = await desired_state_snapshot(agent_id, db)
     return EdgeDesiredStateResponse(
         dry_run=False,
         changed=stable_json(before) != stable_json(after),
-        diff=diff,
-        reconcile_sent=True,
+        diff=stable_json(redact_edge_desired_state({"before":before, "after":after, "prune":prune})) if return_diff else None,
+        reconcile_sent=sent,
         **after,
     )
 
@@ -581,30 +693,25 @@ async def put_desired_state(
 @router.post("/{agent_id}/edge/import/traefik/preview")
 async def preview_import(
     agent_id: uuid.UUID,
-    body: dict,
+    body: NodeTraefikImportRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_ops_role),
 ):
-    from app.routers.security import preview_traefik_routes
+    from app.services.node_traefik_import import preview_node_import
 
-    server = await _server_for_agent(agent_id, db)
-    body = dict(body)
-    body.setdefault("server_id", str(server.id))
-    return await preview_traefik_routes(TraefikImportRequest(**body), db, user)
+    return await preview_node_import(agent_id, body, db)
 
 
 @router.post("/{agent_id}/edge/import/traefik/apply")
 @router.post("/{agent_id}/edge/import/traefik/upsert")
 async def apply_import(
     agent_id: uuid.UUID,
-    body: dict,
+    body: NodeTraefikImportRequest,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_role("admin")),
 ):
-    from app.routers.security import import_traefik_routes
+    from app.services.node_traefik_import import apply_node_import
 
     server = await _server_for_agent(agent_id, db)
     _ensure_enabled(server)
-    body = dict(body)
-    body.setdefault("server_id", str(server.id))
-    return await import_traefik_routes(TraefikImportRequest(**body), db, user)
+    return await apply_node_import(agent_id, body, db, user)

@@ -18,17 +18,17 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.edge_route_config import EdgeRouteConfig
-from app.models.port_forward import PortForward
 from app.models.system_settings import SystemSettings
-from app.models.tunnel_server import TunnelServer
+from app.models.edge_fragment import EdgeFragment
+from app.services.edge_render import render_variants, policy_edge_config, path_match, origin_load_balancer, fragment_content, validate_path_cache
+from app.services.edge_ownership import get_edge_owner, load_http_routes, route_entrypoints
 from app.services.edge_cache_ops import (
     load_node_cache_policy,
     nginx_cache_service_url,
     nginx_cache_backend_available,
     route_uses_nginx_cache,
 )
-from app.services.secrets import get_captcha_secret_key, get_letsencrypt_cloudflare_api_token
+from app.services.secrets import get_captcha_secret_key, get_letsencrypt_cloudflare_api_token, get_letsencrypt_rfc2136_tsig_secret
 
 
 LE_STAGING_CA_SERVER = "https://acme-staging-v02.api.letsencrypt.org/directory"
@@ -44,13 +44,14 @@ class LetsEncryptConfig:
     dns_resolvers: list[str] | None = None
     use_staging: bool = False
     credentials_ready: bool = False
+    dns_delay_seconds: int = 30
 
     @property
     def complete(self) -> bool:
         if not self.enabled or not self.email:
             return False
         if self.challenge == "dns-01":
-            return self.dns_provider == "cloudflare" and self.credentials_ready
+            return self.dns_provider in {"cloudflare", "rfc2136"} and self.credentials_ready
         return self.challenge in {"tls-alpn-01", "http-01"}
 
 
@@ -70,14 +71,24 @@ def letsencrypt_from_settings(
         dns_resolvers=[str(v) for v in resolvers if str(v).strip()],
         use_staging=bool(getattr(settings, "letsencrypt_use_staging", False)),
         credentials_ready=credentials_ready,
+        dns_delay_seconds=getattr(settings, "letsencrypt_dns_delay_seconds", 30),
     )
 
 
 async def load_letsencrypt_config(db: AsyncSession) -> LetsEncryptConfig:
-    token = await get_letsencrypt_cloudflare_api_token(db)
+    row = await db.get(SystemSettings, 1)
+    if row and row.letsencrypt_dns_provider == "rfc2136":
+        ready = bool(
+            row.letsencrypt_rfc2136_nameserver
+            and row.letsencrypt_rfc2136_tsig_key
+            and row.letsencrypt_rfc2136_tsig_algorithm
+            and await get_letsencrypt_rfc2136_tsig_secret(db)
+        )
+    else:
+        ready = bool(await get_letsencrypt_cloudflare_api_token(db))
     return letsencrypt_from_settings(
-        await db.get(SystemSettings, 1),
-        credentials_ready=bool(token),
+        row,
+        credentials_ready=ready,
     )
 
 
@@ -204,9 +215,12 @@ def build_traefik_static_config(
             acme["caServer"] = LE_STAGING_CA_SERVER
         if letsencrypt.challenge == "dns-01":
             acme["dnsChallenge"] = {
-                "provider": letsencrypt.dns_provider,
+                # The pinned RFC2136 provider replaces sibling TXT values.
+                "provider": "exec" if letsencrypt.dns_provider == "rfc2136" else letsencrypt.dns_provider,
                 "resolvers": letsencrypt.dns_resolvers or ["1.1.1.1:53"],
             }
+            if letsencrypt.dns_provider == "rfc2136":
+                acme["dnsChallenge"]["delayBeforeCheck"] = letsencrypt.dns_delay_seconds
         elif letsencrypt.challenge == "http-01":
             acme["httpChallenge"] = {"entryPoint": "web"}
         else:
@@ -230,67 +244,21 @@ async def build_traefik_dynamic_config(
     server_agent_id: uuid.UUID | str,
     db: AsyncSession,
 ) -> dict:
-    """Build Traefik dynamic config for all HTTP sites on the given server agent.
+    """Render owned HTTP routes and their policies for a server or gateway."""
+    server = await get_edge_owner(db, server_agent_id)
+    http_forwards = await load_http_routes(db, server_agent_id, active_only=True)
 
-    Renders routers, services, and middleware chains from the
-    port_forwards + edge_route_configs tables. The agent writes the
-    returned dict verbatim as YAML.
-
-    Raw (service_kind='raw') forwards are excluded — they stay iptables DNAT.
-    """
-    agent_id_str = str(server_agent_id)
-
-    server = await db.scalar(
-        select(TunnelServer).where(TunnelServer.agent_id == server_agent_id)
-    )
-
-    # Load all HTTP port_forwards for this server agent. We join through
-    # TunnelServer to scope by agent_id, then through attachments.
-    from app.models.tunnel_client_attachment import TunnelClientAttachment
-
-    if server is None:
-        return _build_http_config({}, {}, {})
-
-    # Find all attachment IDs for this server
-    att_ids_result = await db.execute(
-        select(TunnelClientAttachment.id).where(
-            TunnelClientAttachment.tunnel_server_id == server.id
-        )
-    )
-    att_ids = [row[0] for row in att_ids_result.all()]
-
-    http_forwards: list[PortForward] = []
-    if att_ids:
-        pf_result = await db.execute(
-            select(PortForward).where(
-                PortForward.attachment_id.in_(att_ids),
-                PortForward.service_kind == "http",
-                PortForward.active == True,  # noqa: E712
-            )
-        )
-        http_forwards = list(pf_result.scalars().all())
-
-    # Check global middleware needs up front.
-    has_waf = False
-    has_waf_block = False
-    has_antibot = False
-    edge_configs: dict[str, EdgeRouteConfig] = {}
-    for pf in http_forwards:
-        ec = await db.scalar(
-            select(EdgeRouteConfig).where(EdgeRouteConfig.port_forward_id == pf.id)
-        )
-        if ec is not None:
-            edge_configs[str(pf.id)] = ec
-            if ec.waf_mode != "off":
-                has_waf = True
-            if ec.waf_mode == "block":
-                has_waf_block = True
-            if ec.antibot:
-                has_antibot = True
+    variants = await render_variants(db, http_forwards)
+    routes_with_paths = {route.id for route, _, path, _ in variants if path is not None}
+    has_antibot = any(policy.get("antibot") for _, _, _, policy in variants)
 
     routers: dict = {}
     services: dict = {}
     middlewares: dict = {}
+    from app.services.edge_ownership import is_gateway_edge
+    gateway = await is_gateway_edge(db, server_agent_id)
+    if gateway:
+        middlewares["wirewarp-strip-forwarded"] = {"headers": {"customRequestHeaders": {"Forwarded": ""}}}
     servers_transports: dict = {}
     acme_ready = await letsencrypt_resolver_ready(db)
     node_cache_policy = await load_node_cache_policy(server_agent_id, db)
@@ -319,32 +287,37 @@ async def build_traefik_dynamic_config(
                 "captchaHTMLFilePath": "/etc/traefik/captcha.html",
             }
 
-    # The agent injects the local bouncer key before writing this file.
-    if has_waf or has_antibot:
-        bouncer_cfg = {
-            "enabled": True,
-            "crowdsecMode": "stream",
-            "crowdsecLapiScheme": "http",
-            "crowdsecLapiHost": "localhost:8080",
-            "crowdsecLapiKey": "${WIREWARP_CROWDSEC_BOUNCER_KEY}",
-            "httpTimeoutSeconds": 60,
-            "crowdsecAppsecEnabled": has_waf,
-            "crowdsecAppsecHost": "127.0.0.1:7422",
-            "crowdsecAppsecFailureBlock": has_waf_block,
-            "crowdsecAppsecUnreachableBlock": False,
-        }
-        bouncer_cfg.update(captcha)
-        middlewares["crowdsec-bouncer"] = {
-            "plugin": {
-                "bouncer": bouncer_cfg,
-            }
-        }
+    fragments = (await db.scalars(select(EdgeFragment).where(
+        EdgeFragment.agent_id == server_agent_id, EdgeFragment.enabled.is_(True),
+        EdgeFragment.validation_state == "valid",
+    ))).all()
+    fragment_names = {}
+    tls_fragments = {}
+    for fragment in fragments:
+        if gateway and fragment.fragment_type in {"router", "tls"}:
+            raise ValueError("Gateway fragments cannot create routers or TLS listeners")
+        if fragment.fragment_type == "tls":
+            tls_fragments.update(fragment_content(fragment, fragments))
+            continue
+        collection = {"middleware": middlewares, "service": services, "router": routers,
+                      "transport": servers_transports}.get(fragment.fragment_type)
+        if collection is None:
+            raise ValueError("Unsupported Edge fragment type")
+        if fragment.fragment_type in {"middleware", "service"} and any(
+            key in fragment.content for key in ("routers", "entryPoints", "tls", "http", "tcp", "udp")
+        ):
+            raise ValueError("Edge fragment cannot inject listeners or routers")
+        name = f"fragment-{fragment.id}"
+        collection[name] = fragment_content(fragment, fragments)
+        fragment_names[fragment.name] = (name, fragment)
 
-    for pf in http_forwards:
+    for pf, stored_ec, path, policy in variants:
         pf_id = str(pf.id)
         # Sanitise: replace dots/colons in domain for Traefik router name
         safe_name = (pf.domain or pf_id).replace(".", "-").replace(":", "-")
-        ec = edge_configs.get(pf_id)
+        if path:
+            safe_name += f"-path-{path.id}"
+        ec = policy_edge_config(policy)
 
         router_middlewares: list[str] = []
         if server_rate_limit:
@@ -373,7 +346,7 @@ async def build_traefik_dynamic_config(
         if ec and ec.ip_deny:
             mw_name = f"ipdeny-{safe_name}"
             middlewares[mw_name] = {
-                "plugin": {"ipDenyList": ec.ip_deny}
+                "plugin": {"denyip": {"ipDenyList": ec.ip_deny}}
             }
             router_middlewares.append(mw_name)
 
@@ -394,7 +367,53 @@ async def build_traefik_dynamic_config(
 
         # WAF / CrowdSec bouncer
         if ec and (ec.waf_mode != "off" or ec.antibot):
-            router_middlewares.append("crowdsec-bouncer")
+            if ec.waf_mode not in {"off", "observe", "block"}:
+                raise ValueError("Unsupported WAF mode")
+            mw_name = "crowdsec-bouncer" if ec.waf_mode == "block" and not ec.antibot else f"crowdsec-{ec.waf_mode}-{'antibot' if ec.antibot else 'waf'}"
+            observer = ec.waf_mode == "observe"
+            bouncer_cfg = {
+                "enabled": True, "crowdsecMode": "appsec" if observer else "stream",
+                "crowdsecLapiScheme": "http", "crowdsecLapiHost": "localhost:8080",
+                "crowdsecLapiKey": "${WIREWARP_CROWDSEC_BOUNCER_KEY}", "httpTimeoutSeconds": 60,
+                "crowdsecAppsecEnabled": ec.waf_mode != "off",
+                "crowdsecAppsecHost": "127.0.0.1:7423" if observer else "127.0.0.1:7422",
+                "crowdsecAppsecFailureBlock": ec.waf_mode == "block",
+                "crowdsecAppsecUnreachableBlock": False,
+            }
+            if ec.antibot and not observer:
+                bouncer_cfg.update(captcha)
+            middlewares[mw_name] = {"plugin": {"bouncer": bouncer_cfg}}
+            router_middlewares.append(mw_name)
+            if observer and ec.antibot:
+                bot_cfg = {**bouncer_cfg, **captcha, "crowdsecMode": "stream", "crowdsecAppsecEnabled": False}
+                middlewares["crowdsec-antibot"] = {"plugin": {"bouncer": bot_cfg}}
+                router_middlewares.append("crowdsec-antibot")
+
+        headers = dict(policy.get("headers") or {})
+        if "hsts" in headers:
+            hsts = headers.pop("hsts")
+            headers["stsSeconds"] = 31536000 if hsts is True else 0 if hsts is False else int(hsts)
+        for field, target in (("request_transforms", "customRequestHeaders"), ("response_transforms", "customResponseHeaders")):
+            if policy.get(field):
+                headers[target] = {**headers.get(target, {}), **policy[field]}
+        if policy.get("hsts"):
+            headers["stsSeconds"] = int(policy["hsts"]) if not isinstance(policy["hsts"], bool) else 31536000
+        cache = policy.get("cache") or {}
+        if cache.get("mode") == "headers_only" or cache.get("mode") != "off" and cache.get("browser_ttl_seconds") is not None:
+            ttl = int(cache.get("browser_ttl_seconds") or 0)
+            headers.setdefault("customResponseHeaders", {})["Cache-Control"] = f"public, max-age={ttl}"
+        if headers:
+            mw_name = f"headers-{safe_name}"
+            middlewares[mw_name] = {"headers": headers}
+            router_middlewares.append(mw_name)
+        for ref in policy.get("middlewares", []):
+            named = fragment_names.get(ref)
+            if not named or named[1].fragment_type != "middleware" or named[1].route_id not in (None, pf.id):
+                raise ValueError("Middleware fragment must belong to this route or node")
+            router_middlewares.append(named[0])
+        for name, fragment in fragment_names.values():
+            if fragment.fragment_type == "middleware" and fragment.route_id == pf.id and name not in router_middlewares:
+                router_middlewares.append(name)
 
         # Basic auth
         if ec and ec.auth_mode == "basic" and ec.auth_config:
@@ -413,6 +432,8 @@ async def build_traefik_dynamic_config(
             rule = f"Host(`{pf.domain}`)"
         else:
             rule = f"PathPrefix(`/`)"
+        if path:
+            rule += f" && ({path_match(path.match)})"
 
         # TLS config
         tls_source = ec.tls_source if ec else "letsencrypt"
@@ -425,12 +446,20 @@ async def build_traefik_dynamic_config(
         routers[safe_name] = {
             "rule": rule,
             "service": f"svc-{safe_name}",
-            "entryPoints": ["websecure"],
+            "entryPoints": await route_entrypoints(db, pf),
             "tls": tls_cfg,
+            **({"priority": path.priority or 10000} if path else {"priority": stored_ec.priority} if stored_ec and stored_ec.priority else {"priority": 1} if pf.id in routes_with_paths else {}),
             **({"middlewares": router_middlewares} if router_middlewares else {}),
         }
 
+        # Validate origin ownership even while a cache backend serves this route.
+        lb = await origin_load_balancer(db, pf, policy, ec)
+        if path and route_uses_nginx_cache(node_cache_policy, ec):
+            await validate_path_cache(db, pf, stored_ec, policy)
         if pf.domain and cache_backend_available and route_uses_nginx_cache(node_cache_policy, ec):
+            origin = policy.get("origin") or {}
+            if origin.get("upstream_pool_id", policy.get("upstream_pool_id")) or origin.get("service"):
+                raise ValueError("Backend cache requires a single managed origin")
             lb = {
                 "servers": [
                     {"url": nginx_cache_service_url(node_cache_policy)}
@@ -439,12 +468,6 @@ async def build_traefik_dynamic_config(
             services[f"svc-{safe_name}"] = {"loadBalancer": lb}
             continue
 
-        upstream_scheme = ec.upstream_scheme if ec else "http"
-        lb: dict = {
-            "servers": [
-                {"url": f"{upstream_scheme}://{pf.destination_ip}:{pf.destination_port}"}
-            ]
-        }
         if ec and ec.upstream_insecure_skip_verify:
             servers_transports["wirewarp-insecure-skip-verify"] = {
                 "insecureSkipVerify": True
@@ -452,6 +475,28 @@ async def build_traefik_dynamic_config(
             lb["serversTransport"] = "wirewarp-insecure-skip-verify"
 
         services[f"svc-{safe_name}"] = {"loadBalancer": lb}
+        origin = policy.get("origin") or {}
+        if origin.get("timeout", policy.get("upstream_timeout")):
+            transport = f"transport-{safe_name}"
+            timeout = origin.get("timeout", policy.get("upstream_timeout"))
+            servers_transports[transport] = {"insecureSkipVerify": bool(ec.upstream_insecure_skip_verify), "forwardingTimeouts": {"responseHeaderTimeout": str(timeout)}}
+            lb["serversTransport"] = transport
+        retry = origin.get("retry_attempts", policy.get("retry_attempts"))
+        if retry:
+            name = f"retry-{safe_name}"
+            middlewares[name] = {"retry": {"attempts": int(retry)}}
+            routers[safe_name].setdefault("middlewares", []).append(name)
+        ref = origin.get("service")
+        candidates = [value for value in fragment_names.values() if value[1].fragment_type == "service" and value[1].route_id == pf.id]
+        if ref:
+            selected = fragment_names.get(ref)
+            if not selected or selected[1].fragment_type != "service" or selected[1].route_id not in (None, pf.id):
+                raise ValueError("Service fragment must belong to this route or node")
+            candidates = [selected]
+        if len(candidates) > 1:
+            raise ValueError("Route requires an explicit service fragment selection")
+        if candidates:
+            routers[safe_name]["service"] = candidates[0][0]
 
     cert_domain = _build_default_generated_cert_domain(letsencrypt_domains)
     if cert_domain:
@@ -460,7 +505,10 @@ async def build_traefik_dynamic_config(
             "domains": [cert_domain],
         }
 
-    return _build_http_config(routers, services, middlewares, servers_transports)
+    result = _build_http_config(routers, services, middlewares, servers_transports)
+    if tls_fragments:
+        result["tls"] = tls_fragments
+    return result
 
 
 def _build_http_config(

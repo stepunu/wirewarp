@@ -38,9 +38,6 @@ class PortForward(Base):
         "TunnelClientAttachment", back_populates="port_forwards"
     )
     tunnel_server_ip: Mapped["TunnelServerIP | None"] = relationship("TunnelServerIP")  # noqa: F821
-    edge_route_config: Mapped["EdgeRouteConfig | None"] = relationship(  # noqa: F821
-        "EdgeRouteConfig", back_populates="port_forward", uselist=False
-    )
 
     __table_args__ = (
         UniqueConstraint(

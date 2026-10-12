@@ -309,11 +309,10 @@ async def make_server(
         public_iface="eth0",
         wg_public_key=public_key,
         tunnel_network=network,
-        edge_mode=edge_mode,
-        edge_state=edge_state,
-        edge_install_phase=edge_install_phase,
     )
     db.add(s)
+    from app.models.edge_node import EdgeNode
+    db.add(EdgeNode(agent_id=agent.id, edge_mode=edge_mode, edge_state=edge_state, edge_install_phase=edge_install_phase))
     await db.commit()
     await db.refresh(s)
     db.add(

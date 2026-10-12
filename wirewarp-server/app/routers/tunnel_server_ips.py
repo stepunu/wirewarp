@@ -262,6 +262,10 @@ async def _create_ip_locked(
         )
     )
     is_primary = body.is_primary or existing_count == 0
+    if is_primary:
+        from app.services.site_link_ops import lock_site_links, ensure_no_site_link_teardown
+        await lock_site_links(db)
+        await ensure_no_site_link_teardown(db, agent_ids={server.agent_id})
     duplicate = await db.scalar(
         select(TunnelServerIP.id).where(
             TunnelServerIP.tunnel_server_id == body.tunnel_server_id,
@@ -299,6 +303,9 @@ async def _create_ip_locked(
         is_primary=False,  # write false first to avoid the partial unique index conflict
     )
     try:
+        if is_primary:
+            await lock_site_links(db)
+            await ensure_no_site_link_teardown(db, agent_ids={server.agent_id})
         db.add(ip)
         await db.flush()
         if is_primary:
@@ -388,6 +395,10 @@ async def _update_ip_locked(
     endpoint_will_change = promoting or (
         was_primary and "address" in changes and new_address != old_address
     )
+    if endpoint_will_change and server:
+        from app.services.site_link_ops import lock_site_links, ensure_no_site_link_teardown
+        await lock_site_links(db)
+        await ensure_no_site_link_teardown(db, agent_ids={server.agent_id})
     address_will_change = "address" in changes and new_address != old_address
     forward_plan = await _forward_migration_plan(
         ip.tunnel_server_id,
@@ -401,6 +412,9 @@ async def _update_ip_locked(
     confirmed_removals = await _remove_old_forward_rules(forward_plan, db)
 
     try:
+        if endpoint_will_change and server:
+            await lock_site_links(db)
+            await ensure_no_site_link_teardown(db, agent_ids={server.agent_id})
         for field, value in changes.items():
             setattr(ip, field, value)
         if promoting:

@@ -11,6 +11,8 @@ from sqlalchemy import select
 
 from app.database import get_db
 from app.models.port_forward import PortForward
+from app.models.http_route import HTTPRoute
+from app.models.http_public_ingress import HTTPPublicIngress
 from app.models.tunnel_client_attachment import TunnelClientAttachment
 from app.models.tunnel_server_ip import TunnelServerIP
 from app.models.user import User
@@ -329,7 +331,23 @@ async def list_port_forwards(
         )
         q = q.where(PortForward.attachment_id.in_(sub))
     result = await db.execute(q)
-    return result.scalars().all()
+    rows = list(result.scalars().all())
+    if service_kind != "raw":
+        http_query = select(HTTPRoute, HTTPPublicIngress).join(HTTPPublicIngress, HTTPPublicIngress.route_id == HTTPRoute.id)
+        if attachment_id is not None:
+            http_query = http_query.where(HTTPPublicIngress.attachment_id == attachment_id)
+        if tunnel_server_id is not None:
+            http_query = http_query.join(TunnelClientAttachment, TunnelClientAttachment.id == HTTPPublicIngress.attachment_id).where(TunnelClientAttachment.tunnel_server_id == tunnel_server_id)
+        for route, ingress in (await db.execute(http_query)).all():
+            rows.append(PortForwardRead(
+                id=route.id, attachment_id=ingress.attachment_id,
+                tunnel_server_ip_id=ingress.tunnel_server_ip_id, protocol="tcp",
+                public_port=ingress.public_port, public_port_end=None,
+                destination_ip=route.destination_ip, destination_port=route.destination_port,
+                destination_port_end=None, description=route.description, active=route.active,
+                service_kind="http", domain=route.domain, created_at=route.created_at,
+            ))
+    return sorted(rows, key=lambda row: row.created_at, reverse=True)
 
 
 @router.post("", response_model=PortForwardRead, status_code=201)
@@ -416,6 +434,8 @@ async def update_port_forward(
 ):
     pf = await db.scalar(select(PortForward).where(PortForward.id == pf_id))
     if pf is None:
+        if await db.get(HTTPRoute, uuid.UUID(pf_id)) is not None:
+            raise HTTPException(status_code=409, detail="HTTP edge routes cannot be changed through the raw forward endpoint")
         raise HTTPException(status_code=404, detail="Port forward not found")
     if pf.service_kind != "raw":
         raise HTTPException(
@@ -575,6 +595,8 @@ async def delete_port_forward(
 ):
     pf = await db.scalar(select(PortForward).where(PortForward.id == pf_id))
     if pf is None:
+        if await db.get(HTTPRoute, uuid.UUID(pf_id)) is not None:
+            raise HTTPException(status_code=409, detail="HTTP edge routes cannot be deleted through the raw forward endpoint")
         raise HTTPException(status_code=404, detail="Port forward not found")
     if pf.service_kind != "raw":
         raise HTTPException(

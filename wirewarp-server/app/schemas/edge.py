@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+from app.schemas.security import TraefikImportRequest
+
+
+class NodeTraefikImportRequest(TraefikImportRequest):
+    server_id: uuid.UUID | None = None
+    attachment_id: uuid.UUID | None = None
+    visibility: Literal["lan_only", "public_only", "both"] | None = None
+    tunnel_server_ip_id: uuid.UUID | None = None
 
 
 class EdgeProfileUpsert(BaseModel):
@@ -52,12 +60,16 @@ class EdgeNodePolicyRead(BaseModel):
 
 class EdgeRouteUpsert(BaseModel):
     attachment_id: uuid.UUID | None = None
+    tunnel_server_ip_id: uuid.UUID | None = None
+    public_port: int | None = Field(default=None, ge=1, le=65535)
+    domain: str | None = None
+    visibility: Literal["lan_only", "public_only", "both"] | None = None
     enabled: bool | None = None
     priority: int | None = None
     profile_id: uuid.UUID | None = None
     profile: str | None = None
     destination_ip: str | None = None
-    destination_port: int | None = None
+    destination_port: int | None = Field(default=None, ge=1, le=65535)
     description: str | None = None
     policy: dict[str, Any] | None = None
     upstream_scheme: str | None = None
@@ -67,12 +79,16 @@ class EdgeRouteUpsert(BaseModel):
 class EdgeRouteRead(BaseModel):
     id: uuid.UUID
     node_id: uuid.UUID
-    server_id: uuid.UUID
-    attachment_id: uuid.UUID
+    server_id: uuid.UUID | None = None
+    attachment_id: uuid.UUID | None = None
+    tunnel_server_ip_id: uuid.UUID | None = None
+    public_port: int | None = None
+    visibility: Literal["lan_only", "public_only", "both"] = "public_only"
     domain: str | None = None
     enabled: bool
     priority: int = 0
     profile_id: uuid.UUID | None = None
+    inherit_node_policy: bool = True
     destination_ip: str
     destination_port: int
     description: str | None = None
@@ -232,6 +248,8 @@ class EdgeConfigVersionRead(BaseModel):
 
 
 class EdgeDesiredStateResponse(BaseModel):
+    contains_credentials: bool = False
+    sensitive_values_redacted: bool = False
     dry_run: bool = False
     changed: bool = False
     validation_errors: list[dict[str, Any]] = Field(default_factory=list)
@@ -239,5 +257,8 @@ class EdgeDesiredStateResponse(BaseModel):
     profiles: list[dict[str, Any]] = Field(default_factory=list)
     routes: list[dict[str, Any]] = Field(default_factory=list)
     upstream_pools: list[dict[str, Any]] = Field(default_factory=list)
+    path_rules: list[dict[str, Any]] = Field(default_factory=list)
+    fragments: list[dict[str, Any]] = Field(default_factory=list)
+    node_policy: dict[str, Any] | None = None
     effective: dict[str, Any] = Field(default_factory=dict)
     reconcile_sent: bool = False

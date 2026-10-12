@@ -9,9 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.edge_cache_snapshot import EdgeCacheSnapshot
 from app.models.edge_node_policy import EdgeNodePolicy
 from app.models.edge_route_config import EdgeRouteConfig
-from app.models.port_forward import PortForward
-from app.models.tunnel_client_attachment import TunnelClientAttachment
-from app.models.tunnel_server import TunnelServer
+from app.services.edge_ownership import load_http_routes
+from app.services.edge_render import policy_edge_config, render_variants, validate_path_cache
+from app.models.edge_profile import EdgeProfile
+from app.services.edge_resources import deep_merge
 
 
 NGINX_CACHE_LISTEN = "127.0.0.1:18080"
@@ -27,6 +28,11 @@ async def load_node_cache_policy(
 ) -> dict[str, Any]:
     row = await db.get(EdgeNodePolicy, uuid.UUID(str(agent_id)))
     policy = dict(row.policy_json or {}) if row is not None else {}
+    if row is not None and row.default_profile_id:
+        profile = await db.get(EdgeProfile, row.default_profile_id)
+        if profile is None or profile.agent_id not in (None, uuid.UUID(str(agent_id))):
+            raise ValueError("Cache profile must belong to this node or be global")
+        policy = deep_merge(policy, profile.policy_json)
     cache = policy.get("cache")
     return normalize_cache_policy(cache if isinstance(cache, dict) else {})
 
@@ -81,8 +87,7 @@ def route_uses_nginx_cache(
 
 
 def nginx_cache_service_url(node_cache_policy: dict[str, Any] | None = None) -> str:
-    policy = normalize_cache_policy(node_cache_policy)
-    return str(policy.get("service_url") or NGINX_CACHE_URL)
+    return NGINX_CACHE_URL
 
 
 async def build_nginx_cache_config(
@@ -92,60 +97,37 @@ async def build_nginx_cache_config(
     node_cache = await load_node_cache_policy(agent_id, db)
     routes: list[dict[str, Any]] = []
 
-    server = await db.scalar(select(TunnelServer).where(TunnelServer.agent_id == agent_id))
-    if server is not None:
-        att_ids = (
-            await db.execute(
-                select(TunnelClientAttachment.id).where(
-                    TunnelClientAttachment.tunnel_server_id == server.id
-                )
-            )
-        ).scalars().all()
-        if att_ids:
-            forwards = (
-                await db.execute(
-                    select(PortForward)
-                    .where(
-                        PortForward.attachment_id.in_(att_ids),
-                        PortForward.service_kind == "http",
-                        PortForward.active == True,  # noqa: E712
-                    )
-                    .order_by(PortForward.domain)
-                )
-            ).scalars().all()
-            for pf in forwards:
-                if not pf.domain:
-                    continue
-                ec = await db.scalar(
-                    select(EdgeRouteConfig).where(EdgeRouteConfig.port_forward_id == pf.id)
-                )
-                policy = route_cache_policy(node_cache, ec)
-                if not cache_policy_uses_backend(policy):
-                    continue
-                scheme = ec.upstream_scheme if ec is not None else "http"
-                routes.append(
-                    {
-                        "route_id": str(pf.id),
-                        "host": pf.domain,
-                        "origin_url": f"{scheme}://{pf.destination_ip}:{pf.destination_port}",
-                        "mode": policy.get("mode"),
-                        "cache_status_header": bool(policy.get("cache_status_header", True)),
-                        "edge_ttl_seconds": _int_or_default(policy.get("edge_ttl_seconds"), 600),
-                        "browser_ttl_seconds": _int_or_none(policy.get("browser_ttl_seconds")),
-                        "upstream_insecure_skip_verify": bool(
-                            ec.upstream_insecure_skip_verify if ec is not None else False
-                        ),
-                        "bypass_path_prefixes": _list_of_strings(
-                            policy.get("bypass_path_prefixes"),
-                            DEFAULT_BYPASS_PATH_PREFIXES,
-                        ),
-                    }
-                )
+    forwards = await load_http_routes(db, agent_id, active_only=True)
+    variants = await render_variants(db, forwards)
+    for pf, stored_ec, path, effective in variants:
+        policy = normalize_cache_policy(effective.get("cache"))
+        if path:
+            if cache_policy_uses_backend(policy):
+                await validate_path_cache(db, pf, stored_ec, effective)
+            continue
+        ec = policy_edge_config(effective)
+        if not cache_policy_uses_backend(policy):
+            continue
+        origin = effective.get("origin") or {}
+        if origin.get("upstream_pool_id", effective.get("upstream_pool_id")) or origin.get("service"):
+            raise ValueError("Backend cache requires a single managed origin")
+        scheme = ec.upstream_scheme if ec is not None else "http"
+        routes.append({
+            "route_id": str(pf.id),
+            "host": pf.domain,
+            "origin_url": f"{scheme}://{pf.destination_ip}:{pf.destination_port}",
+            "mode": policy.get("mode"),
+            "cache_status_header": bool(policy.get("cache_status_header", True)),
+            "edge_ttl_seconds": _int_or_default(policy.get("edge_ttl_seconds"), 600),
+            "browser_ttl_seconds": _int_or_none(policy.get("browser_ttl_seconds")),
+            "upstream_insecure_skip_verify": bool(ec.upstream_insecure_skip_verify if ec is not None else False),
+            "bypass_path_prefixes": _list_of_strings(policy.get("bypass_path_prefixes"), DEFAULT_BYPASS_PATH_PREFIXES),
+        })
 
     return {
         "enabled": bool(routes),
-        "mode": node_cache.get("mode", "off"),
-        "listen": str(node_cache.get("listen") or NGINX_CACHE_LISTEN),
+        "mode": "proxy_cache" if routes else node_cache.get("mode", "off"),
+        "listen": NGINX_CACHE_LISTEN,
         "cache_path": str(node_cache.get("cache_path") or "/var/cache/wirewarp/nginx"),
         "keys_zone": str(node_cache.get("keys_zone") or "wirewarp_cache:64m"),
         "max_size": str(node_cache.get("max_size") or "1g"),
