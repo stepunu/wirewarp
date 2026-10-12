@@ -3,6 +3,8 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -71,10 +74,17 @@ type TraefikInstallParams struct {
 	Version      string         `json:"version"` // reserved; ignored — binary is pinned
 }
 
-func (h *ServerHandlers) handleTraefikInstall(raw json.RawMessage) (string, error) {
+func (h *EdgeHandlers) handleTraefikInstall(raw json.RawMessage) (string, error) {
 	var p TraefikInstallParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
+	}
+	if err := h.validateTraefikUpdate(p.StaticConfig, nil); err != nil {
+		return "", err
+	}
+	unit, err := edgeTraefikUnit(h.cfgPath)
+	if err != nil {
+		return "", err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), traefikInstallTimeout)
@@ -129,11 +139,11 @@ func (h *ServerHandlers) handleTraefikInstall(raw json.RawMessage) (string, erro
 	logf("==> install systemd unit %s", traefikUnitPath)
 	unitChanged := false
 	current, _ := os.ReadFile(traefikUnitPath)
-	if string(current) != traefikUnitTemplate {
+	if string(current) != unit {
 		if err := os.MkdirAll("/etc/systemd/system", 0755); err != nil {
 			return logBuf.String(), fmt.Errorf("mkdir /etc/systemd/system: %w", err)
 		}
-		if err := os.WriteFile(traefikUnitPath, []byte(traefikUnitTemplate), 0644); err != nil {
+		if err := os.WriteFile(traefikUnitPath, []byte(unit), 0644); err != nil {
 			return logBuf.String(), fmt.Errorf("write %s: %w", traefikUnitPath, err)
 		}
 		unitChanged = true
@@ -158,7 +168,7 @@ func (h *ServerHandlers) handleTraefikInstall(raw json.RawMessage) (string, erro
 	if active, statusMsg := traefikServiceActive(); active {
 		logf("==> traefik service is active")
 	} else {
-		logf("WARN: traefik service not active after install: %s", statusMsg)
+		return logBuf.String(), fmt.Errorf("Traefik is not active after install: %s", statusMsg)
 	}
 
 	// Push a fresh traefik_status frame so the dashboard card flips
@@ -175,10 +185,13 @@ type TraefikSyncConfigParams struct {
 	DynamicConfig map[string]any `json:"dynamic_config"`
 }
 
-func (h *ServerHandlers) handleTraefikSyncConfig(raw json.RawMessage) (string, error) {
+func (h *EdgeHandlers) handleTraefikSyncConfig(raw json.RawMessage) (string, error) {
 	var p TraefikSyncConfigParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
+	}
+	if err := h.validateTraefikUpdate(nil, p.DynamicConfig); err != nil {
+		return "", err
 	}
 	changed, err := applyTraefikDynamicConfig(p.DynamicConfig)
 	if err != nil {
@@ -190,7 +203,9 @@ func (h *ServerHandlers) handleTraefikSyncConfig(raw json.RawMessage) (string, e
 	}
 	// A SIGHUP reloads Traefik's file-provider without losing existing
 	// connections; if that fails, fall back to a full restart.
-	reloadTraefik()
+	if err := reloadTraefik(); err != nil {
+		return "dynamic config written; Traefik reload failed", err
+	}
 	go h.EmitTraefikNow()
 	return fmt.Sprintf("dynamic config written to %s and traefik reloaded", traefikDynamicCfg), nil
 }
@@ -205,43 +220,111 @@ func applyTraefikDynamicConfig(cfg map[string]any) (bool, error) {
 	return writeYAMLChanged(traefikDynamicCfg, cfg)
 }
 
-// reloadTraefik sends SIGHUP to the traefik process, falling back to
-// `systemctl reload` then `systemctl restart`. Soft errors are logged
-// rather than returned — a failed reload just means the old config stays
-// live, which is better than bubbling a non-fatal error to the caller.
-func reloadTraefik() {
+// Reload falls back to restart and reports failure so desired-state updates
+// can restore the previous runtime.
+func reloadTraefik() error {
 	ctx, cancel := context.WithTimeout(context.Background(), traefikCmdTimeout)
 	defer cancel()
-
-	sysctl := resolveBin("systemctl", "/usr/bin/systemctl", "/bin/systemctl")
 
 	// Try reload (SIGHUP) first — preserves open connections.
-	if out, err := exec.CommandContext(ctx, sysctl, "reload", traefikUnitName).CombinedOutput(); err != nil {
+	if out, err := edgeSystemctl(ctx, "reload", traefikUnitName); err != nil {
 		log.Printf("[traefik] reload failed (%v: %s) — trying restart", err, tail(out, 2))
-		if out2, err2 := exec.CommandContext(ctx, sysctl, "restart", traefikUnitName).CombinedOutput(); err2 != nil {
-			log.Printf("[traefik] restart failed: %v — %s", err2, tail(out2, 2))
+		if out2, err2 := edgeSystemctl(ctx, "restart", traefikUnitName); err2 != nil {
+			return fmt.Errorf("reload and restart Traefik failed: %w: %s", err2, tail(out2, 2))
 		}
 	}
-}
-
-func restartTraefik() {
-	ctx, cancel := context.WithTimeout(context.Background(), traefikCmdTimeout)
-	defer cancel()
-
-	sysctl := resolveBin("systemctl", "/usr/bin/systemctl", "/bin/systemctl")
-	if out, err := exec.CommandContext(ctx, sysctl, "restart", traefikUnitName).CombinedOutput(); err != nil {
-		log.Printf("[traefik] restart failed: %v — %s", err, tail(out, 2))
-	}
+	return nil
 }
 
 type TraefikACMEParams struct {
-	CloudflareDNSToken string `json:"cloudflare_dns_api_token"`
+	CloudflareDNSToken   string `json:"cloudflare_dns_api_token"`
+	RFC2136Nameserver    string `json:"rfc2136_nameserver"`
+	RFC2136TSIGKey       string `json:"rfc2136_tsig_key"`
+	RFC2136TSIGAlgorithm string `json:"rfc2136_tsig_algorithm"`
+	RFC2136TSIGSecret    string `json:"rfc2136_tsig_secret"`
 }
 
+var traefikACMEMu sync.Mutex
+
 func applyTraefikACMESecrets(p TraefikACMEParams, envPath string, tokenPath string) (bool, error) {
-	if strings.TrimSpace(p.CloudflareDNSToken) == "" {
+	traefikACMEMu.Lock()
+	defer traefikACMEMu.Unlock()
+	return applyTraefikACMESecretsLocked(p, envPath, tokenPath)
+}
+
+// Keep credential changes and saved desired state together. Restore all files,
+// including reload intent, when either operation fails.
+func persistTraefikACMESecrets(p TraefikACMEParams, envPath, tokenPath string, save func() error) error {
+	traefikACMEMu.Lock()
+	defer traefikACMEMu.Unlock()
+	type savedFile struct {
+		path   string
+		data   []byte
+		mode   os.FileMode
+		exists bool
+	}
+	var files []savedFile
+	for _, path := range []string{envPath, tokenPath, filepath.Join(filepath.Dir(tokenPath), "rfc2136_tsig_secret"), envPath + ".pending-restart"} {
+		f := savedFile{path: path}
+		data, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("inspect ACME transaction file: %w", err)
+		}
+		if err == nil {
+			info, err := os.Stat(path)
+			if err != nil {
+				return fmt.Errorf("inspect ACME transaction file: %w", err)
+			}
+			f.data, f.mode, f.exists = data, info.Mode().Perm(), true
+		}
+		files = append(files, f)
+	}
+	_, err := applyTraefikACMESecretsLocked(p, envPath, tokenPath)
+	if err == nil {
+		err = save()
+	}
+	if err == nil {
+		return nil
+	}
+	var rollback []string
+	for _, f := range files {
+		var restoreErr error
+		if f.exists {
+			restoreErr = writeFileAtomic(f.path, f.data, f.mode)
+		} else {
+			restoreErr = os.Remove(f.path)
+			if os.IsNotExist(restoreErr) {
+				restoreErr = nil
+			}
+		}
+		if restoreErr != nil {
+			rollback = append(rollback, restoreErr.Error())
+		}
+	}
+	if len(rollback) > 0 {
+		return fmt.Errorf("%w; ACME credential rollback failed: %s", err, strings.Join(rollback, "; "))
+	}
+	return err
+}
+
+func applyTraefikACMESecretsLocked(p TraefikACMEParams, envPath string, tokenPath string) (bool, error) {
+	rfcSecretPath := filepath.Join(filepath.Dir(tokenPath), "rfc2136_tsig_secret")
+	hasRFC2136 := p.RFC2136Nameserver != "" || p.RFC2136TSIGKey != "" || p.RFC2136TSIGAlgorithm != "" || p.RFC2136TSIGSecret != ""
+	if hasRFC2136 {
+		if err := validateRFC2136ACME(p); err != nil {
+			return false, err
+		}
+	}
+	if !hasRFC2136 && strings.TrimSpace(p.CloudflareDNSToken) == "" {
 		changed := false
-		for _, path := range []string{envPath, tokenPath} {
+		for _, path := range []string{envPath, tokenPath, rfcSecretPath} {
+			if _, err := os.Stat(path); err == nil {
+				if _, err := writeBytesChanged(envPath+".pending-restart", []byte("pending\n"), 0600); err != nil {
+					return changed, fmt.Errorf("persist ACME restart request: %w", err)
+				}
+			} else if !os.IsNotExist(err) {
+				return changed, fmt.Errorf("inspect ACME credential file: %w", err)
+			}
 			if err := os.Remove(path); err == nil {
 				changed = true
 			} else if !os.IsNotExist(err) {
@@ -254,16 +337,115 @@ func applyTraefikACMESecrets(p TraefikACMEParams, envPath string, tokenPath stri
 	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
 		return false, fmt.Errorf("mkdir %s: %w", filepath.Dir(tokenPath), err)
 	}
-	tokenChanged, err := writeBytesChanged(tokenPath, []byte(p.CloudflareDNSToken), 0600)
-	if err != nil {
-		return tokenChanged, fmt.Errorf("write ACME Cloudflare token: %w", err)
+	activePath, inactivePath := tokenPath, rfcSecretPath
+	secret := p.CloudflareDNSToken
+	env := "CF_DNS_API_TOKEN_FILE=" + tokenPath + "\n"
+	if hasRFC2136 {
+		// A running issuer can still need the previous key for exact cleanup.
+		// Keep immutable generations, including generations used by failed applies.
+		activePath, inactivePath = rfc2136CredentialPath(p, tokenPath), tokenPath
+		secret = p.RFC2136TSIGSecret
+		env = "RFC2136_NAMESERVER=" + p.RFC2136Nameserver + "\n" +
+			"RFC2136_TSIG_KEY=" + p.RFC2136TSIGKey + "\n" +
+			"RFC2136_TSIG_ALGORITHM=" + p.RFC2136TSIGAlgorithm + "\n" +
+			"RFC2136_TSIG_SECRET_FILE=" + activePath + "\n" +
+			"EXEC_PATH=" + ACMEHookPath + "\n"
+		if info, err := os.Lstat(activePath); err == nil {
+			if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+				return false, fmt.Errorf("unsafe immutable ACME credential file")
+			}
+			data, err := os.ReadFile(activePath)
+			if err != nil || !bytes.Equal(data, []byte(secret)) {
+				return false, fmt.Errorf("immutable ACME credential file does not match")
+			}
+		} else if !os.IsNotExist(err) {
+			return false, fmt.Errorf("inspect immutable ACME credential file: %w", err)
+		}
 	}
-	env := []byte("CF_DNS_API_TOKEN_FILE=" + tokenPath + "\n")
-	envChanged, err := writeBytesChanged(envPath, env, 0644)
+	// Persist reload intent before changing files so retries and restarts can
+	// finish credential rotation after an unrelated reconciliation failure.
+	needsRestart := false
+	for path, data := range map[string][]byte{activePath: []byte(secret), envPath: []byte(env)} {
+		current, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			return false, fmt.Errorf("inspect ACME credential file: %w", err)
+		}
+		if err != nil || !bytes.Equal(current, data) {
+			needsRestart = true
+		}
+	}
+	if needsRestart {
+		if _, err := writeBytesChanged(envPath+".pending-restart", []byte("pending\n"), 0600); err != nil {
+			return false, fmt.Errorf("persist ACME restart request: %w", err)
+		}
+	}
+	tokenChanged, err := writeBytesChanged(activePath, []byte(secret), 0600)
+	if err != nil {
+		return tokenChanged, fmt.Errorf("write ACME credential file: %w", err)
+	}
+	envChanged, err := writeBytesChanged(envPath, []byte(env), 0600)
 	if err != nil {
 		return tokenChanged || envChanged, fmt.Errorf("write Traefik env file: %w", err)
 	}
-	return tokenChanged || envChanged, nil
+	changed := tokenChanged || envChanged
+	if err := os.Remove(inactivePath); err == nil {
+		changed = true
+	} else if !os.IsNotExist(err) {
+		return changed, fmt.Errorf("remove inactive ACME credential file: %w", err)
+	}
+	return changed, nil
+}
+
+func rfc2136CredentialPath(p TraefikACMEParams, tokenPath string) string {
+	sum := sha256.Sum256([]byte(p.RFC2136Nameserver + "\x00" + p.RFC2136TSIGKey + "\x00" + p.RFC2136TSIGAlgorithm + "\x00" + p.RFC2136TSIGSecret))
+	return filepath.Join(filepath.Dir(tokenPath), fmt.Sprintf("rfc2136_tsig_secret.%x", sum))
+}
+
+func reconcileTraefikACMESecrets(ctx context.Context, envPath string) error {
+	traefikACMEMu.Lock()
+	defer traefikACMEMu.Unlock()
+	marker := envPath + ".pending-restart"
+	if _, err := os.Stat(marker); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect ACME restart request: %w", err)
+	}
+	restartCtx, cancel := context.WithTimeout(ctx, traefikCmdTimeout)
+	defer cancel()
+	if _, err := edgeSystemctl(restartCtx, "restart", traefikUnitName); err != nil {
+		return fmt.Errorf("restart Traefik to load ACME credentials: %w", err)
+	}
+	if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("complete ACME restart request: %w", err)
+	}
+	return nil
+}
+
+func validateRFC2136ACME(p TraefikACMEParams) error {
+	if p.CloudflareDNSToken != "" {
+		return fmt.Errorf("ACME credentials must select one DNS provider")
+	}
+	host, port, err := net.SplitHostPort(p.RFC2136Nameserver)
+	if err != nil || host == "" || !regexp.MustCompile(`^[a-zA-Z0-9.:-]+$`).MatchString(host) {
+		return fmt.Errorf("RFC2136 nameserver must contain a valid host and port")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return fmt.Errorf("RFC2136 nameserver port must be between 1 and 65535")
+	}
+	if !regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`).MatchString(p.RFC2136TSIGKey) {
+		return fmt.Errorf("RFC2136 TSIG key name is invalid")
+	}
+	switch strings.TrimSuffix(p.RFC2136TSIGAlgorithm, ".") {
+	case "hmac-sha256", "hmac-sha384", "hmac-sha512":
+	default:
+		return fmt.Errorf("RFC2136 requires a supported TSIG algorithm")
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(p.RFC2136TSIGSecret)
+	if err != nil || len(decoded) == 0 || strings.ContainsAny(p.RFC2136TSIGSecret, "\r\n") {
+		return fmt.Errorf("RFC2136 TSIG secret must be non-empty base64")
+	}
+	return nil
 }
 
 // writeYAML marshals v to YAML and writes it to path with a "do not edit"
@@ -361,7 +543,7 @@ type CrowdSecAppSecParams struct {
 	BouncerKey string `json:"bouncer_key"`
 }
 
-func (h *ServerHandlers) handleCrowdSecAppSecEnable(raw json.RawMessage) (string, error) {
+func (h *EdgeHandlers) handleCrowdSecAppSecEnable(raw json.RawMessage) (string, error) {
 	var p CrowdSecAppSecParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
@@ -456,7 +638,7 @@ func appSecBootstrapFilesPresent() bool {
 // StartTraefikPoller fires off the per-tunnel-server Traefik snapshot loop.
 // No-op on hosts without the Traefik binary — the first poll detects
 // absence and the result frame carries installed=false.
-func (h *ServerHandlers) StartTraefikPoller(ctx context.Context) {
+func (h *EdgeHandlers) StartTraefikPoller(ctx context.Context) {
 	go h.traefikPollLoop(ctx)
 }
 
@@ -471,11 +653,14 @@ func applyDiskTraefikConfig() {
 	// Config already exists on disk; signal Traefik to reload it (it may
 	// have been updated while Traefik was stopped). If Traefik isn't running
 	// yet this is a no-op, which is fine — once it starts it reads the file.
-	reloadTraefik()
+	if err := reloadTraefik(); err != nil {
+		log.Printf("[traefik] re-apply dynamic config degraded: %v", err)
+		return
+	}
 	log.Printf("[traefik] re-applied dynamic config from disk: %s", traefikDynamicCfg)
 }
 
-func (h *ServerHandlers) traefikPollLoop(ctx context.Context) {
+func (h *EdgeHandlers) traefikPollLoop(ctx context.Context) {
 	// Apply disk config before the first WS handshake completes — ensures
 	// Traefik is serving the right routes even if the agent restarts while
 	// the control server is temporarily unreachable.
@@ -494,7 +679,7 @@ func (h *ServerHandlers) traefikPollLoop(ctx context.Context) {
 	}
 }
 
-func (h *ServerHandlers) pollAndEmitTraefik(ctx context.Context, retry bool) {
+func (h *EdgeHandlers) pollAndEmitTraefik(ctx context.Context, retry bool) {
 	payload := collectTraefik()
 	if h.tryEmitTraefik(payload) {
 		h.emitTraefikAccessEvents(ctx)
@@ -516,7 +701,7 @@ func (h *ServerHandlers) pollAndEmitTraefik(ctx context.Context, retry bool) {
 	}
 }
 
-func (h *ServerHandlers) tryEmitTraefik(payload map[string]any) bool {
+func (h *EdgeHandlers) tryEmitTraefik(payload map[string]any) bool {
 	p := h.emit.Load()
 	if p == nil {
 		return false
@@ -531,7 +716,7 @@ func (h *ServerHandlers) tryEmitTraefik(payload map[string]any) bool {
 // EmitTraefikNow triggers an out-of-band Traefik snapshot + emit.
 // Used by install / sync handlers so the dashboard reflects the new
 // state immediately instead of waiting for the next 5-min cycle.
-func (h *ServerHandlers) EmitTraefikNow() {
+func (h *EdgeHandlers) EmitTraefikNow() {
 	ctx, cancel := context.WithTimeout(context.Background(), traefikCmdTimeout)
 	defer cancel()
 	h.pollAndEmitTraefik(ctx, true)
@@ -664,7 +849,7 @@ func countTraefikRoutes() int {
 
 // --- security_events emitters ---
 
-func (h *ServerHandlers) emitTraefikAccessEvents(ctx context.Context) {
+func (h *EdgeHandlers) emitTraefikAccessEvents(ctx context.Context) {
 	raw, err := readTraefikAccessJournal(ctx)
 	if err != nil {
 		log.Printf("[security-events] traefik access log: %v", err)
@@ -923,7 +1108,7 @@ func parseTraefikAccessSecurityEvent(line string) (map[string]any, bool) {
 // emitSecurityEvents reads current CrowdSec decisions and emits them as a
 // `security_events` frame. Called opportunistically after crowdsec_install /
 // crowdsec_appsec_enable so Events page data is fresh.
-func (h *ServerHandlers) emitSecurityEvents(ctx context.Context) {
+func (h *EdgeHandlers) emitSecurityEvents(ctx context.Context) {
 	bin := resolveCSCli()
 	if bin == "" {
 		return

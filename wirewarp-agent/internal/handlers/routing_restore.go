@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -18,6 +19,12 @@ import (
 // a no-op (everything underneath uses check-then-add semantics) — so the
 // systemd unit can fire it as a oneshot at every boot without coordination.
 func RestoreRouting(cfg *config.Config) error {
+	if err := RestoreEdgeIngressGuard(context.Background(), cfg); err != nil {
+		return fmt.Errorf("restore edge ingress guard: %w", err)
+	}
+	if err := RestoreSiteLinkGuard(context.Background(), cfg); err != nil {
+		return fmt.Errorf("restore site-link guard: %w", err)
+	}
 	switch cfg.Mode {
 	case "server":
 		return restoreRoutingServer(cfg)

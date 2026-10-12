@@ -99,13 +99,7 @@ func (h *ClientHandlers) emitHealEvent(mode, iface string, healed []string) {
 	})
 }
 
-
-// snapshotAttachments returns a shallow copy of the attachment slice for
-// the healer to iterate over safely while wg_attach / wg_detach handlers
-// continue to mutate the underlying config slice on the dispatch goroutine.
+// snapshotAttachments detaches saved attachments under the config lock.
 func (h *ClientHandlers) snapshotAttachments() []config.AttachmentState {
-	src := h.cfg.Attachments
-	out := make([]config.AttachmentState, len(src))
-	copy(out, src)
-	return out
+	return h.cfg.Snapshot().Attachments
 }

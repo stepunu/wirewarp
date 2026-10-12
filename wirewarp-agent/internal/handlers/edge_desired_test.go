@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -229,5 +231,173 @@ func TestApplyTraefikACMESecretsWritesTokenFileAndEnvFile(t *testing.T) {
 func TestTraefikUnitLoadsManagedEnvironmentFile(t *testing.T) {
 	if !strings.Contains(traefikUnitTemplate, "EnvironmentFile=-/etc/traefik/traefik.env") {
 		t.Fatalf("traefik systemd unit must load the managed ACME env file")
+	}
+}
+
+func TestApplyTraefikACMERFC2136SecretsAndProviderSwitch(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "traefik.env")
+	tokenPath := filepath.Join(dir, "secrets", "cloudflare_dns_api_token")
+	p := TraefikACMEParams{
+		RFC2136Nameserver:    "ns1.example.com:53",
+		RFC2136TSIGKey:       "acme.example.com.",
+		RFC2136TSIGAlgorithm: "hmac-sha256",
+		RFC2136TSIGSecret:    "dGVzdC1zZWNyZXQ=",
+	}
+	changed, err := applyTraefikACMESecrets(p, envPath, tokenPath)
+	if err != nil || !changed {
+		t.Fatalf("first RFC2136 apply: changed=%v err=%v", changed, err)
+	}
+	secretPath := rfc2136CredentialPath(p, tokenPath)
+	secret, err := os.ReadFile(secretPath)
+	if err != nil || string(secret) != p.RFC2136TSIGSecret {
+		t.Fatal("RFC2136 secret file missing or incorrect")
+	}
+	env, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"RFC2136_NAMESERVER=ns1.example.com:53\n",
+		"RFC2136_TSIG_KEY=acme.example.com.\n",
+		"RFC2136_TSIG_ALGORITHM=hmac-sha256\n",
+		"RFC2136_TSIG_SECRET_FILE=" + secretPath + "\n",
+	} {
+		if !strings.Contains(string(env), want) {
+			t.Fatalf("missing RFC2136 setting %s", strings.Split(want, "=")[0])
+		}
+	}
+	if strings.Contains(string(env), p.RFC2136TSIGSecret) {
+		t.Fatal("secret leaked into environment file")
+	}
+	for _, path := range []string{secretPath, envPath} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0600 {
+			t.Fatalf("ACME file must be root-readable only: %s", path)
+		}
+	}
+	changed, err = applyTraefikACMESecrets(p, envPath, tokenPath)
+	if err != nil || changed {
+		t.Fatalf("repeat apply must be unchanged: changed=%v err=%v", changed, err)
+	}
+	_, err = applyTraefikACMESecrets(TraefikACMEParams{CloudflareDNSToken: "test-token"}, envPath, tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(secretPath); err != nil {
+		t.Fatal("switch must retain the immutable key for pending DNS cleanup")
+	}
+	_, err = applyTraefikACMESecrets(TraefikACMEParams{}, envPath, tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{envPath, tokenPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("disabled ACME must remove managed credential file %s", path)
+		}
+	}
+}
+
+func TestApplyTraefikACMERFC2136RejectsInvalidSettingsBeforeWrites(t *testing.T) {
+	valid := TraefikACMEParams{
+		RFC2136Nameserver: "ns1.example.com:53", RFC2136TSIGKey: "acme.example.com.",
+		RFC2136TSIGAlgorithm: "hmac-sha256", RFC2136TSIGSecret: "dGVzdC1zZWNyZXQ=",
+	}
+	for _, mutate := range []func(*TraefikACMEParams){
+		func(p *TraefikACMEParams) { p.RFC2136Nameserver = "ns1.example.com:53\nEVIL=yes" },
+		func(p *TraefikACMEParams) { p.RFC2136TSIGKey = "key\nEVIL=yes" },
+		func(p *TraefikACMEParams) { p.RFC2136TSIGAlgorithm = "unknown" },
+		func(p *TraefikACMEParams) { p.RFC2136TSIGSecret = "invalid secret" },
+		func(p *TraefikACMEParams) { p.RFC2136TSIGSecret = "" },
+		func(p *TraefikACMEParams) { p.CloudflareDNSToken = "other-provider" },
+	} {
+		dir := t.TempDir()
+		envPath := filepath.Join(dir, "traefik.env")
+		tokenPath := filepath.Join(dir, "secrets", "cloudflare_dns_api_token")
+		p := valid
+		mutate(&p)
+		if _, err := applyTraefikACMESecrets(p, envPath, tokenPath); err == nil {
+			t.Fatal("invalid settings accepted")
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+			t.Fatal("invalid settings changed the filesystem")
+		}
+	}
+}
+
+func TestACMERestartRetriesAfterFailureAndUnchangedCredentialReplay(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "traefik.env")
+	tokenPath := filepath.Join(dir, "secrets", "cloudflare_dns_api_token")
+	p := TraefikACMEParams{CloudflareDNSToken: "test-token"}
+	if _, err := applyTraefikACMESecrets(p, envPath, tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	previous := edgeSystemctl
+	t.Cleanup(func() { edgeSystemctl = previous })
+	calls := 0
+	edgeSystemctl = func(_ context.Context, args ...string) ([]byte, error) {
+		calls++
+		if len(args) != 2 || args[0] != "restart" || args[1] != traefikUnitName {
+			t.Fatal("unexpected credential reload command")
+		}
+		if calls == 1 {
+			return nil, errors.New("service unavailable")
+		}
+		return nil, nil
+	}
+	if err := reconcileTraefikACMESecrets(context.Background(), envPath); err == nil {
+		t.Fatal("failed restart must be reported")
+	}
+	if changed, err := applyTraefikACMESecrets(p, envPath, tokenPath); err != nil || changed {
+		t.Fatal("unchanged credential replay must be idempotent")
+	}
+	if err := reconcileTraefikACMESecrets(context.Background(), envPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconcileTraefikACMESecrets(context.Background(), envPath); err != nil || calls != 2 {
+		t.Fatal("successful credential reload must clear retry state")
+	}
+}
+
+func TestACMECredentialRotationCannotRacePendingRestart(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "traefik.env")
+	tokenPath := filepath.Join(dir, "secrets", "cloudflare_dns_api_token")
+	if _, err := applyTraefikACMESecrets(TraefikACMEParams{CloudflareDNSToken: "old-test-token"}, envPath, tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	previous := edgeSystemctl
+	t.Cleanup(func() { edgeSystemctl = previous })
+	started, release := make(chan struct{}), make(chan struct{})
+	edgeSystemctl = func(_ context.Context, _ ...string) ([]byte, error) {
+		close(started)
+		<-release
+		return nil, nil
+	}
+	restarted := make(chan error, 1)
+	go func() { restarted <- reconcileTraefikACMESecrets(context.Background(), envPath) }()
+	<-started
+	applied := make(chan error, 1)
+	go func() {
+		_, err := applyTraefikACMESecrets(TraefikACMEParams{CloudflareDNSToken: "new-test-token"}, envPath, tokenPath)
+		applied <- err
+	}()
+	select {
+	case err := <-applied:
+		close(release)
+		<-restarted
+		t.Fatalf("credential rotation ran during restart: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	if err := <-restarted; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-applied; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(envPath + ".pending-restart"); err != nil {
+		t.Fatal("new credentials must retain their own pending restart")
 	}
 }

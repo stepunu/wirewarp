@@ -4,11 +4,54 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/wirewarp/agent/internal/config"
 )
+
+func TestStopEdgeServicesLeavesUnmanagedUnitsUntouched(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unit")
+	old := edgeSystemctl
+	var calls []string
+	edgeSystemctl = func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, args[len(args)-1])
+		return nil, nil
+	}
+	t.Cleanup(func() { edgeSystemctl = old })
+	h := NewEdge(&config.Config{Mode: "server", EdgeDisabled: true}, filepath.Join(t.TempDir(), "agent.yaml"))
+	h.applyIngress = func(context.Context, []config.EdgePublicIngress) error { return nil }
+	h.managedService = func(unit string) (bool, error) {
+		if unit != "traefik.service" {
+			return false, nil
+		}
+		return managedFileContains(path, "Description=Traefik edge proxy (WireWarp-managed)")
+	}
+	for _, content := range []string{"", "Description=Unrelated reverse proxy\n"} {
+		if content != "" {
+			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := h.stopEdgeServices(nil); err != nil {
+			t.Fatal(err)
+		}
+		if len(calls) != 0 {
+			t.Fatal("unmanaged service was stopped")
+		}
+	}
+	if err := os.WriteFile(path, []byte("Description=Traefik edge proxy (WireWarp-managed)\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.stopEdgeServices(nil); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(calls, []string{"traefik.service"}) {
+		t.Fatalf("unexpected stopped services: %v", calls)
+	}
+}
 
 func TestHandleEdgeDisableStopsServicesAndPreservesDesiredState(t *testing.T) {
 	var calls [][]string
@@ -19,7 +62,9 @@ func TestHandleEdgeDisableStopsServicesAndPreservesDesiredState(t *testing.T) {
 	}
 	t.Cleanup(func() { edgeSystemctl = old })
 
-	h := &ServerHandlers{
+	h := &EdgeHandlers{
+		managedService: func(string) (bool, error) { return true, nil },
+		cfgPath:        filepath.Join(t.TempDir(), "agent.yaml"),
 		cfg: &config.Config{
 			EdgeDesired: &config.EdgeDesiredState{
 				Whitelist: config.EdgeWhitelist{IPs: []string{"1.2.3.4"}},
@@ -65,7 +110,7 @@ func TestHandleEdgeDisableTreatsMissingOptionalUnitsAsSkipped(t *testing.T) {
 	}
 	t.Cleanup(func() { edgeSystemctl = old })
 
-	h := &ServerHandlers{cfg: &config.Config{}}
+	h := &EdgeHandlers{managedService: func(string) (bool, error) { return true, nil }, cfg: &config.Config{}, cfgPath: filepath.Join(t.TempDir(), "agent.yaml")}
 	raw, _ := json.Marshal(map[string]any{"services": []string{"nginx"}})
 
 	if _, err := h.handleEdgeDisable(raw); err != nil {

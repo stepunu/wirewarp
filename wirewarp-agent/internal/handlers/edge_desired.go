@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/wirewarp/agent/internal/config"
@@ -24,23 +26,26 @@ const (
 )
 
 type EdgeDesiredStateParams struct {
-	Whitelist            CrowdSecInstallParams `json:"whitelist"`
-	TraefikStaticConfig  map[string]any        `json:"traefik_static_config"`
-	TraefikDynamicConfig map[string]any        `json:"traefik_dynamic_config"`
-	NginxCacheConfig     map[string]any        `json:"nginx_cache_config"`
-	TraefikACME          TraefikACMEParams     `json:"traefik_acme"`
+	DesiredHash          string                     `json:"desired_hash"`
+	ConfigVersionID      string                     `json:"config_version_id"`
+	RuntimeMode          string                     `json:"runtime_mode"`
+	PublicIngress        []config.EdgePublicIngress `json:"public_ingress"`
+	Whitelist            CrowdSecInstallParams      `json:"whitelist"`
+	TraefikStaticConfig  map[string]any             `json:"traefik_static_config"`
+	TraefikDynamicConfig map[string]any             `json:"traefik_dynamic_config"`
+	NginxCacheConfig     map[string]any             `json:"nginx_cache_config"`
+	TraefikACME          TraefikACMEParams          `json:"traefik_acme"`
 }
 
-func (h *ServerHandlers) handleEdgeDesiredState(raw json.RawMessage) (string, error) {
+func (h *EdgeHandlers) handleEdgeDesiredState(raw json.RawMessage) (string, error) {
 	var p EdgeDesiredStateParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
 	}
-	acmeChanged, err := applyTraefikACMESecrets(p.TraefikACME, traefikEnvPath, traefikCFTokenPath)
-	if err != nil {
-		return "", err
-	}
-	h.cfg.EdgeDesired = &config.EdgeDesiredState{
+	desired := &config.EdgeDesiredState{
+		DesiredHash: p.DesiredHash, ConfigVersionID: p.ConfigVersionID,
+		RuntimeMode:   p.RuntimeMode,
+		PublicIngress: append([]config.EdgePublicIngress(nil), p.PublicIngress...),
 		Whitelist: config.EdgeWhitelist{
 			IPs:   append([]string(nil), p.Whitelist.IPs...),
 			CIDRs: append([]string(nil), p.Whitelist.CIDRs...),
@@ -49,24 +54,104 @@ func (h *ServerHandlers) handleEdgeDesiredState(raw json.RawMessage) (string, er
 		TraefikDynamicConfig: p.TraefikDynamicConfig,
 		NginxCacheConfig:     p.NginxCacheConfig,
 	}
-	if h.cfg.EdgeBouncerKey == "" {
-		key, err := generateBouncerKey()
+	previous := h.cfg.Snapshot()
+	if err := validateEdgeRuntime(previous, desired); err != nil {
+		return "", err
+	}
+	restoreFiles, err := h.snapshotRuntime()
+	if err != nil {
+		return "", err
+	}
+	key := previous.EdgeBouncerKey
+	if key == "" && desired.RuntimeMode != "relay_only" {
+		key, err = generateBouncerKey()
 		if err != nil {
 			return "", err
 		}
-		h.cfg.EdgeBouncerKey = key
 	}
-	if err := h.cfg.Save(h.cfgPath); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	previousIngress := savedEdgeIngress(previous)
+	stagedIngress := unionEdgeIngress(previousIngress, desired.PublicIngress)
+	save := func() error {
+		if err := h.applyIngress(ctx, stagedIngress); err != nil {
+			return err
+		}
+		err := h.cfg.UpdateAndSave(h.cfgPath, func(next *config.Config) error {
+			next.EdgeDesired = desired
+			next.EdgeBouncerKey = key
+			next.EdgeDisabled = false
+			next.EdgeIngressGuard = append([]config.EdgePublicIngress(nil), stagedIngress...)
+			next.EdgeRuntimePending = true
+			return nil
+		})
+		if err != nil {
+			if rollbackErr := h.applyIngress(ctx, previousIngress); rollbackErr != nil {
+				return fmt.Errorf("%w; ingress rollback degraded: %v", err, rollbackErr)
+			}
+		}
+		return err
+	}
+	if err := h.persistSecrets(p.TraefikACME, save); err != nil {
 		return "", fmt.Errorf("persist desired edge state: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	if err := h.reconcileDesiredEdge(ctx); err != nil {
-		return "desired edge state saved; reconcile degraded", err
-	}
-	if acmeChanged {
-		restartTraefik()
+	if err := h.convergeEdgeRuntime(ctx); err != nil {
+		rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer rollbackCancel()
+		if rollbackErr := h.cfg.UpdateAndSave(h.cfgPath, func(next *config.Config) error {
+			next.EdgeDesired = previous.EdgeDesired
+			next.EdgeBouncerKey = previous.EdgeBouncerKey
+			next.EdgeDisabled = previous.EdgeDisabled
+			if previous.EdgeDesired == nil {
+				next.EdgeDisabled = true
+			}
+			next.EdgeIngressGuard = append([]config.EdgePublicIngress(nil), stagedIngress...)
+			next.EdgeRuntimePending = true
+			return nil
+		}); rollbackErr != nil {
+			return "edge reconcile failed; rollback degraded; new desired state retained", fmt.Errorf("edge reconcile failed: %w; saved-state rollback degraded: %v", err, rollbackErr)
+		}
+		var failures []string
+		// Keep new ownership markers until newly started services are stopped.
+		if previous.EdgeDisabled || previous.EdgeDesired == nil {
+			if _, rollbackErr := h.stopEdgeServices(nil); rollbackErr != nil {
+				failures = append(failures, rollbackErr.Error())
+			}
+		}
+		if len(failures) == 0 {
+			if rollbackErr := restoreFiles(); rollbackErr != nil {
+				failures = append(failures, rollbackErr.Error())
+			}
+		}
+		if len(failures) == 0 {
+			if previous.EdgeDisabled || previous.EdgeDesired == nil {
+				if rollbackErr := h.finalizeEdgeIngress(rollbackCtx); rollbackErr != nil {
+					failures = append(failures, rollbackErr.Error())
+				}
+			} else {
+				if rollbackErr := h.applyDesired(rollbackCtx); rollbackErr != nil {
+					failures = append(failures, "runtime: "+rollbackErr.Error())
+				}
+				owned, probeErr := h.ownedService(traefikUnitName)
+				if probeErr != nil {
+					failures = append(failures, probeErr.Error())
+				} else if owned {
+					if _, restartErr := edgeSystemctl(rollbackCtx, "restart", traefikUnitName); restartErr != nil {
+						failures = append(failures, "restart previous Traefik: "+restartErr.Error())
+					}
+				}
+				if len(failures) == 0 {
+					if rollbackErr := h.finalizeEdgeIngress(rollbackCtx); rollbackErr != nil {
+						failures = append(failures, rollbackErr.Error())
+					}
+				}
+			}
+		}
+		if len(failures) != 0 {
+			return "edge reconcile failed; rollback degraded", fmt.Errorf("edge reconcile failed: %w; rollback degraded: %s", err, strings.Join(failures, "; "))
+		}
+		return "edge reconcile failed; previous state restored", fmt.Errorf("edge reconcile failed: %w; previous state restored", err)
 	}
 	return "desired edge state saved and reconciled", nil
 }
@@ -121,13 +206,15 @@ func injectBouncerKey(in map[string]any, key string) map[string]any {
 func buildAppSecAcquisition(block bool) map[string]any {
 	mode := "observe"
 	modeConfig := appSecObserveName
+	listen := "127.0.0.1:7423"
 	if block {
 		mode = "block"
 		modeConfig = appSecBlockName
+		listen = "127.0.0.1:7422"
 	}
 	return map[string]any{
 		"source":      "appsec",
-		"listen_addr": "127.0.0.1:7422",
+		"listen_addr": listen,
 		"path":        "/",
 		"appsec_configs": []string{
 			"crowdsecurity/appsec-default",
@@ -177,14 +264,28 @@ func writeAppSecModeConfigs() error {
 	return nil
 }
 
-func writeAppSecAcquisition(block bool) (bool, error) {
+func renderAppSecAcquisition() ([]byte, error) {
+	var output bytes.Buffer
+	encoder := yaml.NewEncoder(&output)
+	for _, block := range []bool{true, false} {
+		if err := encoder.Encode(buildAppSecAcquisition(block)); err != nil {
+			return nil, err
+		}
+	}
+	if err := encoder.Close(); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
+}
+
+func writeAppSecAcquisition(_ bool) (bool, error) {
 	if err := writeAppSecModeConfigs(); err != nil {
 		return false, err
 	}
 	if err := os.MkdirAll(filepath.Dir(appSecAcquisitionFile), 0755); err != nil {
 		return false, fmt.Errorf("mkdir %s: %w", filepath.Dir(appSecAcquisitionFile), err)
 	}
-	data, err := yaml.Marshal(buildAppSecAcquisition(block))
+	data, err := renderAppSecAcquisition()
 	if err != nil {
 		return false, fmt.Errorf("marshal appsec acquisition: %w", err)
 	}
@@ -214,30 +315,50 @@ func desiredUsesWAF(dynamic map[string]any) (uses bool, block bool) {
 	return uses, block
 }
 
-func (h *ServerHandlers) desiredWhitelist() CrowdSecInstallParams {
-	if h.cfg.EdgeDesired == nil {
+func (h *EdgeHandlers) desiredWhitelist() CrowdSecInstallParams {
+	saved := h.cfg.Snapshot()
+	if saved.EdgeDesired == nil {
 		return CrowdSecInstallParams{}
 	}
 	return CrowdSecInstallParams{
-		IPs:   append([]string(nil), h.cfg.EdgeDesired.Whitelist.IPs...),
-		CIDRs: append([]string(nil), h.cfg.EdgeDesired.Whitelist.CIDRs...),
+		IPs:   append([]string(nil), saved.EdgeDesired.Whitelist.IPs...),
+		CIDRs: append([]string(nil), saved.EdgeDesired.Whitelist.CIDRs...),
 	}
 }
 
-func (h *ServerHandlers) reconcileDesiredEdge(ctx context.Context) error {
-	if h.cfg.EdgeDesired == nil {
+func (h *EdgeHandlers) reconcileDesiredEdge(ctx context.Context) error {
+	saved := h.cfg.Snapshot()
+	if saved.EdgeDesired == nil || saved.EdgeDisabled {
 		return nil
+	}
+	if err := validateEdgeRuntime(saved, saved.EdgeDesired); err != nil {
+		return err
+	}
+	if err := h.applyIngress(ctx, savedEdgeIngress(saved)); err != nil {
+		return err
+	}
+	if saved.EdgeDesired.RuntimeMode == "relay_only" {
+		if _, err := h.stopEdgeServices([]string{"crowdsec", "nginx"}); err != nil {
+			return err
+		}
+		return h.applyTraefik(ctx, saved)
 	}
 
 	var firstErr error
-	usesWAF, block := desiredUsesWAF(h.cfg.EdgeDesired.TraefikDynamicConfig)
-	if usesWAF && h.cfg.EdgeBouncerKey == "" {
+	usesWAF, block := desiredUsesWAF(saved.EdgeDesired.TraefikDynamicConfig)
+	if usesWAF && saved.EdgeBouncerKey == "" {
 		key, err := generateBouncerKey()
 		if err != nil && firstErr == nil {
 			firstErr = err
 		} else {
-			h.cfg.EdgeBouncerKey = key
-			_ = h.cfg.Save(h.cfgPath)
+			err = h.cfg.UpdateAndSave(h.cfgPath, func(next *config.Config) error {
+				next.EdgeBouncerKey = key
+				return nil
+			})
+			if err != nil {
+				return fmt.Errorf("persist edge bouncer key: %w", err)
+			}
+			saved.EdgeBouncerKey = key
 		}
 	}
 
@@ -262,7 +383,7 @@ func (h *ServerHandlers) reconcileDesiredEdge(ctx context.Context) error {
 			needsBootstrap = true
 		}
 		if needsBootstrap {
-			appsecRaw, _ := json.Marshal(CrowdSecAppSecParams{BouncerKey: h.cfg.EdgeBouncerKey})
+			appsecRaw, _ := json.Marshal(CrowdSecAppSecParams{BouncerKey: saved.EdgeBouncerKey})
 			if _, err := h.handleCrowdSecAppSecEnable(appsecRaw); err != nil && firstErr == nil {
 				firstErr = err
 			}
@@ -275,21 +396,26 @@ func (h *ServerHandlers) reconcileDesiredEdge(ctx context.Context) error {
 		}
 	}
 
-	if h.cfg.EdgeDesired.TraefikStaticConfig != nil {
-		raw, _ := json.Marshal(TraefikInstallParams{StaticConfig: h.cfg.EdgeDesired.TraefikStaticConfig})
+	if saved.EdgeDesired.TraefikStaticConfig != nil {
+		raw, _ := json.Marshal(TraefikInstallParams{StaticConfig: saved.EdgeDesired.TraefikStaticConfig})
 		if _, err := h.handleTraefikInstall(raw); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	if h.cfg.EdgeDesired.TraefikDynamicConfig != nil {
-		dynamic := injectBouncerKey(h.cfg.EdgeDesired.TraefikDynamicConfig, h.cfg.EdgeBouncerKey)
+	if saved.EdgeDesired.TraefikDynamicConfig != nil {
+		dynamic := injectBouncerKey(saved.EdgeDesired.TraefikDynamicConfig, saved.EdgeBouncerKey)
 		raw, _ := json.Marshal(TraefikSyncConfigParams{DynamicConfig: dynamic})
 		if _, err := h.handleTraefikSyncConfig(raw); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	if h.cfg.EdgeDesired.NginxCacheConfig != nil {
-		if err := h.reconcileNginxCache(ctx, h.cfg.EdgeDesired.NginxCacheConfig); err != nil && firstErr == nil {
+	if saved.EdgeDesired.TraefikStaticConfig != nil {
+		if err := reconcileTraefikACMESecrets(ctx, traefikEnvPath); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if saved.EdgeDesired.NginxCacheConfig != nil {
+		if err := h.reconcileNginxCache(ctx, saved.EdgeDesired.NginxCacheConfig); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

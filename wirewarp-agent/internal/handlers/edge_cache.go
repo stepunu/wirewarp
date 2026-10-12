@@ -49,7 +49,7 @@ type EdgeCachePurgeResult struct {
 	Reason      string
 }
 
-func (h *ServerHandlers) handleEdgeCachePurge(raw json.RawMessage) (string, error) {
+func (h *EdgeHandlers) handleEdgeCachePurge(raw json.RawMessage) (string, error) {
 	var p EdgeCachePurgeParams
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &p); err != nil {
@@ -65,8 +65,8 @@ func (h *ServerHandlers) handleEdgeCachePurge(raw json.RawMessage) (string, erro
 		return "", fmt.Errorf("unsupported cache purge scope: %s", p.Scope)
 	}
 	root := nginxCacheDefaultDir
-	if h != nil && h.cfg != nil && h.cfg.EdgeDesired != nil && h.cfg.EdgeDesired.NginxCacheConfig != nil {
-		root = nginxString(h.cfg.EdgeDesired.NginxCacheConfig, "cache_path", nginxCacheDefaultDir)
+	if h != nil && h.cfg != nil && h.cfg.Snapshot().EdgeDesired != nil && h.cfg.Snapshot().EdgeDesired.NginxCacheConfig != nil {
+		root = nginxString(h.cfg.Snapshot().EdgeDesired.NginxCacheConfig, "cache_path", nginxCacheDefaultDir)
 	}
 	result, err := purgeNginxCacheFiles(root, p)
 	if err != nil {
@@ -86,11 +86,11 @@ func (h *ServerHandlers) handleEdgeCachePurge(raw json.RawMessage) (string, erro
 	return message, nil
 }
 
-func (h *ServerHandlers) handleEdgeCacheTest(raw json.RawMessage) (string, error) {
-	if h == nil || h.cfg == nil || h.cfg.EdgeDesired == nil || h.cfg.EdgeDesired.NginxCacheConfig == nil {
+func (h *EdgeHandlers) handleEdgeCacheTest(raw json.RawMessage) (string, error) {
+	if h == nil || h.cfg == nil || h.cfg.Snapshot().EdgeDesired == nil || h.cfg.Snapshot().EdgeDesired.NginxCacheConfig == nil {
 		return "", fmt.Errorf("nginx cache desired state is not available")
 	}
-	cfg := h.cfg.EdgeDesired.NginxCacheConfig
+	cfg := h.cfg.Snapshot().EdgeDesired.NginxCacheConfig
 	if !nginxCacheEnabled(cfg) {
 		return "", fmt.Errorf("nginx cache is not enabled")
 	}
@@ -253,13 +253,13 @@ func countFiles(root string) int {
 	return count
 }
 
-func (h *ServerHandlers) emitNginxCachePurgeResult(message string) {
+func (h *EdgeHandlers) emitNginxCachePurgeResult(message string) {
 	if h == nil {
 		return
 	}
 	var cfg map[string]any
-	if h.cfg != nil && h.cfg.EdgeDesired != nil {
-		cfg = h.cfg.EdgeDesired.NginxCacheConfig
+	if h.cfg != nil && h.cfg.Snapshot().EdgeDesired != nil {
+		cfg = h.cfg.Snapshot().EdgeDesired.NginxCacheConfig
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
@@ -278,10 +278,16 @@ type nginxCacheRoute struct {
 	ProbePath                  string
 }
 
-func (h *ServerHandlers) reconcileNginxCache(ctx context.Context, cfg map[string]any) error {
+func (h *EdgeHandlers) reconcileNginxCache(ctx context.Context, cfg map[string]any) error {
 	if !nginxCacheEnabled(cfg) {
-		if _, err := os.Stat(nginxCacheConfigPath); err == nil {
-			_, _ = edgeSystemctl(ctx, "disable", "--now", nginxCacheUnit)
+		owned, err := h.ownedService(nginxCacheUnit)
+		if err != nil {
+			return fmt.Errorf("inspect managed nginx cache service: %w", err)
+		}
+		if owned {
+			if out, err := edgeSystemctl(ctx, "disable", "--now", nginxCacheUnit); err != nil {
+				return fmt.Errorf("disable nginx cache service: %w\n%s", err, tail(out, 6))
+			}
 		}
 		return nil
 	}
@@ -775,10 +781,10 @@ func fetchNginxCacheStatus(ctx context.Context, endpoint, host string) (string, 
 	return status, nil
 }
 
-func (h *ServerHandlers) pollAndEmitNginxCache(ctx context.Context, retry bool) {
+func (h *EdgeHandlers) pollAndEmitNginxCache(ctx context.Context, retry bool) {
 	var cfg map[string]any
-	if h.cfg.EdgeDesired != nil {
-		cfg = h.cfg.EdgeDesired.NginxCacheConfig
+	if h.cfg.Snapshot().EdgeDesired != nil {
+		cfg = h.cfg.Snapshot().EdgeDesired.NginxCacheConfig
 	}
 	payload := collectNginxCache(ctx, cfg)
 	if h.tryEmitNginxCache(payload) {
@@ -799,7 +805,7 @@ func (h *ServerHandlers) pollAndEmitNginxCache(ctx context.Context, retry bool) 
 	}
 }
 
-func (h *ServerHandlers) tryEmitNginxCache(payload map[string]any) bool {
+func (h *EdgeHandlers) tryEmitNginxCache(payload map[string]any) bool {
 	p := h.emit.Load()
 	if p == nil {
 		return false

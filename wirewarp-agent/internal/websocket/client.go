@@ -117,7 +117,8 @@ func (c *Client) Run(ctx context.Context) {
 			log.Printf("[ws] disconnected: %v — retrying in %s", err, backoff)
 		}
 		// No credentials at all — no point hammering the server.
-		if c.cfg.AgentJWT == "" && c.cfg.AgentToken == "" {
+		saved := c.cfg.Snapshot()
+		if saved.AgentJWT == "" && saved.AgentToken == "" {
 			log.Printf("[ws] no valid credentials — reissue a JWT from the dashboard, then update agent_jwt in /etc/wirewarp/agent.yaml and restart the service")
 			backoff = 5 * time.Minute
 		}
@@ -131,10 +132,11 @@ func (c *Client) Run(ctx context.Context) {
 }
 
 func (c *Client) connect(ctx context.Context) error {
-	if err := validate.ControlServerURL(c.cfg.ControlServerURL, c.cfg.Insecure); err != nil {
+	saved := c.cfg.Snapshot()
+	if err := validate.ControlServerURL(saved.ControlServerURL, saved.Insecure); err != nil {
 		return err
 	}
-	conn, _, err := websocket.Dial(ctx, c.cfg.ControlServerURL+"/ws/agent", nil)
+	conn, _, err := websocket.Dial(ctx, saved.ControlServerURL+"/ws/agent", nil)
 	if err != nil {
 		return err
 	}
@@ -147,8 +149,8 @@ func (c *Client) connect(ctx context.Context) error {
 	c.sendFn = send
 	defer func() { c.sendFn = nil }()
 
-	if c.cfg.AgentJWT != "" {
-		if err := send(map[string]string{"type": "auth", "jwt": c.cfg.AgentJWT}); err != nil {
+	if saved.AgentJWT != "" {
+		if err := send(map[string]string{"type": "auth", "jwt": saved.AgentJWT}); err != nil {
 			return err
 		}
 		var resp map[string]string
@@ -157,17 +159,21 @@ func (c *Client) connect(ctx context.Context) error {
 		}
 		if resp["type"] != "authenticated" {
 			// JWT expired — clear it and re-register on the next attempt
-			c.cfg.AgentJWT = ""
-			_ = c.cfg.Save(c.cfgPath)
+			if err := c.cfg.UpdateAndSave(c.cfgPath, func(next *config.Config) error {
+				next.AgentJWT = ""
+				return nil
+			}); err != nil {
+				return fmt.Errorf("persist rejected authentication: %w", err)
+			}
 			return fmt.Errorf("auth rejected: %s", resp["message"])
 		}
-		log.Printf("[ws] authenticated as agent %s", c.cfg.AgentID)
+		log.Printf("[ws] authenticated as agent %s", saved.AgentID)
 	} else {
 		if err := send(map[string]string{
 			"type":       "register",
-			"token":      c.cfg.AgentToken,
+			"token":      saved.AgentToken,
 			"hostname":   c.hostname,
-			"agent_type": c.cfg.Mode,
+			"agent_type": saved.Mode,
 		}); err != nil {
 			return err
 		}
@@ -178,13 +184,15 @@ func (c *Client) connect(ctx context.Context) error {
 		if resp["type"] != "registered" {
 			return fmt.Errorf("registration failed: %s", resp["message"])
 		}
-		c.cfg.AgentID = resp["agent_id"]
-		c.cfg.AgentJWT = resp["jwt"]
-		c.cfg.AgentToken = ""
-		if err := c.cfg.Save(c.cfgPath); err != nil {
-			log.Printf("[ws] warning: failed to save config: %v", err)
+		if err := c.cfg.UpdateAndSave(c.cfgPath, func(next *config.Config) error {
+			next.AgentID = resp["agent_id"]
+			next.AgentJWT = resp["jwt"]
+			next.AgentToken = ""
+			return nil
+		}); err != nil {
+			return fmt.Errorf("persist registered authentication: %w", err)
 		}
-		log.Printf("[ws] registered as agent %s", c.cfg.AgentID)
+		log.Printf("[ws] registered as agent %s", resp["agent_id"])
 	}
 
 	// Discover the canonical agent.public_ip once per connection via icanhazip
@@ -517,7 +525,11 @@ func mergeIPSets(primary string, others []string) []string {
 // attachment, or ("", "") if this agent is not a gateway. All gateway
 // attachments share the same LAN since they all live on the same homelab.
 func gatewayLANInfo(cfg *config.Config) (string, string) {
-	if cfg == nil || cfg.Mode != "client" {
+	if cfg == nil {
+		return "", ""
+	}
+	cfg = cfg.Snapshot()
+	if cfg.Mode != "client" {
 		return "", ""
 	}
 	for _, a := range cfg.Attachments {

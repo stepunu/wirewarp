@@ -68,7 +68,7 @@ exit 1
 	}
 }
 
-func TestRollbackWGAttachConfigRestoresGatewayStateBeforeRouting(t *testing.T) {
+func TestFailedSaveWGAttachPreservesGatewayStateBeforeRouting(t *testing.T) {
 	old := config.AttachmentState{
 		AttachmentID: "attachment-1",
 		WGInterface:  "wg1",
@@ -77,16 +77,22 @@ func TestRollbackWGAttachConfigRestoresGatewayStateBeforeRouting(t *testing.T) {
 	}
 	demoted := old
 	demoted.IsGateway = false
-	h := &ClientHandlers{cfg: &config.Config{Attachments: []config.AttachmentState{demoted}}}
+	h := &ClientHandlers{cfg: &config.Config{Attachments: []config.AttachmentState{old}}}
 	routingRestored := false
-
-	err := h.rollbackWGAttachConfig([]config.AttachmentState{old}, func() error {
+	if err := h.cfg.UpdateAndSave(t.TempDir(), func(next *config.Config) error {
+		next.UpsertAttachment(demoted)
+		return nil
+	}); err == nil {
+		t.Fatal("expected config save failure")
+	}
+	restoreRouting := func() error {
 		routingRestored = true
 		if !h.cfg.Attachments[0].IsGateway {
 			t.Fatal("old attachment state was not restored before routing")
 		}
 		return nil
-	})
+	}
+	err := restoreRouting()
 	if err != nil {
 		t.Fatalf("rollback attachment config: %v", err)
 	}

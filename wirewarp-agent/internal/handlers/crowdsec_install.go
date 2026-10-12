@@ -31,7 +31,7 @@ type CrowdSecInstallParams struct {
 	CIDRs []string `json:"cidrs"`
 }
 
-func (h *ServerHandlers) handleCrowdSecInstall(raw json.RawMessage) (string, error) {
+func (h *EdgeHandlers) handleCrowdSecInstall(raw json.RawMessage) (string, error) {
 	var p CrowdSecInstallParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)
@@ -149,7 +149,7 @@ func (h *ServerHandlers) handleCrowdSecInstall(raw json.RawMessage) (string, err
 	return logBuf.String() + "\nOK — CrowdSec installed and whitelist applied.", nil
 }
 
-func (h *ServerHandlers) handleCrowdSecSyncWhitelist(raw json.RawMessage) (string, error) {
+func (h *EdgeHandlers) handleCrowdSecSyncWhitelist(raw json.RawMessage) (string, error) {
 	var p CrowdSecInstallParams
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("parse params: %w", err)

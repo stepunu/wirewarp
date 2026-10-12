@@ -42,7 +42,8 @@ type ClientHandlers struct {
 	// emit is the upstream telemetry channel set by SetEmit. The healer
 	// goroutine (see client_heal.go) loads this atomically to push
 	// heal_event frames to the control server.
-	emit atomic.Pointer[EmitFn]
+	emit            atomic.Pointer[EmitFn]
+	topologyChanged atomic.Pointer[func()]
 }
 
 // NewClient initialises the WireGuard client(s) from saved config and
@@ -90,7 +91,7 @@ func NewClient(cfg *config.Config, cfgPath string) (*ClientHandlers, error) {
 
 // Shutdown tears down per-attachment routing and brings every wgN down.
 func (h *ClientHandlers) Shutdown() {
-	for _, att := range h.cfg.Attachments {
+	for _, att := range h.cfg.Snapshot().Attachments {
 		gwCfg := h.buildGatewayConfig(&att)
 		if err := wireguard.TeardownGatewayRouting(gwCfg); err != nil {
 			log.Printf("[client] WARN: teardown gateway routing for %s: %v", att.WGInterface, err)
@@ -125,9 +126,18 @@ func (h *ClientHandlers) MeshInterfaces() []string {
 
 // Register binds all client-mode command handlers onto the given executor.
 func (h *ClientHandlers) Register(exec *executor.Executor) {
-	exec.Register("wg_attach", h.handleWGAttach)
-	exec.Register("wg_detach", h.handleWGDetach)
-	exec.Register("wg_update_endpoint", h.handleUpdateEndpoint)
+	exec.Register("wg_attach", func(raw json.RawMessage) (string, error) {
+		defer h.notifyTopologyChanged()
+		return h.handleWGAttach(raw)
+	})
+	exec.Register("wg_detach", func(raw json.RawMessage) (string, error) {
+		defer h.notifyTopologyChanged()
+		return h.handleWGDetach(raw)
+	})
+	exec.Register("wg_update_endpoint", func(raw json.RawMessage) (string, error) {
+		defer h.notifyTopologyChanged()
+		return h.handleUpdateEndpoint(raw)
+	})
 	exec.Register("set_lan_egress", h.handleSetLANEgress)
 }
 
@@ -209,9 +219,11 @@ func (h *ClientHandlers) handleWGAttach(raw json.RawMessage) (string, error) {
 	if p.LANIface == "" {
 		att.LANIface = "eth0"
 	}
-	attachmentsBefore := append([]config.AttachmentState(nil), h.cfg.Attachments...)
+	if err := validatePublishedAttachmentChange(h.cfg.Snapshot(), att); err != nil {
+		return "", err
+	}
 	var oldAttachment *config.AttachmentState
-	if old := h.cfg.FindAttachment(att.AttachmentID, att.WGInterface); old != nil {
+	if old := h.cfg.Snapshot().FindAttachment(att.AttachmentID, att.WGInterface); old != nil {
 		oldCopy := *old
 		oldAttachment = &oldCopy
 	}
@@ -232,11 +244,11 @@ func (h *ClientHandlers) handleWGAttach(raw json.RawMessage) (string, error) {
 	}
 	pubKey := wgCli.PublicKey
 
-	h.cfg.UpsertAttachment(att)
-	if err := h.cfg.Save(h.cfgPath); err != nil {
-		rollbackErr := h.rollbackWGAttachConfig(attachmentsBefore, func() error {
-			return h.restoreWGAttachRouting(oldAttachment, &att)
-		})
+	if err := h.cfg.UpdateAndSave(h.cfgPath, func(next *config.Config) error {
+		next.UpsertAttachment(att)
+		return nil
+	}); err != nil {
+		rollbackErr := h.restoreWGAttachRouting(oldAttachment, &att)
 		if rollbackErr != nil {
 			return "", fmt.Errorf("save config after wg_attach: %w; rollback failed: %v", err, rollbackErr)
 		}
@@ -281,15 +293,20 @@ func (h *ClientHandlers) handleWGDetach(raw json.RawMessage) (string, error) {
 	iface := p.WGInterface
 	if iface == "" {
 		// Best-effort lookup by attachment_id if interface wasn't specified.
-		if att := h.cfg.FindAttachment(p.AttachmentID, ""); att != nil {
+		if att := h.cfg.Snapshot().FindAttachment(p.AttachmentID, ""); att != nil {
 			iface = att.WGInterface
 		}
 	}
 	if iface == "" {
 		return "no matching attachment", nil
 	}
+	for _, ingress := range savedEdgeIngress(h.cfg.Snapshot()) {
+		if ingress.Interface == iface {
+			return "", fmt.Errorf("unpublish edge ingress before detaching its WireGuard attachment")
+		}
+	}
 
-	saved := h.cfg.FindAttachment(p.AttachmentID, iface)
+	saved := h.cfg.Snapshot().FindAttachment(p.AttachmentID, iface)
 	if saved != nil {
 		gwCfg := h.buildGatewayConfig(saved)
 		if err := wireguard.TeardownGatewayRouting(gwCfg); err != nil {
@@ -314,9 +331,11 @@ func (h *ClientHandlers) handleWGDetach(raw json.RawMessage) (string, error) {
 		delete(h.wgs, iface)
 	}
 
-	h.cfg.RemoveAttachment(iface)
-	if err := h.cfg.Save(h.cfgPath); err != nil {
-		log.Printf("[client] WARN: failed to save config after wg_detach: %v", err)
+	if err := h.cfg.UpdateAndSave(h.cfgPath, func(next *config.Config) error {
+		next.RemoveAttachment(iface)
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("attachment network removed but config save failed: %w", err)
 	}
 	if saveErr := wireguard.SaveIPTables(); saveErr != nil {
 		log.Printf("[client] WARN: iptables save failed: %v", saveErr)
@@ -405,7 +424,7 @@ func (h *ClientHandlers) handleUpdateEndpoint(raw json.RawMessage) (string, erro
 	}
 	iface := p.WGInterface
 	if iface == "" {
-		if att := h.cfg.FindAttachment(p.AttachmentID, ""); att != nil {
+		if att := h.cfg.Snapshot().FindAttachment(p.AttachmentID, ""); att != nil {
 			iface = att.WGInterface
 		}
 	}
@@ -416,10 +435,14 @@ func (h *ClientHandlers) handleUpdateEndpoint(raw json.RawMessage) (string, erro
 	if err := wg.UpdateEndpoint(p.ServerEndpoint); err != nil {
 		return "", err
 	}
-	if att := h.cfg.FindAttachment(p.AttachmentID, iface); att != nil {
-		att.ServerEndpoint = p.ServerEndpoint
-		if err := h.cfg.Save(h.cfgPath); err != nil {
-			log.Printf("[client] WARN: failed to save config after endpoint update: %v", err)
+	if h.cfg.Snapshot().FindAttachment(p.AttachmentID, iface) != nil {
+		if err := h.cfg.UpdateAndSave(h.cfgPath, func(next *config.Config) error {
+			if att := next.FindAttachment(p.AttachmentID, iface); att != nil {
+				att.ServerEndpoint = p.ServerEndpoint
+			}
+			return nil
+		}); err != nil {
+			return "", fmt.Errorf("live endpoint updated but config save failed: %w", err)
 		}
 	}
 	return fmt.Sprintf("server endpoint for %s updated to %s", iface, p.ServerEndpoint), nil
@@ -433,7 +456,7 @@ func (h *ClientHandlers) bringAttachmentUp(att *config.AttachmentState) error {
 }
 
 func (h *ClientHandlers) cleanupGatewayRoleTransition(next *config.AttachmentState) error {
-	old := h.cfg.FindAttachment(next.AttachmentID, next.WGInterface)
+	old := h.cfg.Snapshot().FindAttachment(next.AttachmentID, next.WGInterface)
 	if old == nil || !old.IsGateway || next.IsGateway {
 		return nil
 	}
@@ -463,11 +486,6 @@ func bringWGAttachWithRollback(
 		return nil, fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
 	}
 	return nil, fmt.Errorf("%w; previous attachment routing restored", err)
-}
-
-func (h *ClientHandlers) rollbackWGAttachConfig(before []config.AttachmentState, restoreRouting func() error) error {
-	h.cfg.Attachments = before
-	return restoreRouting()
 }
 
 func saveWGAttachIPTables() error {

@@ -22,7 +22,8 @@ type ServerHandlers struct {
 	wg      *wireguard.Server
 	// emit is the upstream telemetry channel set by SetEmit. See
 	// ClientHandlers.emit for the same pattern.
-	emit atomic.Pointer[EmitFn]
+	emit            atomic.Pointer[EmitFn]
+	topologyChanged atomic.Pointer[func()]
 }
 
 // NewServer initialises the WireGuard server from config and returns a handler set.
@@ -101,13 +102,14 @@ func (h *ServerHandlers) Shutdown() {
 // the tunnel mesh. Used by the heartbeat to surface peer stats. Server
 // agents host a single wg0; clients are handled in ClientHandlers.
 func (h *ServerHandlers) MeshInterfaces() []string {
-	if h.cfg.Server == nil || !h.cfg.Server.Initialized {
+	saved := h.cfg.Snapshot().Server
+	if saved == nil || !saved.Initialized {
 		return nil
 	}
-	if h.cfg.Server.WGInterface == "" {
+	if saved.WGInterface == "" {
 		return nil
 	}
-	return []string{h.cfg.Server.WGInterface}
+	return []string{saved.WGInterface}
 }
 
 // Register binds all server-mode command handlers onto the given executor.
@@ -119,15 +121,6 @@ func (h *ServerHandlers) Register(exec *executor.Executor) {
 	exec.Register("iptables_remove_forward", h.handleRemoveForward)
 	exec.Register("set_lan_snat", h.handleSetLANSNAT)
 	exec.Register("reconcile_lan_snat", h.handleReconcileLANSNAT)
-	exec.Register("crowdsec_install", h.handleCrowdSecInstall)
-	exec.Register("crowdsec_sync_whitelist", h.handleCrowdSecSyncWhitelist)
-	exec.Register("traefik_install", h.handleTraefikInstall)
-	exec.Register("traefik_sync_config", h.handleTraefikSyncConfig)
-	exec.Register("crowdsec_appsec_enable", h.handleCrowdSecAppSecEnable)
-	exec.Register("edge_desired_state", h.handleEdgeDesiredState)
-	exec.Register("edge_disable", h.handleEdgeDisable)
-	exec.Register("edge_cache_purge", h.handleEdgeCachePurge)
-	exec.Register("edge_cache_test", h.handleEdgeCacheTest)
 }
 
 // --- command handlers ---
@@ -232,20 +225,20 @@ func configureWGInitRuntime(p wgInitParams) error {
 }
 
 func (h *ServerHandlers) saveWGInitState(next *config.ServerState) error {
-	old := h.cfg.Server
-	h.cfg.Server = next
-	if err := h.cfg.Save(h.cfgPath); err != nil {
-		h.cfg.Server = old
+	if err := h.cfg.UpdateAndSave(h.cfgPath, func(saved *config.Config) error {
+		saved.Server = next
+		return nil
+	}); err != nil {
 		return fmt.Errorf("save config after wg_init: %w", err)
 	}
 	return nil
 }
 
 func (h *ServerHandlers) cleanupChangedPublicIface(nextIface string) error {
-	if h.cfg == nil || h.cfg.Server == nil {
+	if h.cfg == nil || h.cfg.Snapshot().Server == nil {
 		return nil
 	}
-	oldIface := h.cfg.Server.PublicIface
+	oldIface := h.cfg.Snapshot().Server.PublicIface
 	if oldIface == "" || oldIface == nextIface {
 		return nil
 	}
@@ -256,13 +249,15 @@ func (h *ServerHandlers) cleanupChangedPublicIface(nextIface string) error {
 }
 
 type addPeerParams struct {
-	Name       string   `json:"peer_name"`
-	PublicKey  string   `json:"public_key"`
-	TunnelIP   string   `json:"tunnel_ip"`
-	AllowedIPs []string `json:"allowed_ips"`
+	SiteLinkGuardRequired bool     `json:"site_link_guard_required"`
+	Name                  string   `json:"peer_name"`
+	PublicKey             string   `json:"public_key"`
+	TunnelIP              string   `json:"tunnel_ip"`
+	AllowedIPs            []string `json:"allowed_ips"`
 }
 
 func (h *ServerHandlers) handleAddPeer(raw json.RawMessage) (string, error) {
+	defer h.notifyTopologyChanged()
 	if h.wg == nil {
 		return "", fmt.Errorf("WireGuard not initialised — send wg_init first")
 	}
@@ -284,6 +279,11 @@ func (h *ServerHandlers) handleAddPeer(raw json.RawMessage) (string, error) {
 			return "", err
 		}
 	}
+	if p.SiteLinkGuardRequired {
+		if err := ensureSitePeerGuard(h.cfg, p.PublicKey, p.AllowedIPs); err != nil {
+			return "", err
+		}
+	}
 	peer := wireguard.Peer{
 		Name:       p.Name,
 		PublicKey:  p.PublicKey,
@@ -291,8 +291,8 @@ func (h *ServerHandlers) handleAddPeer(raw json.RawMessage) (string, error) {
 		AllowedIPs: p.AllowedIPs,
 	}
 	iface := "wg0"
-	if h.cfg.Server != nil && h.cfg.Server.WGInterface != "" {
-		iface = h.cfg.Server.WGInterface
+	if h.cfg.Snapshot().Server != nil && h.cfg.Snapshot().Server.WGInterface != "" {
+		iface = h.cfg.Snapshot().Server.WGInterface
 	}
 	if err := h.wg.AddPeerAndRoutes(peer, iface); err != nil {
 		return "", err
@@ -305,6 +305,7 @@ type removePeerParams struct {
 }
 
 func (h *ServerHandlers) handleRemovePeer(raw json.RawMessage) (string, error) {
+	defer h.notifyTopologyChanged()
 	if h.wg == nil {
 		return "", fmt.Errorf("WireGuard not initialised")
 	}
@@ -316,8 +317,8 @@ func (h *ServerHandlers) handleRemovePeer(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	iface := "wg0"
-	if h.cfg.Server != nil && h.cfg.Server.WGInterface != "" {
-		iface = h.cfg.Server.WGInterface
+	if h.cfg.Snapshot().Server != nil && h.cfg.Snapshot().Server.WGInterface != "" {
+		iface = h.cfg.Snapshot().Server.WGInterface
 	}
 	if err := h.wg.RemovePeerAndRoutes(p.PublicKey, iface); err != nil {
 		return "", err
@@ -351,8 +352,8 @@ func (h *ServerHandlers) handleAddForward(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	publicIP := p.PublicIP
-	if publicIP == "" && h.cfg.Server != nil {
-		publicIP = h.cfg.Server.PublicIP
+	if publicIP == "" && h.cfg.Snapshot().Server != nil {
+		publicIP = h.cfg.Snapshot().Server.PublicIP
 	}
 	if err := validate.IPv4(publicIP); err != nil {
 		return "", err
@@ -384,8 +385,8 @@ func (h *ServerHandlers) handleRemoveForward(raw json.RawMessage) (string, error
 		return "", err
 	}
 	publicIP := p.PublicIP
-	if publicIP == "" && h.cfg.Server != nil {
-		publicIP = h.cfg.Server.PublicIP
+	if publicIP == "" && h.cfg.Snapshot().Server != nil {
+		publicIP = h.cfg.Snapshot().Server.PublicIP
 	}
 	if err := validate.IPv4(publicIP); err != nil {
 		return "", err
@@ -428,10 +429,10 @@ func (h *ServerHandlers) handleReconcileLANSNAT(raw json.RawMessage) (string, er
 	if p.Pins == nil {
 		return "", fmt.Errorf("pins must be an array")
 	}
-	if h.cfg.Server == nil || !h.cfg.Server.Initialized {
+	if h.cfg.Snapshot().Server == nil || !h.cfg.Snapshot().Server.Initialized {
 		return "", fmt.Errorf("server not initialised: wg_init has not been run")
 	}
-	iface := h.cfg.Server.PublicIface
+	iface := h.cfg.Snapshot().Server.PublicIface
 	if err := validate.PublicIface(iface); err != nil {
 		return "", err
 	}
@@ -480,10 +481,10 @@ func (h *ServerHandlers) handleSetLANSNAT(raw json.RawMessage) (string, error) {
 			return "", err
 		}
 	}
-	if h.cfg.Server == nil || !h.cfg.Server.Initialized {
+	if h.cfg.Snapshot().Server == nil || !h.cfg.Snapshot().Server.Initialized {
 		return "", fmt.Errorf("server not initialised — wg_init has not been run")
 	}
-	iface := h.cfg.Server.PublicIface
+	iface := h.cfg.Snapshot().Server.PublicIface
 	if iface == "" {
 		return "", fmt.Errorf("public_iface not set on this server agent")
 	}

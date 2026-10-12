@@ -25,6 +25,20 @@ import (
 var version = "dev"
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "acme-dns-cleanup" {
+		if err := handlers.RetryACMEDNSCleanup(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "acme-dns" {
+		if err := handlers.RunACMEDNSHook(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	mode := flag.String("mode", "", "Agent mode: server or client (required on first run)")
 	cfgPath := flag.String("config", config.DefaultPath, "Path to agent config file")
 	url := flag.String("url", "", "Control server URL (e.g. https://wirewarp.example.com)")
@@ -32,7 +46,20 @@ func main() {
 	insecure := flag.Bool("insecure", false, "Allow plain http:// control-server URL (homelab/bootstrap only — MITM risk)")
 	restoreRouting := flag.Bool("restore-routing", false,
 		"Run as oneshot: re-install routing state from saved config and exit (used by wirewarp-routing.service)")
+	restoreEdge := flag.Bool("restore-edge-ingress", false, "Restore the edge guard before Traefik startup and exit")
 	flag.Parse()
+	if *restoreEdge {
+		cfg, err := config.Load(*cfgPath)
+		if err != nil {
+			log.Fatal("Cannot load saved edge guard config")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := handlers.PrepareEdgeStart(ctx, cfg); err != nil {
+			log.Fatalf("Cannot prepare edge startup: %v", err)
+		}
+		return
+	}
 
 	if *restoreRouting {
 		runRestoreRouting(*cfgPath)
@@ -80,6 +107,18 @@ func main() {
 	defer cancel()
 
 	client := wsclient.New(cfg, *cfgPath, version)
+	siteLinks := handlers.NewSiteLinks(cfg, *cfgPath)
+	siteLinks.SetEmit(client.Emit)
+	guardCtx, guardCancel := context.WithTimeout(ctx, 20*time.Second)
+	if err := handlers.RestoreEdgeIngressGuard(guardCtx, cfg); err != nil {
+		guardCancel()
+		log.Fatalf("Failed to restore edge ingress guard: %v", err)
+	}
+	guardErr := handlers.RestoreSiteLinkGuard(guardCtx, cfg)
+	guardCancel()
+	if guardErr != nil {
+		log.Fatalf("Failed to restore site-link guard: %v", guardErr)
+	}
 
 	// shutdownFn is called after the WebSocket loop exits to clean up.
 	var shutdownFn func()
@@ -93,7 +132,8 @@ func main() {
 		}
 		srv.Register(client.Exec())
 		srv.SetEmit(client.Emit)
-		srv.StartEdgeReconciler(ctx)
+		srv.SetTopologyChanged(siteLinks.NotifyTopologyChanged)
+		srv.StartHealer(ctx)
 		wsclient.SetMeshInterfacesProvider(client, srv.MeshInterfaces)
 		shutdownFn = srv.Shutdown
 	case "client":
@@ -103,12 +143,18 @@ func main() {
 		}
 		cli.Register(client.Exec())
 		cli.SetEmit(client.Emit)
+		cli.SetTopologyChanged(siteLinks.NotifyTopologyChanged)
 		cli.StartHealer(ctx)
 		wsclient.SetMeshInterfacesProvider(client, cli.MeshInterfaces)
 		shutdownFn = cli.Shutdown
 	default:
 		log.Fatalf("Unknown mode: %s (must be 'server' or 'client')", cfg.Mode)
 	}
+	edge := handlers.NewEdge(cfg, *cfgPath)
+	edge.Register(client.Exec())
+	edge.SetEmit(client.Emit)
+	siteLinks.Register(client.Exec())
+	siteLinks.Start(ctx)
 
 	// VPN endpoints live on gateway clients (road-warrior wg) but the
 	// handlers register in both modes so a stray vpn_* command from the
@@ -124,6 +170,8 @@ func main() {
 
 	// agent_update works in both modes — download new binary and restart via systemd.
 	client.Exec().Register("agent_update", handleAgentUpdate)
+	client.Exec().Register("acme_dns_test", handlers.HandleACMEDNSTest)
+	edge.StartEdgeReconciler(ctx)
 
 	client.Run(ctx)
 

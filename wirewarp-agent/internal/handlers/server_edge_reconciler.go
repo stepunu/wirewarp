@@ -6,17 +6,17 @@ import (
 	"time"
 )
 
-// StartEdgeReconciler is the unified server-mode reconcile loop. It folds
-// the older network healer, CrowdSec status poller, and Traefik status poller
-// into one cadence so degraded edge components back off together instead of
-// thrashing independent loops.
-func (h *ServerHandlers) StartEdgeReconciler(ctx context.Context) {
+// StartEdgeReconciler converges HTTP edge services on eligible nodes.
+func (h *EdgeHandlers) StartEdgeReconciler(ctx context.Context) {
 	go h.edgeReconcileLoop(ctx)
 }
 
-func (h *ServerHandlers) edgeReconcileLoop(ctx context.Context) {
+func (h *EdgeHandlers) edgeReconcileLoop(ctx context.Context) {
 	failures := 0
 	for {
+		if err := RetryACMEDNSCleanup(ctx); err != nil {
+			log.Printf("[acme-cleanup] degraded: %v", err)
+		}
 		runCtx, cancel := context.WithTimeout(ctx, 12*time.Minute)
 		err := h.edgeReconcileOnce(runCtx)
 		cancel()
@@ -42,10 +42,25 @@ func (h *ServerHandlers) edgeReconcileLoop(ctx context.Context) {
 	}
 }
 
-func (h *ServerHandlers) edgeReconcileOnce(ctx context.Context) error {
-	h.healOnce()
-	if h.cfg.EdgeDesired != nil {
-		return h.reconcileDesiredEdge(ctx)
+func (h *EdgeHandlers) edgeReconcileOnce(ctx context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	saved := h.cfg.Snapshot()
+	if !h.eligible() || saved.EdgeDisabled {
+		if saved.EdgeDesired != nil || saved.Mode == "server" && saved.EdgeDisabled || saved.EdgeRuntimePending || len(saved.EdgeIngressGuard) != 0 {
+			_, err := h.stopDisabledEdge(nil)
+			return err
+		}
+		return nil
+	}
+	if saved.EdgeDesired != nil {
+		if err := validateEdgeRuntime(saved, saved.EdgeDesired); err != nil {
+			return err
+		}
+		return h.convergeEdgeRuntime(ctx)
+	}
+	if saved.Mode != "server" {
+		return nil
 	}
 	h.pollAndEmitCrowdSec(ctx, true)
 	h.pollAndEmitTraefik(ctx, true)

@@ -3,6 +3,8 @@ package config
 import (
 	"log"
 	"os"
+	"path/filepath"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -10,6 +12,7 @@ import (
 const DefaultPath = "/etc/wirewarp/agent.yaml"
 
 type Config struct {
+	mu               sync.RWMutex
 	Mode             string `yaml:"mode"` // "server" | "client"
 	ControlServerURL string `yaml:"control_server_url"`
 	AgentToken       string `yaml:"agent_token"` // registration token (cleared after use)
@@ -29,8 +32,19 @@ type Config struct {
 	// Desired edge state is pushed by the control server and replayed by the
 	// server reconciler. It is persisted so edge protection keeps converging
 	// while the control plane is temporarily unreachable.
-	EdgeDesired    *EdgeDesiredState `yaml:"edge_desired,omitempty"`
-	EdgeBouncerKey string            `yaml:"edge_bouncer_key,omitempty"`
+	EdgeDesired        *EdgeDesiredState        `yaml:"edge_desired,omitempty"`
+	EdgeBouncerKey     string                   `yaml:"edge_bouncer_key,omitempty"`
+	IsGateway          *bool                    `yaml:"is_gateway,omitempty"`
+	EdgeDisabled       bool                     `yaml:"edge_disabled,omitempty"`
+	EdgeIngressGuard   []EdgePublicIngress      `yaml:"edge_ingress_guard,omitempty"`
+	EdgeRuntimePending bool                     `yaml:"edge_runtime_pending,omitempty"`
+	GatewayLANIP       *string                  `yaml:"gateway_lan_ip,omitempty"`
+	GatewayLANNetwork  string                   `yaml:"gateway_lan_network,omitempty"`
+	SiteLinkDesired    *SiteLinkSnapshot        `yaml:"site_link_desired,omitempty"`
+	SiteLinkApplied    *SiteLinkSnapshot        `yaml:"site_link_applied,omitempty"`
+	SiteLinkGuardPeers []SiteLinkTransitPeer    `yaml:"site_link_guard_peers,omitempty"`
+	SiteLinkRoutes     []SiteLinkRoute          `yaml:"site_link_routes,omitempty"`
+	SiteLinkTeardown   *SiteLinkTeardownReceipt `yaml:"site_link_teardown,omitempty"`
 
 	// Multi-attachment client state (mode=client). Replaces the legacy
 	// single-peer Client field; older configs are migrated transparently.
@@ -63,10 +77,20 @@ type ServerState struct {
 }
 
 type EdgeDesiredState struct {
-	Whitelist            EdgeWhitelist  `yaml:"whitelist,omitempty"`
-	TraefikStaticConfig  map[string]any `yaml:"traefik_static_config,omitempty"`
-	TraefikDynamicConfig map[string]any `yaml:"traefik_dynamic_config,omitempty"`
-	NginxCacheConfig     map[string]any `yaml:"nginx_cache_config,omitempty"`
+	DesiredHash          string              `yaml:"desired_hash,omitempty"`
+	ConfigVersionID      string              `yaml:"config_version_id,omitempty"`
+	RuntimeMode          string              `yaml:"runtime_mode,omitempty"`
+	PublicIngress        []EdgePublicIngress `yaml:"public_ingress,omitempty"`
+	Whitelist            EdgeWhitelist       `yaml:"whitelist,omitempty"`
+	TraefikStaticConfig  map[string]any      `yaml:"traefik_static_config,omitempty"`
+	TraefikDynamicConfig map[string]any      `yaml:"traefik_dynamic_config,omitempty"`
+	NginxCacheConfig     map[string]any      `yaml:"nginx_cache_config,omitempty"`
+}
+
+type EdgePublicIngress struct {
+	Interface string `json:"interface" yaml:"interface"`
+	SourceIP  string `json:"source_ip" yaml:"source_ip"`
+	ListenIP  string `json:"listen_ip" yaml:"listen_ip"`
 }
 
 type EdgeWhitelist struct {
@@ -166,14 +190,155 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) Save(path string) error {
-	if err := os.MkdirAll("/etc/wirewarp", 0700); err != nil {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return saveAtomic(path, c)
+}
+
+func saveAtomic(path string, c *Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
 	data, err := yaml.Marshal(c)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0600)
+	file, err := os.CreateTemp(filepath.Dir(path), ".agent-config-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	if _, err = file.Write(data); err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(file.Name(), path)
+}
+
+// Snapshot returns detached state. Runtime callers must not read live fields.
+func (c *Config) Snapshot() *Config {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cloneUnlocked()
+}
+
+// UpdateAndSave publishes a mutation only after its complete config is saved.
+// The callback operates on detached state and must not retain it.
+func (c *Config) UpdateAndSave(path string, mutate func(*Config) error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	next := c.cloneUnlocked()
+	if err := mutate(next); err != nil {
+		return err
+	}
+	if err := saveAtomic(path, next); err != nil {
+		return err
+	}
+	c.Mode, c.ControlServerURL, c.AgentToken, c.AgentJWT, c.AgentID = next.Mode, next.ControlServerURL, next.AgentToken, next.AgentJWT, next.AgentID
+	c.Insecure, c.Server = next.Insecure, next.Server
+	c.EdgeDesired, c.EdgeBouncerKey = next.EdgeDesired, next.EdgeBouncerKey
+	c.IsGateway, c.EdgeDisabled = next.IsGateway, next.EdgeDisabled
+	c.EdgeIngressGuard, c.EdgeRuntimePending = next.EdgeIngressGuard, next.EdgeRuntimePending
+	c.GatewayLANIP, c.GatewayLANNetwork = next.GatewayLANIP, next.GatewayLANNetwork
+	c.SiteLinkDesired, c.SiteLinkApplied = next.SiteLinkDesired, next.SiteLinkApplied
+	c.SiteLinkGuardPeers, c.SiteLinkRoutes = next.SiteLinkGuardPeers, next.SiteLinkRoutes
+	c.SiteLinkTeardown = next.SiteLinkTeardown
+	c.Attachments, c.VpnEndpoints, c.LegacyClient = next.Attachments, next.VpnEndpoints, next.LegacyClient
+	return nil
+}
+
+func (c *Config) Gateway() bool {
+	if c.IsGateway != nil {
+		return *c.IsGateway
+	}
+	for _, attachment := range c.Attachments {
+		if attachment.IsGateway {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Config) cloneUnlocked() *Config {
+	out := &Config{
+		Mode: c.Mode, ControlServerURL: c.ControlServerURL, AgentToken: c.AgentToken,
+		AgentJWT: c.AgentJWT, AgentID: c.AgentID, Insecure: c.Insecure,
+		EdgeBouncerKey: c.EdgeBouncerKey, EdgeDisabled: c.EdgeDisabled,
+		EdgeIngressGuard: append([]EdgePublicIngress(nil), c.EdgeIngressGuard...), EdgeRuntimePending: c.EdgeRuntimePending,
+		GatewayLANNetwork: c.GatewayLANNetwork,
+		SiteLinkDesired:   cloneSiteLinks(c.SiteLinkDesired), SiteLinkApplied: cloneSiteLinks(c.SiteLinkApplied),
+		SiteLinkGuardPeers: cloneSiteLinkPeers(c.SiteLinkGuardPeers), SiteLinkRoutes: append([]SiteLinkRoute(nil), c.SiteLinkRoutes...),
+		Attachments:  append([]AttachmentState(nil), c.Attachments...),
+		VpnEndpoints: append([]VpnEndpointState(nil), c.VpnEndpoints...),
+	}
+	if c.Server != nil {
+		value := *c.Server
+		out.Server = &value
+	}
+	if c.SiteLinkTeardown != nil {
+		value := *c.SiteLinkTeardown
+		out.SiteLinkTeardown = &value
+	}
+	if c.IsGateway != nil {
+		value := *c.IsGateway
+		out.IsGateway = &value
+	}
+	if c.GatewayLANIP != nil {
+		value := *c.GatewayLANIP
+		out.GatewayLANIP = &value
+	}
+	if c.LegacyClient != nil {
+		value := *c.LegacyClient
+		out.LegacyClient = &value
+	}
+	for index := range out.VpnEndpoints {
+		out.VpnEndpoints[index].DNSServers = append([]string(nil), c.VpnEndpoints[index].DNSServers...)
+	}
+	if c.EdgeDesired != nil {
+		out.EdgeDesired = &EdgeDesiredState{
+			RuntimeMode:          c.EdgeDesired.RuntimeMode,
+			PublicIngress:        append([]EdgePublicIngress(nil), c.EdgeDesired.PublicIngress...),
+			Whitelist:            EdgeWhitelist{IPs: append([]string(nil), c.EdgeDesired.Whitelist.IPs...), CIDRs: append([]string(nil), c.EdgeDesired.Whitelist.CIDRs...)},
+			TraefikStaticConfig:  cloneMap(c.EdgeDesired.TraefikStaticConfig),
+			TraefikDynamicConfig: cloneMap(c.EdgeDesired.TraefikDynamicConfig),
+			NginxCacheConfig:     cloneMap(c.EdgeDesired.NginxCacheConfig),
+		}
+	}
+	return out
+}
+
+func cloneMap(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	out := make(map[string]any, len(input))
+	for key, value := range input {
+		out[key] = cloneValue(value)
+	}
+	return out
+}
+
+func cloneValue(input any) any {
+	switch value := input.(type) {
+	case map[string]any:
+		return cloneMap(value)
+	case []any:
+		out := make([]any, len(value))
+		for index, entry := range value {
+			out[index] = cloneValue(entry)
+		}
+		return out
+	case []string:
+		return append([]string(nil), value...)
+	default:
+		return value
+	}
 }
 
 // FindAttachment returns the attachment matching the given identifier

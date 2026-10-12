@@ -38,11 +38,11 @@ const crowdSecCmdTimeout = 45 * time.Second
 //
 // Server-mode agents only. Client-mode agents call this from main.go
 // and the goroutine exits when ctx is done.
-func (h *ServerHandlers) StartCrowdSecPoller(ctx context.Context) {
+func (h *EdgeHandlers) StartCrowdSecPoller(ctx context.Context) {
 	go h.crowdSecPollLoop(ctx)
 }
 
-func (h *ServerHandlers) crowdSecPollLoop(ctx context.Context) {
+func (h *EdgeHandlers) crowdSecPollLoop(ctx context.Context) {
 	// Fire once immediately so the UI doesn't wait the full interval
 	// before the first card has data. The "immediate" fire actually
 	// races the WS connection coming up — Emit returns ErrNotConnected
@@ -66,7 +66,7 @@ func (h *ServerHandlers) crowdSecPollLoop(ctx context.Context) {
 // true and the emit returns ErrNotConnected, retry every 2s for up to
 // 30s — covers the agent-startup race where the WS hasn't authed yet.
 // Steady-state polls pass retry=false; a dropped frame just waits 5min.
-func (h *ServerHandlers) pollAndEmitCrowdSec(ctx context.Context, retry bool) {
+func (h *EdgeHandlers) pollAndEmitCrowdSec(ctx context.Context, retry bool) {
 	payload := collectCrowdSec(ctx)
 	if !h.tryEmitCrowdSec(payload) && retry {
 		deadline := time.Now().Add(30 * time.Second)
@@ -83,7 +83,7 @@ func (h *ServerHandlers) pollAndEmitCrowdSec(ctx context.Context, retry bool) {
 	}
 }
 
-func (h *ServerHandlers) tryEmitCrowdSec(payload map[string]any) bool {
+func (h *EdgeHandlers) tryEmitCrowdSec(payload map[string]any) bool {
 	p := h.emit.Load()
 	if p == nil {
 		return false
@@ -99,7 +99,7 @@ func (h *ServerHandlers) tryEmitCrowdSec(payload map[string]any) bool {
 // the calling goroutine. Used by the install handler so the dashboard
 // flips from "not detected" to "running" the moment install finishes,
 // rather than waiting for the next 5-min cycle.
-func (h *ServerHandlers) EmitCrowdSecNow() {
+func (h *EdgeHandlers) EmitCrowdSecNow() {
 	ctx, cancel := context.WithTimeout(context.Background(), crowdSecCmdTimeout)
 	defer cancel()
 	h.pollAndEmitCrowdSec(ctx, true)

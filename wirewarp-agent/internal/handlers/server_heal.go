@@ -34,16 +34,17 @@ func (h *ServerHandlers) healLoop(ctx context.Context) {
 }
 
 func (h *ServerHandlers) healOnce() {
-	if h.cfg.Server == nil || !h.cfg.Server.Initialized {
+	saved := h.cfg.Snapshot().Server
+	if saved == nil || !saved.Initialized {
 		return
 	}
-	healed, err := iptables.HealServerNetwork(h.cfg.Server.PublicIface, h.cfg.Server.WGInterface)
+	healed, err := iptables.HealServerNetwork(saved.PublicIface, saved.WGInterface)
 	if err != nil {
 		log.Printf("[heal] server network: %v", err)
 	}
 	if len(healed) > 0 {
 		log.Printf("[heal] server network re-installed: %v", healed)
-		h.emitHealEvent("server", h.cfg.Server.WGInterface, healed)
+		h.emitHealEvent("server", saved.WGInterface, healed)
 		if err := iptables.SaveRules(); err != nil {
 			log.Printf("[heal] WARN: persist iptables failed: %v", err)
 		}

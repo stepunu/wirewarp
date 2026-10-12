@@ -147,9 +147,11 @@ func (h *VpnHandlers) handleEndpointUp(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	h.cfg.UpsertVpnEndpoint(state)
-	if err := h.cfg.Save(h.cfgPath); err != nil {
-		log.Printf("[vpn] WARN: failed to save config after vpn_endpoint_up: %v", err)
+	if err := h.cfg.UpdateAndSave(h.cfgPath, func(next *config.Config) error {
+		next.UpsertVpnEndpoint(state)
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("VPN endpoint started but config save failed: %w", err)
 	}
 
 	pub := h.PublicKeyFor(p.Interface)
@@ -182,16 +184,18 @@ func (h *VpnHandlers) handleEndpointDown(raw json.RawMessage) (string, error) {
 		}
 	}
 
-	saved := h.cfg.FindVpnEndpoint(p.Interface)
+	saved := h.cfg.Snapshot().FindVpnEndpoint(p.Interface)
 	if saved != nil {
 		_ = iptables.VpnRemoveDefaultDrop(saved.VpnNetwork)
 		removeVpnRoutingRule(saved.VpnNetwork)
 	}
 	iptables.VpnRemoveMSSClamp(p.Interface, vpnMSS)
 
-	h.cfg.RemoveVpnEndpoint(p.Interface)
-	if err := h.cfg.Save(h.cfgPath); err != nil {
-		log.Printf("[vpn] WARN: failed to save config after vpn_endpoint_down: %v", err)
+	if err := h.cfg.UpdateAndSave(h.cfgPath, func(next *config.Config) error {
+		next.RemoveVpnEndpoint(p.Interface)
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("VPN endpoint stopped but config save failed: %w", err)
 	}
 	if saveErr := iptables.SaveRules(); saveErr != nil {
 		log.Printf("[vpn] WARN: iptables save failed: %v", saveErr)
