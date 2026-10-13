@@ -13,11 +13,12 @@ const DefaultPath = "/etc/wirewarp/agent.yaml"
 
 type Config struct {
 	mu               sync.RWMutex
-	Mode             string `yaml:"mode"` // "server" | "client"
-	ControlServerURL string `yaml:"control_server_url"`
-	AgentToken       string `yaml:"agent_token"` // registration token (cleared after use)
-	AgentJWT         string `yaml:"agent_jwt"`   // JWT issued after registration
-	AgentID          string `yaml:"agent_id"`
+	Mode             string              `yaml:"mode"` // "server" | "client"
+	ControlServerURL string              `yaml:"control_server_url"`
+	AgentToken       string              `yaml:"agent_token"` // registration token (cleared after use)
+	AgentJWT         string              `yaml:"agent_jwt"`   // JWT issued after registration
+	AgentID          string              `yaml:"agent_id"`
+	UpdateReceipt    *AgentUpdateReceipt `yaml:"agent_update_receipt,omitempty"`
 
 	// Insecure opts the agent into accepting a plain http:// (and therefore
 	// ws://) control-server URL. Default false. Set at install time via
@@ -218,7 +219,15 @@ func saveAtomic(path string, c *Config) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	return os.Rename(file.Name(), path)
+	if err := os.Rename(file.Name(), path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 // Snapshot returns detached state. Runtime callers must not read live fields.
@@ -249,6 +258,7 @@ func (c *Config) UpdateAndSave(path string, mutate func(*Config) error) error {
 	c.SiteLinkDesired, c.SiteLinkApplied = next.SiteLinkDesired, next.SiteLinkApplied
 	c.SiteLinkGuardPeers, c.SiteLinkRoutes = next.SiteLinkGuardPeers, next.SiteLinkRoutes
 	c.SiteLinkTeardown = next.SiteLinkTeardown
+	c.UpdateReceipt = next.UpdateReceipt
 	c.Attachments, c.VpnEndpoints, c.LegacyClient = next.Attachments, next.VpnEndpoints, next.LegacyClient
 	return nil
 }
@@ -280,6 +290,10 @@ func (c *Config) cloneUnlocked() *Config {
 	if c.Server != nil {
 		value := *c.Server
 		out.Server = &value
+	}
+	if c.UpdateReceipt != nil {
+		value := *c.UpdateReceipt
+		out.UpdateReceipt = &value
 	}
 	if c.SiteLinkTeardown != nil {
 		value := *c.SiteLinkTeardown

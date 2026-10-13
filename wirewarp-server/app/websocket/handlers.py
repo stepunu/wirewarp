@@ -40,6 +40,7 @@ from app.realtime.events import (
 from app.services.crowdsec_ops import build_whitelist, whitelist_hash
 from app.services.edge_ops import component_phase, dispatch_edge_desired_state
 from app.services.tunnel_server_ops import dispatch_add_peer_for_attachment, dispatch_wg_init
+from app.websocket.hub import manager
 
 logger = logging.getLogger(__name__)
 
@@ -371,6 +372,15 @@ async def handle_command_result(agent_id: str, msg: dict, db: AsyncSession) -> N
                     version.applied_at = datetime.now(timezone.utc) if success is True else None
             await db.commit()
             emit_audit_changed()
+            receipt_id = msg.get("receipt_id")
+            if (command_type == "agent_update" and isinstance(success, bool)
+                    and isinstance(receipt_id, str)
+                    and re.fullmatch(r"[a-f0-9]{32}", receipt_id)):
+                # Restart is gated on this committed, owner-bound receipt.
+                await manager.send(str(agent_id), {
+                    "type": "command_result_ack", "agent_id": str(agent_id),
+                    "command_id": str(log.id), "receipt_id": receipt_id,
+                })
             if command_type == "site_link_teardown":
                 from app.services.site_link_ops import acknowledge_site_link_teardown
                 await acknowledge_site_link_teardown(agent_id, log.id, db)

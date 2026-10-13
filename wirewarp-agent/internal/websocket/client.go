@@ -46,12 +46,32 @@ const (
 )
 
 type Client struct {
-	cfg      *config.Config
-	cfgPath  string
-	exec     *executor.Executor
-	sendFn   func(v any) error
-	hostname string
-	version  string
+	cfg          *config.Config
+	cfgPath      string
+	exec         *executor.Executor
+	sendFn       func(v any) error
+	hostname     string
+	version      string
+	updateResult func() (*executor.Result, error)
+	updateACK    func(string, string, string) error
+}
+
+func (c *Client) SetUpdateReceipts(pending func() (*executor.Result, error), acknowledged func(string, string, string) error) {
+	c.updateResult, c.updateACK = pending, acknowledged
+}
+
+func (c *Client) replayUpdate(send func(any) error) error {
+	if c.updateResult == nil {
+		return nil
+	}
+	result, err := c.updateResult()
+	if err != nil {
+		return err
+	}
+	if result != nil {
+		return send(*result)
+	}
+	return nil
 }
 
 func New(cfg *config.Config, cfgPath string, version string) *Client {
@@ -196,6 +216,9 @@ func (c *Client) connect(ctx context.Context) error {
 	}
 
 	// Discover the canonical agent.public_ip once per connection via icanhazip
+	if err := c.replayUpdate(send); err != nil {
+		return err
+	}
 	// (works behind NAT). Local-interface enumeration runs on every heartbeat
 	// so IPs added to the VPS while the agent is running are picked up within
 	// ~30s without requiring a reconnect.
@@ -288,8 +311,34 @@ func (c *Client) connect(ctx context.Context) error {
 				return
 			}
 			var envelope struct {
-				Type  string `json:"type"`
-				Nonce string `json:"nonce"`
+				Type      string `json:"type"`
+				Nonce     string `json:"nonce"`
+				AgentID   string `json:"agent_id"`
+				CommandID string `json:"command_id"`
+				ReceiptID string `json:"receipt_id"`
+			}
+			if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Type == "command_result_ack" {
+				if c.updateACK != nil {
+					if err := c.updateACK(envelope.AgentID, envelope.CommandID, envelope.ReceiptID); err != nil {
+						log.Printf("[ws] update receipt acknowledgement failed: %v", err)
+						if c.updateResult != nil {
+							pending, pendingErr := c.updateResult()
+							if pendingErr != nil {
+								recvErr <- pendingErr
+								return
+							}
+							// Send a new failure receipt now, but avoid an ACK loop
+							// when identity or persistence errors leave it unchanged.
+							if pending != nil && pending.ReceiptID != envelope.ReceiptID {
+								if err := send(*pending); err != nil {
+									recvErr <- err
+									return
+								}
+							}
+						}
+					}
+				}
+				continue
 			}
 			if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Type == "agent_pong" {
 				select {
@@ -315,6 +364,9 @@ func (c *Client) connect(ctx context.Context) error {
 		case err := <-recvErr:
 			return err
 		case <-ticker.C:
+			if err := c.replayUpdate(send); err != nil {
+				return err
+			}
 			h := heartbeat()
 			if err := send(h); err != nil {
 				return err
