@@ -131,8 +131,8 @@ func reconcileSiteFirewall(ctx context.Context, saved *config.Config, p *config.
 		}
 		for _, chain := range chains {
 			out, err := edgeIPTables(ctx, "-t", table, "-S", chain)
-			if err != nil && !missingEdgeChain(string(out)) {
-				return fmt.Errorf("inspect owned site-link chain: %w", err)
+			if err != nil && !missingOwnedChain(ctx, table, chain, string(out)) {
+				return fmt.Errorf("inspect owned site-link chain: %w: %s", err, strings.TrimSpace(string(out)))
 			}
 			exists[chain] = err == nil
 			if len(peers) > 0 {

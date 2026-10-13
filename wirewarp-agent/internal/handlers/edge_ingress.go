@@ -39,7 +39,7 @@ func reconcileEdgeIngress(ctx context.Context, ingress []config.EdgePublicIngres
 		return fmt.Errorf("inspect INPUT rules: %w: %s", err, strings.TrimSpace(string(input)))
 	}
 	chain, err := edgeIPTables(ctx, "-S", edgeIngressChain)
-	if err != nil && !missingEdgeChain(string(chain)) {
+	if err != nil && !missingOwnedChain(ctx, "filter", edgeIngressChain, string(chain)) {
 		return fmt.Errorf("inspect owned edge chain: %w: %s", err, strings.TrimSpace(string(chain)))
 	}
 	exists := err == nil
@@ -79,8 +79,69 @@ func reconcileEdgeIngress(ctx context.Context, ingress []config.EdgePublicIngres
 }
 
 func missingEdgeChain(output string) bool {
-	output = strings.ToLower(output)
-	return strings.Contains(output, "no chain/target/match by that name") || strings.Contains(output, "does not exist")
+	output = strings.ToLower(strings.TrimSpace(output))
+	return strings.Contains(output, "no chain/target/match by that name") || strings.HasPrefix(output, "chain ") && strings.HasSuffix(output, " does not exist")
+}
+
+// iptables-nft 1.8.9 reports absent chains as incompatible. Only a complete,
+// successful table inventory can prove absence for that ambiguous diagnostic.
+func missingOwnedChain(ctx context.Context, table, chain, output string) bool {
+	if missingEdgeChain(output) {
+		return true
+	}
+	if !strings.Contains(strings.ToLower(output), "is incompatible, use 'nft' tool") {
+		return false
+	}
+	listing, err := edgeIPTables(ctx, "-t", table, "-S")
+	if err != nil {
+		return false
+	}
+	required := map[string][]string{"filter": {"INPUT", "FORWARD", "OUTPUT"}, "nat": {"PREROUTING", "INPUT", "OUTPUT", "POSTROUTING"}}[table]
+	if len(required) == 0 {
+		return false
+	}
+	policies := map[string]bool{}
+	for _, line := range strings.Split(string(listing), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		// Warnings about omitted incompatible chains invalidate the inventory.
+		if len(fields) < 2 {
+			return false
+		}
+		switch fields[0] {
+		case "-P":
+			if len(fields) != 3 || fields[2] != "ACCEPT" && fields[2] != "DROP" {
+				return false
+			}
+			policies[fields[1]] = true
+		case "-N":
+			if len(fields) != 2 {
+				return false
+			}
+		case "-A":
+			if len(fields) < 4 {
+				return false
+			}
+		default:
+			return false
+		}
+		if fields[1] == chain {
+			return false
+		}
+		for i := 2; i+1 < len(fields); i++ {
+			if (fields[i] == "-j" || fields[i] == "-g") && strings.Trim(fields[i+1], `"`) == chain {
+				return false
+			}
+		}
+	}
+	for _, parent := range required {
+		if !policies[parent] {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *EdgeHandlers) removeEdgeIngress() error {
