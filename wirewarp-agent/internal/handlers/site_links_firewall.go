@@ -55,6 +55,7 @@ func siteFirewallRules(saved *config.Config, p *config.SiteLinkSnapshot, peers [
 		hubInterface, _ = siteHubIngressInterface(saved, p)
 	}
 	if allow {
+		rules[siteMSSChain] = siteMSSRules(saved, p)
 		for _, flow := range compileSiteFlows(p) {
 			in, out, _ := siteFlowInterfaces(saved, flow)
 			if hubInterface != "" {
@@ -138,21 +139,11 @@ func reconcileSiteFirewall(ctx context.Context, saved *config.Config, p *config.
 		}
 	}
 	rules := siteFirewallRules(saved, p, peers, allow)
-	for _, table := range []string{"filter", "nat"} {
-		parents := []string{"FORWARD", "INPUT", "OUTPUT"}
-		if table == "nat" {
-			parents = []string{"POSTROUTING"}
-		}
+	for _, table := range []string{"filter", "nat", "mangle"} {
+		parents, chains := siteFirewallTable(table)
 		var transaction strings.Builder
 		transaction.WriteString("*" + table + "\n")
 		exists := map[string]bool{}
-		chains := []string{}
-		for _, parent := range parents {
-			chains = append(chains, siteChains[parent])
-		}
-		if table == "filter" {
-			chains = append(chains, "WW-SITE-DST")
-		}
 		for _, chain := range chains {
 			out, err := edgeIPTables(ctx, "-t", table, "-S", chain)
 			if err != nil && !missingOwnedChain(ctx, table, chain, string(out)) {
@@ -173,14 +164,14 @@ func reconcileSiteFirewall(ctx context.Context, saved *config.Config, p *config.
 			if err != nil {
 				return fmt.Errorf("inspect site-link parent rules: %w", err)
 			}
-			jump := "-A " + parent + " -m comment --comment " + siteComment + " -j " + siteChains[parent]
+			jump := "-A " + parent + " -m comment --comment " + siteComment + " -j " + siteParentChain(table, parent)
 			for _, line := range strings.Split(string(out), "\n") {
 				if strings.ReplaceAll(strings.TrimSpace(line), `"`, "") == jump {
 					transaction.WriteString(strings.Replace(jump, "-A", "-D", 1) + "\n")
 				}
 			}
 			if len(peers) > 0 {
-				transaction.WriteString("-I " + parent + " 1 -m comment --comment " + siteComment + " -j " + siteChains[parent] + "\n")
+				transaction.WriteString("-I " + parent + " 1 -m comment --comment " + siteComment + " -j " + siteParentChain(table, parent) + "\n")
 			}
 		}
 		if len(peers) > 0 {

@@ -36,6 +36,8 @@ func preflightFirewallOwnership(ctx context.Context, saved *config.Config) error
 				table := "filter"
 				if chain == "WW-SITE-NAT" {
 					table = "nat"
+				} else if chain == siteMSSChain {
+					table = "mangle"
 				}
 				for _, line := range rules {
 					add(table, line)

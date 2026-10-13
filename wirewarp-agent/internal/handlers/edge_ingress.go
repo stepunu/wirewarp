@@ -96,7 +96,7 @@ func missingOwnedChain(ctx context.Context, table, chain, output string) bool {
 	if err != nil {
 		return false
 	}
-	required := map[string][]string{"filter": {"INPUT", "FORWARD", "OUTPUT"}, "nat": {"PREROUTING", "INPUT", "OUTPUT", "POSTROUTING"}}[table]
+	required := map[string][]string{"filter": {"INPUT", "FORWARD", "OUTPUT"}, "nat": {"PREROUTING", "INPUT", "OUTPUT", "POSTROUTING"}, "mangle": {"PREROUTING", "INPUT", "FORWARD", "OUTPUT", "POSTROUTING"}}[table]
 	if len(required) == 0 {
 		return false
 	}

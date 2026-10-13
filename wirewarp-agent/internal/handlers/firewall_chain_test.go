@@ -19,6 +19,9 @@ func TestSiteFirstApplyUsesNftTableInventoryForMissingChains(t *testing.T) {
 			if args[1] == "filter" {
 				return []byte("-P INPUT ACCEPT\n-P FORWARD ACCEPT\n-P OUTPUT ACCEPT\n-N FOREIGN\n-A INPUT -j FOREIGN\n"), nil
 			}
+			if args[1] == "mangle" {
+				return []byte("-P PREROUTING ACCEPT\n-P INPUT ACCEPT\n-P FORWARD ACCEPT\n-P OUTPUT ACCEPT\n-P POSTROUTING ACCEPT\n"), nil
+			}
 			return []byte("-P PREROUTING ACCEPT\n-P INPUT ACCEPT\n-P OUTPUT ACCEPT\n-P POSTROUTING ACCEPT\n"), nil
 		}
 		chain := args[len(args)-1]
@@ -37,8 +40,8 @@ func TestSiteFirstApplyUsesNftTableInventoryForMissingChains(t *testing.T) {
 	if err := reconcileSiteFirewall(context.Background(), cfg, p, p.TransitPeers, false); err != nil {
 		t.Fatal("first apply rejected proven absent nft chains", err)
 	}
-	if commits != 2 {
-		t.Fatal("expected filter and NAT guard commits", commits)
+	if commits != 3 {
+		t.Fatal("expected filter, NAT, and MSS guard commits", commits)
 	}
 }
 

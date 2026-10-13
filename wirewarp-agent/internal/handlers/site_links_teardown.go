@@ -92,14 +92,14 @@ func persistSiteFirewall(ctx context.Context) error {
 	return firewall.Save(ctx)
 }
 
-// Inspect both tables before committing either. Unknown references and foreign
+// Inspect all tables before changing them. Unknown references and foreign
 // rules in reserved chains block teardown instead of being flushed.
 func cleanupSiteFirewall(ctx context.Context, saved *config.Config) error {
 	transactions, err := siteTeardownTransactions(ctx, saved)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errSiteTeardownPreflight, err)
 	}
-	for _, table := range []string{"nat", "filter"} {
+	for _, table := range []string{"mangle", "nat", "filter"} {
 		if transaction := transactions[table]; transaction != "" {
 			if err := edgeIPTablesRestore(ctx, transaction); err != nil {
 				return fmt.Errorf("remove owned site-link %s rules: %w", table, err)
@@ -128,13 +128,8 @@ func siteTeardownRuleKey(line string) string {
 func siteTeardownTransactions(ctx context.Context, saved *config.Config) (map[string]string, error) {
 	expected := siteFirewallRules(saved, saved.SiteLinkDesired, siteUnionPeers(saved.SiteLinkGuardPeers, saved.SiteLinkDesired.TransitPeers), false)
 	transactions := map[string]string{}
-	for _, table := range []string{"nat", "filter"} {
-		chains := []string{"WW-SITE-NAT"}
-		parents := []string{"POSTROUTING"}
-		if table == "filter" {
-			chains = []string{"WW-SITE-FWD", "WW-SITE-IN", "WW-SITE-OUT", "WW-SITE-DST"}
-			parents = []string{"FORWARD", "INPUT", "OUTPUT"}
-		}
+	for _, table := range []string{"mangle", "nat", "filter"} {
+		parents, chains := siteFirewallTable(table)
 		owned := map[string]bool{}
 		for _, chain := range chains {
 			owned[chain] = true
@@ -147,7 +142,7 @@ func siteTeardownTransactions(ctx context.Context, saved *config.Config) (map[st
 		}
 		jumps := map[string]bool{}
 		for _, parent := range parents {
-			jumps["-A "+parent+" -m comment --comment "+siteComment+" -j "+siteChains[parent]] = true
+			jumps["-A "+parent+" -m comment --comment "+siteComment+" -j "+siteParentChain(table, parent)] = true
 		}
 		out, err := edgeIPTables(ctx, "-t", table, "-S")
 		if err != nil {

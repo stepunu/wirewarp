@@ -358,7 +358,18 @@ func (s *Store) write(j *Journal) error {
 	return dir.Sync()
 }
 
-var chainOwner = map[string]string{"WW-EDGE-INGRESS": "wirewarp-edge-ingress", "WW-SITE-FWD": "wirewarp-site-links", "WW-SITE-IN": "wirewarp-site-links", "WW-SITE-OUT": "wirewarp-site-links", "WW-SITE-DST": "wirewarp-site-links", "WW-SITE-NAT": "wirewarp-site-links"}
+var chainOwner = map[string]string{"WW-EDGE-INGRESS": "wirewarp-edge-ingress", "WW-SITE-FWD": "wirewarp-site-links", "WW-SITE-IN": "wirewarp-site-links", "WW-SITE-OUT": "wirewarp-site-links", "WW-SITE-DST": "wirewarp-site-links", "WW-SITE-NAT": "wirewarp-site-links", "WW-SITE-MSS": "wirewarp-site-links"}
+
+func ownedChainTable(chain string) string {
+	if chain == "WW-SITE-NAT" {
+		return "nat"
+	}
+	if chain == "WW-SITE-MSS" {
+		return "mangle"
+	}
+	return "filter"
+}
+
 var comments = map[string]bool{"wirewarp-edge-ingress": true, "wirewarp-site-links": true, "wirewarp-server-masquerade": true, "wirewarp-lan-snat": true, "wirewarp-raw-forward": true, "wirewarp-server-mss": true, "wirewarp-vpn-peer": true, "wirewarp-vpn-drop": true, "wirewarp-vpn-mss": true, "wirewarp-gateway-mangle": true, "wirewarp-gateway-mss": true, "wirewarp-gateway-forward": true, "wirewarp-gateway-nat": true, "wirewarp-gateway-docker-user": true}
 var tableChains = map[string]map[string]bool{"filter": {"INPUT": true, "OUTPUT": true, "FORWARD": true, "DOCKER-USER": true}, "nat": {"PREROUTING": true, "POSTROUTING": true, "OUTPUT": true}, "mangle": {"PREROUTING": true, "POSTROUTING": true, "OUTPUT": true, "FORWARD": true}}
 
@@ -382,11 +393,17 @@ func ownedRule(table, line string) (bool, error) {
 		target = flag(fields, "-g")
 	}
 	if owner := chainOwner[source]; owner != "" {
-		if comment != owner || (source == "WW-SITE-NAT") != (table == "nat") || table != "nat" && table != "filter" {
+		if comment != owner || ownedChainTable(source) != table {
 			return false, fmt.Errorf("reserved firewall chain contains an unowned rule")
 		}
+		if source == "WW-SITE-MSS" {
+			if target != "TCPMSS" || flag(fields, "-p") != "tcp" || !strings.Contains(line, "--tcp-flags SYN,RST SYN ") || flag(fields, "-o") == "" || flag(fields, "--ctorigsrc") == "" || flag(fields, "--ctorigdst") == "" || flag(fields, "--set-mss") != "1240" || (flag(fields, "--ctdir") != "ORIGINAL" && flag(fields, "--ctdir") != "REPLY") {
+				return false, fmt.Errorf("owned site MSS rule is not a scoped TCP clamp")
+			}
+			return true, nil
+		}
 		if chainOwner[target] != "" {
-			if chainOwner[target] != owner {
+			if chainOwner[target] != owner || ownedChainTable(target) != table {
 				return false, fmt.Errorf("owned firewall chain references another owner")
 			}
 			return true, nil
@@ -397,7 +414,7 @@ func ownedRule(table, line string) (bool, error) {
 		return true, nil
 	}
 	if owner := chainOwner[target]; owner != "" {
-		if comment != owner || !tableChains[table][source] || source == "DOCKER-USER" || (target == "WW-SITE-NAT") != (table == "nat") {
+		if comment != owner || !tableChains[table][source] || source == "DOCKER-USER" || ownedChainTable(target) != table || target == "WW-SITE-MSS" && source != "POSTROUTING" {
 			return false, fmt.Errorf("reserved firewall chain has an unowned reference")
 		}
 		return true, nil
@@ -426,7 +443,7 @@ func validateTables(tables map[string]Table) error {
 		}
 		known := map[string]bool{}
 		for _, chain := range data.Chains {
-			if chainOwner[chain] == "" || known[chain] || chain == "WW-SITE-NAT" && table != "nat" || chain != "WW-SITE-NAT" && table != "filter" {
+			if chainOwner[chain] == "" || known[chain] || ownedChainTable(chain) != table {
 				return fmt.Errorf("owned firewall journal chain is invalid")
 			}
 			known[chain] = true

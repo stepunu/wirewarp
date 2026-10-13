@@ -301,9 +301,13 @@ func TestSiteTeardownFirewallOwnedOnlyAndCollisions(t *testing.T) {
 	}
 	body := filter.String()
 	nat := "-N WW-SITE-NAT\n-A POSTROUTING -m comment --comment " + siteComment + " -j WW-SITE-NAT\n-A POSTROUTING -o eth0 -j MASQUERADE\n"
+	mangle := "-N WW-SITE-MSS\n-A POSTROUTING -m comment --comment " + siteComment + " -j WW-SITE-MSS\n-A POSTROUTING -o eth0 -p tcp -j TCPMSS --clamp-mss-to-pmtu\n"
 	edgeIPTables = func(_ context.Context, args ...string) ([]byte, error) {
 		if args[1] == "filter" {
 			return []byte(body), nil
+		}
+		if args[1] == "mangle" {
+			return []byte(mangle), nil
 		}
 		return []byte(nat), nil
 	}
@@ -312,7 +316,7 @@ func TestSiteTeardownFirewallOwnedOnlyAndCollisions(t *testing.T) {
 	if err := cleanupSiteFirewall(context.Background(), saved); err != nil {
 		t.Fatal(err)
 	}
-	if len(commits) != 2 || !strings.HasPrefix(commits[0], "*nat") || strings.Contains(strings.Join(commits, ""), "UNRELATED") || strings.Contains(strings.Join(commits, ""), "MASQUERADE") {
+	if len(commits) != 3 || !strings.HasPrefix(commits[0], "*mangle") || strings.Contains(strings.Join(commits, ""), "UNRELATED") || strings.Contains(strings.Join(commits, ""), "MASQUERADE") || strings.Contains(strings.Join(commits, ""), "clamp-mss-to-pmtu") {
 		t.Fatal("cleanup touched unrelated rules")
 	}
 	for _, collision := range []string{"-A UNRELATED -j WW-SITE-DST\n", "-A WW-SITE-FWD -j ACCEPT\n"} {
