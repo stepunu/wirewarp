@@ -16,6 +16,7 @@ import {
 import { Badge, Button, Dialog, Field, Input, KV, Select, Stat, StatusDot, Tabs, Toggle, relTime } from '../components/ui'
 import { Ic } from '../components/icons'
 import { WgPeerTable } from '../components/WgPeerTable'
+import { NodeAcmeEndpoint } from '../components/NodeAcmeEndpoint'
 import { NodeLifecycleActions, ServerConfigurationPanel } from '../components/NodeManagement'
 import { HealEventList } from './TunnelServerDetail'
 import { CreateSiteDialog } from './SecuritySites'
@@ -519,6 +520,7 @@ function EdgeOverviewPanel({
         </div>
       </div>
       {node.role === 'gateway' && <GatewayEdgeListeners node={node} edge={edge} />}
+      <NodeAcmeEndpoint agentId={node.agent_id} />
       {node.role === 'server' && !isEdgeActive(edge) && <EdgeEnablePanel node={node} edge={edge} loading={false} />}
       <div className="card">
         <div className="card-head">

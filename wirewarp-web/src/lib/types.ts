@@ -702,6 +702,8 @@ export interface NodeEdgeCapabilities {
   public_ingress_available: boolean
   relay_enabled: boolean
   runtime_mode: 'security_edge' | 'relay_only' | 'disabled'
+  rfc2136_nameserver_override?: string | null
+  rfc2136_effective_nameserver?: string | null
 }
 
 export interface NodeEdgeActionResult {

@@ -134,7 +134,7 @@ export const nodes = {
     request<import('./types').NodeEdgeCapabilities>(`/nodes/${id}/edge/capabilities`),
   updateEdgeCapabilities: (
     id: string,
-    data: { mode?: import('./types').EdgeMode; state?: import('./types').EdgeState; components?: Record<string, string>; lan_bind_ip?: string | null; public_bind_ip?: string | null },
+    data: { mode?: import('./types').EdgeMode; state?: import('./types').EdgeState; components?: Record<string, string>; lan_bind_ip?: string | null; public_bind_ip?: string | null; rfc2136_nameserver_override?: string | null },
   ) =>
     request<import('./types').NodeEdgeCapabilities>(`/nodes/${id}/edge/capabilities`, {
       method: 'PUT',

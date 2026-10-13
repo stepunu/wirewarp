@@ -159,6 +159,7 @@ function LetsEncryptTab() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['settings'] })
+      qc.invalidateQueries({ queryKey: ['edge-capabilities'] })
       setCfToken('')
       setTsigSecret('')
       push("let's encrypt settings saved", 'ok', 'settings://letsencrypt')
@@ -283,7 +284,7 @@ function LetsEncryptTab() {
                 </Field>}
                 {dnsProvider === 'rfc2136' && (
                   <>
-                    <Field label="Update server" hint="Writable primary, in host:port format. The node running Traefik must reach this server.">
+                    <Field label="Update server" hint="Global writable primary, in host:port format. Nodes without an override must reach this endpoint. Set node overrides in Edge Overview.">
                       <Input mono value={nameserver} onChange={(e) => setNameserver(e.target.value)} placeholder="ns1.step1.ro:53" />
                     </Field>
                     <Field label="TSIG key name" hint="Name of the key allowed to update ACME challenge TXT records on the primary.">
@@ -326,7 +327,7 @@ function LetsEncryptTab() {
         {challenge === 'dns-01' && dnsProvider === 'rfc2136' && (
           <AcmeDnsTest
             unsaved={unsaved || save.isPending}
-            credentialsReady={!!stored.letsencrypt_rfc2136_nameserver && !!stored.letsencrypt_rfc2136_tsig_key && stored.letsencrypt_rfc2136_secret_set}
+            credentialsReady={!!stored.letsencrypt_rfc2136_tsig_key && stored.letsencrypt_rfc2136_secret_set}
           />
         )}
       </div>
@@ -338,10 +339,12 @@ function AcmeDnsTest({ unsaved, credentialsReady }: { unsaved: boolean; credenti
   const nodesQ = useQuery({ queryKey: ['nodes'], queryFn: nodesApi.list })
   const [agentId, setAgentId] = useState('')
   const [domain, setDomain] = useState('')
-  const [test, setTest] = useState<{ commandId: string; nodeName: string; domain: string } | null>(null)
+  const [test, setTest] = useState<{ commandId: string; nodeName: string; domain: string; endpoint: string } | null>(null)
   const [timedOut, setTimedOut] = useState(false)
   const eligible = (nodesQ.data ?? []).filter(node => node.role === 'server' || node.role === 'gateway')
   const selected = eligible.find(node => node.agent_id === agentId)
+  const endpointQ = useQuery({ queryKey: ['edge-capabilities', agentId], queryFn: () => nodesApi.edgeCapabilities(agentId), enabled: !!selected })
+  const effectiveEndpoint = endpointQ.data?.rfc2136_effective_nameserver
   const resultQ = useQuery({
     queryKey: ['acme-dns-test', test?.commandId],
     queryFn: () => settingsApi.acmeDnsTestStatus(test!.commandId),
@@ -360,7 +363,7 @@ function AcmeDnsTest({ unsaved, credentialsReady }: { unsaved: boolean; credenti
     mutationFn: () => settingsApi.testAcmeDns({ agent_id: agentId, domain: domain.trim() }),
     onSuccess: data => {
       setTimedOut(false)
-      setTest({ commandId: data.command_id, nodeName: selected?.name ?? agentId, domain: domain.trim() })
+      setTest({ commandId: data.command_id, nodeName: selected?.name ?? agentId, domain: domain.trim(), endpoint: effectiveEndpoint ?? '' })
     },
   })
   const busy = start.isPending || running
@@ -378,7 +381,7 @@ function AcmeDnsTest({ unsaved, credentialsReady }: { unsaved: boolean; credenti
         </div>
         <div className="col" style={{ gap: 12, maxWidth: 520 }}>
           {unsaved && <div role="status">Save your changes first, including any new secret, before testing.</div>}
-          {!credentialsReady && !unsaved && <div role="status">Save the update server, TSIG key name, and secret before testing.</div>}
+          {!credentialsReady && !unsaved && <div role="status">Save the global TSIG key name and secret before testing.</div>}
           {nodesQ.isError && <div role="alert">Could not load nodes: {nodesQ.error.message}</div>}
           <Field label="Test from node" hint="Choose the node that will run Traefik. It must reach the writable DNS primary.">
             <Select value={agentId} onChange={e => setAgentId(e.target.value)} disabled={busy || nodesQ.isPending}>
@@ -386,17 +389,23 @@ function AcmeDnsTest({ unsaved, credentialsReady }: { unsaved: boolean; credenti
               {eligible.map(node => <option key={node.agent_id} value={node.agent_id} disabled={node.status !== 'connected'}>{node.name} ({node.role}, {node.status})</option>)}
             </Select>
           </Field>
+          {selected && endpointQ.isPending && <div role="status">Loading selected node update endpoint…</div>}
+          {selected && endpointQ.isFetching && !endpointQ.isPending && <div role="status">Refreshing selected node update endpoint…</div>}
+          {selected && endpointQ.isError && <div role="alert">Could not load selected node endpoint: {endpointQ.error.message}<Button size="sm" onClick={() => endpointQ.refetch()}>Retry endpoint</Button></div>}
+          {selected && endpointQ.isSuccess && !endpointQ.isFetching && <div style={{ overflowWrap: 'anywhere' }}>Effective update endpoint: <strong className="mono">{effectiveEndpoint || 'Not configured'}</strong> · {endpointQ.data.rfc2136_nameserver_override ? 'node override' : 'inherited global setting'}. DNS propagation resolvers stay separate.</div>}
+          {selected && endpointQ.isSuccess && !endpointQ.isFetching && !effectiveEndpoint && <div role="status">Save a global update server or this node's override before testing.</div>}
           {nodesQ.isSuccess && !eligible.length && <div>No server or gateway nodes are available.</div>}
           <Field label="Test domain" hint="Domain whose _acme-challenge TXT record this key is allowed to update.">
             <Input mono value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com" disabled={busy} />
           </Field>
-          <Button onClick={() => start.mutate()} disabled={busy || unsaved || !credentialsReady || selected?.status !== 'connected' || !domain.trim()}>
+          <Button onClick={() => start.mutate()} disabled={busy || unsaved || !credentialsReady || !effectiveEndpoint || endpointQ.isError || endpointQ.isPending || endpointQ.isFetching || selected?.status !== 'connected' || !domain.trim()}>
             {busy ? 'Testing…' : 'Test DNS challenge'}
           </Button>
           {start.isError && <div role="alert">Could not start test: {start.error.message}</div>}
           {test && (
             <div className="col" style={{ gap: 8, overflowWrap: 'anywhere' }} aria-live="polite">
               <div>Source: {test.nodeName}. Domain: {test.domain}.</div>
+              <div>Update endpoint: {test.endpoint}.</div>
               {running && !timedOut && !resultQ.isError && <div>Waiting for update, propagation, and cleanup results…</div>}
               {timedOut && running && <div role="alert">No final result within 120 seconds. The remote test may still be running. Refresh to check its result.</div>}
               {resultQ.isError && <div role="alert">Could not read test result: {resultQ.error.message}</div>}
