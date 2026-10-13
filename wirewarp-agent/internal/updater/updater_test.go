@@ -3,6 +3,7 @@ package updater
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -201,6 +202,95 @@ func TestRestartFailureIsDurableAndRequiresNewReceiptACK(t *testing.T) {
 	}
 	if u.Cfg.Snapshot().UpdateReceipt == nil {
 		t.Fatal("old success ACK cleared new failure")
+	}
+	r := u.Cfg.Snapshot().UpdateReceipt
+	next := New(u.Cfg, u.ConfigPath, r.Version)
+	next.Path, next.RunningSHA = u.Path, r.SHA256
+	replayed, err := next.PendingResult()
+	if err != nil || replayed == nil || replayed.Success || replayed.ReceiptID != pending.ReceiptID {
+		t.Fatal("later matching process rewrote a genuine restart failure")
+	}
+}
+
+func TestInterruptedSelfRestartRequiresNewProcessVerification(t *testing.T) {
+	u, _ := fixture(t)
+	v := install(t, u)
+	terminated := exec.Command("sh", "-c", "kill -TERM $$").Run()
+	u.Restart = func(context.Context) error { return fmt.Errorf("restart helper: %w", terminated) }
+	if err := u.Acknowledge("owner", "command", v.ReceiptID); err == nil {
+		t.Fatal("interrupted restart was not reported as unverified")
+	}
+	saved, err := config.Load(u.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := saved.Snapshot().UpdateReceipt
+	if !r.Success || r.Detail != restartVerificationPending || r.ReceiptID != v.ReceiptID {
+		t.Fatalf("interruption incorrectly made a terminal result: %+v", r)
+	}
+	if pending, err := u.PendingResult(); pending != nil || err == nil {
+		t.Fatal("old process claimed verified restart")
+	}
+	duplicate, err := u.Handle(executor.Command{ID: "command", Type: "agent_update"})
+	if err != nil || !duplicate.Success || duplicate.ReceiptID != v.ReceiptID || u.Cfg.Snapshot().UpdateReceipt.Detail != restartVerificationPending {
+		t.Fatal("duplicate command converted pending installation receipt into false failure", err)
+	}
+	next := New(saved, u.ConfigPath, r.Version)
+	next.Path, next.RunningSHA = u.Path, r.SHA256
+	next.Restart = func(context.Context) error { t.Fatal("verified process requested another restart"); return nil }
+	if err := next.Acknowledge("owner", "command", v.ReceiptID); err != nil {
+		t.Fatal(err)
+	}
+	if next.Cfg.Snapshot().UpdateReceipt == nil {
+		t.Fatal("old ACK cleared unverified restart")
+	}
+	verified, err := next.PendingResult()
+	if err != nil || verified == nil || !verified.Success || verified.ReceiptID == v.ReceiptID || next.Cfg.Snapshot().UpdateReceipt.Detail != restartVerified {
+		t.Fatalf("new process verification failed: result=%+v err=%v", verified, err)
+	}
+	if err := next.Acknowledge("owner", "command", verified.ReceiptID); err != nil {
+		t.Fatal(err)
+	}
+	if next.Cfg.Snapshot().UpdateReceipt != nil {
+		t.Fatal("verified receipt was not cleared")
+	}
+}
+
+func TestInterruptedRestartCannotVerifyWrongExecutable(t *testing.T) {
+	u, _ := fixture(t)
+	v := install(t, u)
+	u.Restart = func(context.Context) error { return exec.Command("sh", "-c", "kill -TERM $$").Run() }
+	_ = u.Acknowledge("owner", "command", v.ReceiptID)
+	r := u.Cfg.Snapshot().UpdateReceipt
+	next := New(u.Cfg, u.ConfigPath, r.Version)
+	next.Path, next.RunningSHA = u.Path, "wrong-running-hash"
+	if pending, err := next.PendingResult(); pending != nil || err == nil {
+		t.Fatal("wrong running hash verified restart")
+	}
+	next.RunningSHA = r.SHA256
+	if err := os.WriteFile(u.Path, []byte("corrupt installed binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := next.PendingResult()
+	if err != nil || pending == nil || pending.Success {
+		t.Fatal("corrupt installed binary verified restart")
+	}
+}
+
+func TestRestartInterruptionClassificationDoesNotHideFailure(t *testing.T) {
+	terminated := exec.Command("sh", "-c", "kill -TERM $$").Run()
+	if !interruptedRestart(context.Background(), terminated) {
+		t.Fatal("SIGTERM not recognized")
+	}
+	for _, err := range []error{errors.New("signal: terminated"), exec.Command("sh", "-c", "exit 1").Run()} {
+		if interruptedRestart(context.Background(), err) {
+			t.Fatal("definite failure treated as ambiguous")
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if interruptedRestart(ctx, terminated) {
+		t.Fatal("timeout/cancellation failure was hidden")
 	}
 }
 

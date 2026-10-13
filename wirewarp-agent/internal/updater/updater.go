@@ -8,16 +8,19 @@ import (
 	"debug/elf"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/wirewarp/agent/internal/config"
@@ -27,6 +30,10 @@ import (
 
 const BinaryURL = "https://github.com/stepunu/wirewarp/raw/main/wirewarp-agent/dist/wirewarp-agent"
 const BinaryPath = "/usr/local/bin/wirewarp-agent"
+const restartVerificationPending = "binary installed; restart verification pending"
+const restartVerified = "installed binary and restarted process version and SHA256 verified"
+
+var errRestartVerificationPending = errors.New("installed agent awaits restarted process version and SHA256 verification")
 
 type Updater struct {
 	Cfg                                               *config.Config
@@ -140,7 +147,12 @@ func (u *Updater) Handle(cmd executor.Command) (executor.Result, error) {
 		if saved.UpdateReceipt.CommandID != cmd.ID {
 			return executor.Result{}, fmt.Errorf("previous update receipt awaits controller acknowledgement")
 		}
-		return u.prepareLocked()
+		v, err := u.prepareLocked()
+		if errors.Is(err, errRestartVerificationPending) {
+			// A duplicate replays installation, not a verified restart outcome.
+			return result(u.Cfg.Snapshot().UpdateReceipt), nil
+		}
+		return v, err
 	}
 	if saved.AgentID == "" || cmd.ID == "" {
 		return executor.Result{}, fmt.Errorf("agent update requires a registered owner and command ID")
@@ -240,6 +252,21 @@ func (u *Updater) prepareLocked() (executor.Result, error) {
 			}
 			r = &copy
 		}
+		if r.Detail == restartVerificationPending {
+			if u.RunningVersion != r.Version || u.RunningSHA != r.SHA256 {
+				return executor.Result{}, errRestartVerificationPending
+			}
+			copy := *r
+			copy.Detail = restartVerified
+			copy.ReceiptID = nonce()
+			if !validReceipt(&copy, saved.AgentID) {
+				return executor.Result{}, fmt.Errorf("create verified restart receipt failed")
+			}
+			if err := u.save(&copy); err != nil {
+				return executor.Result{}, err
+			}
+			r = &copy
+		}
 	}
 	v := result(r)
 	if !r.Success {
@@ -273,7 +300,23 @@ func (u *Updater) Acknowledge(owner, commandID, receiptID string) error {
 	if owner != saved.AgentID {
 		return fmt.Errorf("update receipt acknowledgement identity does not match this agent")
 	}
+	if r.Success && r.Detail == restartVerificationPending {
+		if u.RunningVersion == r.Version && u.RunningSHA == r.SHA256 {
+			// Verification creates a new receipt, so this older ACK cannot clear it.
+			_, err := u.prepareLocked()
+			return err
+		}
+		if u.restarted[receiptID] {
+			return nil
+		}
+		return fmt.Errorf("restart verification is pending; the old process cannot confirm it")
+	}
 	if !r.Success || u.RunningVersion == r.Version && u.RunningSHA == r.SHA256 {
+		if r.Success {
+			if _, err := u.prepareLocked(); err != nil {
+				return err
+			}
+		}
 		err := u.Cfg.UpdateAndSave(u.ConfigPath, func(next *config.Config) error {
 			current := next.UpdateReceipt
 			if next.AgentID == owner && current != nil && current.CommandID == commandID && current.ReceiptID == receiptID {
@@ -292,10 +335,21 @@ func (u *Updater) Acknowledge(owner, commandID, receiptID string) error {
 	if _, err := u.prepareLocked(); err != nil {
 		return err
 	}
+	pending := *r
+	pending.Detail = restartVerificationPending
+	if err := u.save(&pending); err != nil {
+		return fmt.Errorf("persist restart verification intent: %w", err)
+	}
+	r = &pending
 	u.restarted[receiptID] = true
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := u.Restart(ctx); err != nil {
+		if interruptedRestart(ctx, err) {
+			// systemd may kill its requesting helper with the old service cgroup.
+			// Only the next process can resolve this outcome from its executable.
+			return fmt.Errorf("restart outcome awaits new-process verification: %w", err)
+		}
 		_, saveErr := u.fail(r, "binary installed but service restart request failed")
 		if saveErr != nil {
 			return fmt.Errorf("%w; %v", err, saveErr)
@@ -303,4 +357,16 @@ func (u *Updater) Acknowledge(owner, commandID, receiptID string) error {
 		return err
 	}
 	return nil
+}
+
+func interruptedRestart(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return false
+	}
+	status, ok := exit.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && (status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
 }
