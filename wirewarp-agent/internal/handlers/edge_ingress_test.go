@@ -33,7 +33,7 @@ func TestEdgeIngressAtomicRulesAndOwnedCleanup(t *testing.T) {
 	if err := reconcileEdgeIngress(context.Background(), ingress); err != nil {
 		t.Fatal(err)
 	}
-	want := "*filter\n:WW-EDGE-INGRESS - [0:0]\n-F WW-EDGE-INGRESS\n-A WW-EDGE-INGRESS -i wg0 -s 10.20.0.1/32 -d 10.20.0.2/32 -p tcp -m multiport --dports 80,443 -j ACCEPT\n-A WW-EDGE-INGRESS -i lo -s 10.20.0.2/32 -d 10.20.0.2/32 -p tcp -m multiport --dports 80,443 -j ACCEPT\n-A WW-EDGE-INGRESS -d 10.20.0.2/32 -p tcp -m multiport --dports 80,443 -j DROP\n-I INPUT 1 -m comment --comment wirewarp-edge-ingress -j WW-EDGE-INGRESS\nCOMMIT\n"
+	want := "*filter\n:WW-EDGE-INGRESS - [0:0]\n-F WW-EDGE-INGRESS\n-A WW-EDGE-INGRESS -i wg0 -s 10.20.0.1/32 -d 10.20.0.2/32 -p tcp -m multiport --dports 80,443 -m comment --comment wirewarp-edge-ingress -j ACCEPT\n-A WW-EDGE-INGRESS -i lo -s 10.20.0.2/32 -d 10.20.0.2/32 -p tcp -m multiport --dports 80,443 -m comment --comment wirewarp-edge-ingress -j ACCEPT\n-A WW-EDGE-INGRESS -d 10.20.0.2/32 -p tcp -m multiport --dports 80,443 -m comment --comment wirewarp-edge-ingress -j DROP\n-I INPUT 1 -m comment --comment wirewarp-edge-ingress -j WW-EDGE-INGRESS\nCOMMIT\n"
 	if transactions[0] != want {
 		t.Fatalf("unsafe firewall transaction:\n%s", transactions[0])
 	}

@@ -15,6 +15,9 @@ import (
 )
 
 func TestEdgeBootGuardRestoresBeforeRuntimeAndFailsClosed(t *testing.T) {
+	oldPreflight := firewallOwnershipPreflight
+	t.Cleanup(func() { firewallOwnershipPreflight = oldPreflight })
+	firewallOwnershipPreflight = func(context.Context, map[string][]string) error { return nil }
 	oldRun, oldRestore := edgeIPTables, edgeIPTablesRestore
 	t.Cleanup(func() { edgeIPTables, edgeIPTablesRestore = oldRun, oldRestore })
 	edgeIPTables = func(_ context.Context, args ...string) ([]byte, error) {

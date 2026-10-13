@@ -1,8 +1,10 @@
 package wireguard
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"github.com/wirewarp/agent/internal/firewall"
 	"os"
 	"os/exec"
 	"strconv"
@@ -50,6 +52,9 @@ func (g GatewayConfig) routeTableName() string {
 // is idempotent: it flushes its own attachment's rules first, then re-adds
 // them, so reattaches are safe.
 func ApplyGatewayRouting(cfg GatewayConfig) error {
+	if err := firewall.Check(context.Background()); err != nil {
+		return err
+	}
 	if cfg.Fwmark == "" || cfg.RouteTableID == "" || cfg.ReplyPriority == "" {
 		return fmt.Errorf("gateway: fwmark, route_table_id, and reply_priority are required")
 	}
@@ -66,7 +71,9 @@ func ApplyGatewayRouting(cfg GatewayConfig) error {
 	// Flush this attachment's routes / rules / mangle entries before re-asserting.
 	flushAttachmentRoutes(cfg)
 	flushAttachmentIPRules(cfg)
-	flushAttachmentMangle(cfg)
+	if err := flushAttachmentMangle(cfg); err != nil {
+		return err
+	}
 
 	if err := applyAttachmentRoute(cfg); err != nil {
 		return fmt.Errorf("route: %w", err)
@@ -90,28 +97,53 @@ func ApplyGatewayRouting(cfg GatewayConfig) error {
 // iptables entries added by ApplyGatewayRouting. The global OUTPUT CONNMARK
 // restore rule is left in place — other attachments may still depend on it.
 func TeardownGatewayRouting(cfg GatewayConfig) error {
+	if cfg.IsGateway {
+		if err := RemoveGatewayOnlyRules(cfg); err != nil {
+			return fmt.Errorf("remove gateway Docker allowances: %w", err)
+		}
+	}
+	var firstErr error
+	remove := func(args ...string) {
+		rule := append(append([]string{}, args[:2]...), args[3:]...)
+		if err := deleteIPTablesRuleIfPresent(rule); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	flushAttachmentRoutes(cfg)
 	flushAttachmentIPRules(cfg)
-	flushAttachmentMangle(cfg)
+	if err := flushAttachmentMangle(cfg); err != nil {
+		return err
+	}
+	for _, rule := range gatewayForwardRules(cfg) {
+		if err := deleteIPTablesRuleIfPresent(rule); err != nil {
+			return err
+		}
+	}
 
 	if cfg.LANIface != "" && cfg.WGSubnet != "" {
-		ipt("-t", "nat", "-D", "POSTROUTING", "-s", cfg.WGSubnet, "-o", cfg.LANIface, "-j", "MASQUERADE")
+		remove("-t", "nat", "-D", "POSTROUTING", "-s", cfg.WGSubnet, "-o", cfg.LANIface, "-j", "MASQUERADE")
 	}
 	if cfg.LANIface != "" && cfg.TunnelIface != "" {
-		ipt(iptablesAction(gatewayLANMasqueradeRule(cfg), "-D")...)
-		ipt("-t", "nat", "-D", "POSTROUTING", "-i", cfg.TunnelIface, "-o", cfg.LANIface, "-j", "MASQUERADE")
+		if err := deleteIPTablesRuleIfPresent(gatewayLANMasqueradeRule(cfg)); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if err := deleteIPTablesRuleIfPresent(firewall.WithoutOwnership(gatewayLANMasqueradeRule(cfg))); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		remove("-t", "nat", "-D", "POSTROUTING", "-i", cfg.TunnelIface, "-o", cfg.LANIface, "-j", "MASQUERADE")
 	}
 	// Legacy single-mark MASQUERADE from older agent versions; harmless if absent.
 	if cfg.LANIface != "" {
-		ipt("-t", "nat", "-D", "POSTROUTING", "-m", "mark", "--mark", "0x1", "-o", cfg.LANIface, "-j", "MASQUERADE")
+		remove("-t", "nat", "-D", "POSTROUTING", "-m", "mark", "--mark", "0x1", "-o", cfg.LANIface, "-j", "MASQUERADE")
 	}
 
 	// MSS clamping is per-tunnel-iface
-	ipt("-t", "mangle", "-D", "POSTROUTING",
+	remove("-t", "mangle", "-D", "POSTROUTING",
 		"-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
 		"-o", cfg.TunnelIface, "-j", "TCPMSS", "--clamp-mss-to-pmtu")
+	remove("-t", "mangle", "-D", "POSTROUTING", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-o", cfg.TunnelIface, "-m", "comment", "--comment", "wirewarp-gateway-mss", "-j", "TCPMSS", "--clamp-mss-to-pmtu")
 
-	return nil
+	return firstErr
 }
 
 // RemoveGatewayOnlyRules removes rules that are valid only while an
@@ -235,23 +267,33 @@ func flushAttachmentIPRules(cfg GatewayConfig) {
 	}
 }
 
-func flushAttachmentMangle(cfg GatewayConfig) {
+func flushAttachmentMangle(cfg GatewayConfig) error {
 	if cfg.TunnelIface == "" {
-		return
+		return nil
+	}
+	var firstErr error
+	remove := func(args ...string) {
+		// These exact tuples belong to this saved attachment, including legacy forms.
+		rule := append(append([]string{}, args[:2]...), args[3:]...)
+		if err := deleteIPTablesRuleIfPresent(rule); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	// Current rule (this agent version): single CONNMARK --set-mark.
 	if cfg.Fwmark != "" {
-		ipt("-t", "mangle", "-D", "PREROUTING", "-i", cfg.TunnelIface, "-j", "CONNMARK", "--set-mark", cfg.Fwmark)
+		remove("-t", "mangle", "-D", "PREROUTING", "-i", cfg.TunnelIface, "-m", "comment", "--comment", "wirewarp-gateway-mangle", "-j", "CONNMARK", "--set-mark", cfg.Fwmark)
+		remove("-t", "mangle", "-D", "PREROUTING", "-i", cfg.TunnelIface, "-j", "CONNMARK", "--set-mark", cfg.Fwmark)
 	}
 	// Legacy MARK + CONNMARK-save pair (early multi-server-gateway prototype).
 	// Caused a routing loop because the inbound packet's MARK was matched by
 	// the per-attachment ip rule and re-sent out the same wg interface.
 	if cfg.Fwmark != "" {
-		ipt("-t", "mangle", "-D", "PREROUTING", "-i", cfg.TunnelIface, "-j", "MARK", "--set-mark", cfg.Fwmark)
+		remove("-t", "mangle", "-D", "PREROUTING", "-i", cfg.TunnelIface, "-j", "MARK", "--set-mark", cfg.Fwmark)
 	}
-	ipt("-t", "mangle", "-D", "PREROUTING", "-i", cfg.TunnelIface, "-j", "CONNMARK", "--save-mark")
+	remove("-t", "mangle", "-D", "PREROUTING", "-i", cfg.TunnelIface, "-j", "CONNMARK", "--save-mark")
 	// Pre-multi-server-gateway hardcoded mark.
-	ipt("-t", "mangle", "-D", "PREROUTING", "-i", cfg.TunnelIface, "-j", "MARK", "--set-mark", "0x1")
+	remove("-t", "mangle", "-D", "PREROUTING", "-i", cfg.TunnelIface, "-j", "MARK", "--set-mark", "0x1")
+	return firstErr
 }
 
 func applyAttachmentRoute(cfg GatewayConfig) error {
@@ -305,7 +347,7 @@ func applyAttachmentMangle(cfg GatewayConfig) error {
 }
 
 func applyAttachmentNAT(cfg GatewayConfig) error {
-	if err := iptE("-P", "FORWARD", "ACCEPT"); err != nil {
+	if err := ensureGatewayForwarding(cfg); err != nil {
 		return err
 	}
 	// Do not SNAT public DNAT flows forwarded from the primary VPS tunnel to
@@ -378,6 +420,7 @@ func gatewayLANMasqueradeRule(cfg GatewayConfig) []string {
 		"-t", "nat", "POSTROUTING",
 		"-m", "connmark", "--mark", cfg.Fwmark,
 		"-o", cfg.LANIface,
+		"-m", "comment", "--comment", "wirewarp-gateway-nat",
 		"-j", "MASQUERADE",
 	}
 }
@@ -385,7 +428,7 @@ func gatewayLANMasqueradeRule(cfg GatewayConfig) []string {
 func deleteIPTablesRule(rule []string) bool {
 	removed := false
 	args := iptablesAction(rule, "-D")
-	for exec.Command("iptables", args...).Run() == nil {
+	for gatewayCommand(args...).Run() == nil {
 		removed = true
 	}
 	return removed
@@ -429,17 +472,13 @@ func applyMSSClamping(tunnelIface string) error {
 }
 
 func dockerUserChainExists() bool {
-	err := exec.Command("iptables", "-L", "DOCKER-USER", "-n").Run()
+	err := gatewayCommand("-L", "DOCKER-USER", "-n").Run()
 	return err == nil
 }
 
 // SaveIPTables persists iptables rules so they survive reboots.
 func SaveIPTables() error {
-	out, err := exec.Command("netfilter-persistent", "save").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("netfilter-persistent save: %w — %s", err, out)
-	}
-	return nil
+	return firewall.Save(context.Background())
 }
 
 // --- low-level helpers ---
@@ -455,21 +494,111 @@ func ip(args ...string) error {
 
 // ipt runs an iptables command, ignoring errors (for cleanup/delete operations).
 func ipt(args ...string) {
-	exec.Command("iptables", args...).Run()
+	gatewayCommand(args...).Run()
 }
 
 // iptE runs an iptables command and returns errors.
 func iptE(args ...string) error {
-	out, err := exec.Command("iptables", args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("iptables %s: %w — %s", strings.Join(args, " "), err, out)
+	tagged := tagGatewayArgs(args)
+	var removeLegacy []string
+	if strings.Contains(strings.Join(args, " "), " -A ") || strings.Contains(strings.Join(args, " "), " -I ") {
+		legacy := firewall.WithoutOwnership(tagged)
+		if strings.Join(legacy, " ") != strings.Join(tagged, " ") {
+			check := append([]string{}, legacy...)
+			for i, v := range check {
+				if v == "-A" || v == "-I" {
+					check[i] = "-C"
+					break
+				}
+			}
+			if exec.Command("iptables", check...).Run() == nil {
+				deleteArgs := append([]string{}, legacy...)
+				for i, v := range deleteArgs {
+					if v == "-A" || v == "-I" {
+						deleteArgs[i] = "-D"
+						break
+					}
+				}
+				removeLegacy = deleteArgs
+			}
+		}
+	}
+	if len(tagged) > 1 && (tagged[0] == "-A" || tagged[0] == "-I") && tagged[1] == "FORWARD" {
+		if err := firewall.Insert(context.Background(), tagged); err != nil {
+			return err
+		}
+	} else {
+		out, err := exec.Command("iptables", tagged...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("iptables %s: %w — %s", strings.Join(args, " "), err, out)
+		}
+	}
+	if len(removeLegacy) > 0 {
+		if out, err := exec.Command("iptables", removeLegacy...).CombinedOutput(); err != nil {
+			return fmt.Errorf("owned replacement installed but legacy removal failed: %w: %s", err, out)
+		}
+	}
+	return nil
+}
+
+func tagGatewayArgs(args []string) []string {
+	if strings.Contains(strings.Join(args, " "), "--comment") {
+		return args
+	}
+	action := ""
+	for _, v := range args {
+		if v == "-C" || v == "-A" || v == "-I" || v == "-D" {
+			action = v
+			break
+		}
+	}
+	if action == "-D" || action == "" {
+		return args
+	}
+	comment := ""
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "-j CONNMARK") || strings.Contains(joined, "-j MARK") {
+		comment = "wirewarp-gateway-mangle"
+	}
+	if strings.Contains(joined, "-j TCPMSS") {
+		comment = "wirewarp-gateway-mss"
+	}
+	if strings.Contains(joined, "-j MASQUERADE") {
+		comment = "wirewarp-gateway-nat"
+	}
+	if comment == "" {
+		return args
+	}
+	out := []string{}
+	for _, v := range args {
+		if v == "-j" {
+			out = append(out, "-m", "comment", "--comment", comment)
+		}
+		out = append(out, v)
+	}
+	return out
+}
+func gatewayCommand(args ...string) *exec.Cmd {
+	return exec.Command("iptables", tagGatewayArgs(args)...)
+}
+func gatewayForwardRules(cfg GatewayConfig) [][]string {
+	if cfg.TunnelIface == "" || cfg.LANIface == "" {
+		return nil
+	}
+	return [][]string{{"FORWARD", "-i", cfg.TunnelIface, "-o", cfg.LANIface, "-m", "comment", "--comment", "wirewarp-gateway-forward", "-j", "ACCEPT"}, {"FORWARD", "-i", cfg.LANIface, "-o", cfg.TunnelIface, "-m", "comment", "--comment", "wirewarp-gateway-forward", "-j", "ACCEPT"}}
+}
+func ensureGatewayForwarding(cfg GatewayConfig) error {
+	for _, rule := range gatewayForwardRules(cfg) {
+		if err := iptCheckOrInsert(iptablesAction(rule, "-C"), iptablesAction(rule, "-I")); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 // iptCheckOrInsert runs the check command; if it fails (rule absent), runs the insert command.
 func iptCheckOrInsert(check, insert []string) error {
-	if exec.Command("iptables", check...).Run() == nil {
+	if gatewayCommand(check...).Run() == nil {
 		return nil
 	}
 	return iptE(insert...)

@@ -15,15 +15,17 @@ func TestEnsureOutputConnmarkAndReportUsesValidIPTablesCommands(t *testing.T) {
 	stub := `#!/bin/sh
 printf '%s\n' "$*" >> "$IPTABLES_LOG"
 case "$*" in
-  "-t mangle -C OUTPUT -j CONNMARK --restore-mark"|\
-  "-t mangle -C PREROUTING ! -i wg+ -j CONNMARK --restore-mark")
+  "-t mangle -C OUTPUT -m comment --comment wirewarp-gateway-mangle -j CONNMARK --restore-mark"|\
+  "-t mangle -C PREROUTING ! -i wg+ -m comment --comment wirewarp-gateway-mangle -j CONNMARK --restore-mark")
     if [ "$IPTABLES_RULES_PRESENT" = "1" ]; then exit 0; fi
     exit 1
     ;;
-  "-t mangle -A OUTPUT -j CONNMARK --restore-mark"|\
-  "-t mangle -A PREROUTING ! -i wg+ -j CONNMARK --restore-mark")
+  "-t mangle -A OUTPUT -m comment --comment wirewarp-gateway-mangle -j CONNMARK --restore-mark"|\
+  "-t mangle -A PREROUTING ! -i wg+ -m comment --comment wirewarp-gateway-mangle -j CONNMARK --restore-mark")
     exit 0
     ;;
+  "-t mangle -C OUTPUT -j CONNMARK --restore-mark"|\
+  "-t mangle -C PREROUTING ! -i wg+ -j CONNMARK --restore-mark") exit 1 ;;
   *)
     exit 64
     ;;
@@ -48,10 +50,12 @@ esac
 		}
 
 		wantCalls := []string{
+			"-t mangle -C OUTPUT -m comment --comment wirewarp-gateway-mangle -j CONNMARK --restore-mark",
 			"-t mangle -C OUTPUT -j CONNMARK --restore-mark",
-			"-t mangle -A OUTPUT -j CONNMARK --restore-mark",
+			"-t mangle -A OUTPUT -m comment --comment wirewarp-gateway-mangle -j CONNMARK --restore-mark",
+			"-t mangle -C PREROUTING ! -i wg+ -m comment --comment wirewarp-gateway-mangle -j CONNMARK --restore-mark",
 			"-t mangle -C PREROUTING ! -i wg+ -j CONNMARK --restore-mark",
-			"-t mangle -A PREROUTING ! -i wg+ -j CONNMARK --restore-mark",
+			"-t mangle -A PREROUTING ! -i wg+ -m comment --comment wirewarp-gateway-mangle -j CONNMARK --restore-mark",
 		}
 		assertIPTablesCalls(t, logPath, wantCalls)
 	})
@@ -71,8 +75,8 @@ esac
 		}
 
 		wantCalls := []string{
-			"-t mangle -C OUTPUT -j CONNMARK --restore-mark",
-			"-t mangle -C PREROUTING ! -i wg+ -j CONNMARK --restore-mark",
+			"-t mangle -C OUTPUT -m comment --comment wirewarp-gateway-mangle -j CONNMARK --restore-mark",
+			"-t mangle -C PREROUTING ! -i wg+ -m comment --comment wirewarp-gateway-mangle -j CONNMARK --restore-mark",
 		}
 		assertIPTablesCalls(t, logPath, wantCalls)
 	})

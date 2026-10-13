@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"fmt"
 	"log"
 
@@ -19,11 +18,8 @@ import (
 // a no-op (everything underneath uses check-then-add semantics) — so the
 // systemd unit can fire it as a oneshot at every boot without coordination.
 func RestoreRouting(cfg *config.Config) error {
-	if err := RestoreEdgeIngressGuard(context.Background(), cfg); err != nil {
-		return fmt.Errorf("restore edge ingress guard: %w", err)
-	}
-	if err := RestoreSiteLinkGuard(context.Background(), cfg); err != nil {
-		return fmt.Errorf("restore site-link guard: %w", err)
+	if err := RestoreFirewall(cfg); err != nil {
+		return err
 	}
 	switch cfg.Mode {
 	case "server":
@@ -49,7 +45,7 @@ func restoreRoutingServer(cfg *config.Config) error {
 	if len(healed) > 0 {
 		log.Printf("[restore-routing] server re-installed: %v", healed)
 		if persistErr := iptables.SaveRules(); persistErr != nil {
-			log.Printf("[restore-routing] WARN: persist iptables failed: %v", persistErr)
+			return fmt.Errorf("restored server firewall but persistence failed: %w", persistErr)
 		}
 	}
 	return nil
@@ -91,7 +87,10 @@ func restoreRoutingClient(cfg *config.Config) error {
 	}
 	if healedAny {
 		if persistErr := iptables.SaveRules(); persistErr != nil {
-			log.Printf("[restore-routing] WARN: persist iptables failed: %v", persistErr)
+			if firstErr != nil {
+				return fmt.Errorf("%w; restored firewall persistence failed: %v", firstErr, persistErr)
+			}
+			return fmt.Errorf("restored gateway firewall but persistence failed: %w", persistErr)
 		}
 	}
 	return firstErr

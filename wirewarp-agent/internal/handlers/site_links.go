@@ -42,7 +42,20 @@ func (h *SiteLinkHandlers) acknowledgeError(p *config.SiteLinkSnapshot, err erro
 }
 
 func NewSiteLinks(cfg *config.Config, path string) *SiteLinkHandlers {
-	return &SiteLinkHandlers{cfg: cfg, cfgPath: path, wake: make(chan struct{}, 1), firewall: reconcileSiteFirewall, ownership: verifySiteOwnership, routesPreflight: preflightSiteRoutes, routesApply: applySiteRoutes, cleanup: cleanupSiteFirewall, persistFirewall: persistSiteFirewall}
+	h := &SiteLinkHandlers{cfg: cfg, cfgPath: path, wake: make(chan struct{}, 1), ownership: verifySiteOwnership, routesPreflight: preflightSiteRoutes, routesApply: applySiteRoutes, cleanup: cleanupSiteFirewall, persistFirewall: persistSiteFirewall}
+	h.firewall = func(ctx context.Context, saved *config.Config, desired *config.SiteLinkSnapshot, peers []config.SiteLinkTransitPeer, allow bool) error {
+		if err := preflightFirewallOwnership(ctx, saved); err != nil {
+			return err
+		}
+		if err := reconcileSiteFirewall(ctx, saved, desired, peers, allow); err != nil {
+			return err
+		}
+		if err := h.persistFirewall(ctx); err != nil {
+			return fmt.Errorf("site-link firewall changed but persistence failed: %w", err)
+		}
+		return nil
+	}
+	return h
 }
 
 func (h *SiteLinkHandlers) SetEmit(fn EmitFn) { h.emit.Store(&fn) }
@@ -216,6 +229,9 @@ func RestoreSiteLinkGuard(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("saved site-link guard has no target snapshot")
 	}
 	if err := validateSiteSnapshot(saved, p); err != nil {
+		return err
+	}
+	if err := preflightFirewallOwnership(ctx, saved); err != nil {
 		return err
 	}
 	return reconcileSiteFirewall(ctx, saved, p, siteUnionPeers(saved.SiteLinkGuardPeers, p.TransitPeers), false)

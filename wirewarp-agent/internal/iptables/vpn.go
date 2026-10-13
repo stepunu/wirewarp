@@ -1,7 +1,9 @@
 package iptables
 
 import (
+	"context"
 	"fmt"
+	"github.com/wirewarp/agent/internal/firewall"
 	"os/exec"
 	"strings"
 )
@@ -58,12 +60,13 @@ func buildVpnPeerPlan(srcIP string, fullTunnel bool, wanIface string, rules []Vp
 	}
 	if fullTunnel {
 		plan.acceptRules = append(plan.acceptRules, []string{
-			"FORWARD", "-s", srcIP + "/32", "-o", wanIface, "-j", "ACCEPT",
+			"FORWARD", "-s", srcIP + "/32", "-o", wanIface, "-m", "comment", "--comment", "wirewarp-vpn-peer", "-j", "ACCEPT",
 		})
 		plan.masqueradeRule = []string{
 			"-t", "nat", "POSTROUTING",
 			"-s", srcIP + "/32",
 			"-o", wanIface,
+			"-m", "comment", "--comment", "wirewarp-vpn-peer",
 			"-j", "MASQUERADE",
 		}
 	}
@@ -84,6 +87,7 @@ func VpnEnsureMSSClamp(iface string, mssValue int) error {
 	} {
 		args := []string{
 			"-t", "mangle", "FORWARD",
+			"-m", "comment", "--comment", "wirewarp-vpn-mss",
 			dir[0], dir[1],
 			"-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
 			"-j", "TCPMSS", "--set-mss", mss,
@@ -102,7 +106,7 @@ func VpnEnsureMSSClamp(iface string, mssValue int) error {
 
 // VpnRemoveMSSClamp drops the bidirectional MSS-clamp rules for `iface`.
 // Called at endpoint teardown so we don't leave stale mangle entries.
-func VpnRemoveMSSClamp(iface string, mssValue int) {
+func VpnRemoveMSSClamp(iface string, mssValue int) error {
 	mss := fmt.Sprintf("%d", mssValue)
 	for _, dir := range [][]string{
 		{"-o", iface},
@@ -110,29 +114,35 @@ func VpnRemoveMSSClamp(iface string, mssValue int) {
 	} {
 		args := []string{
 			"-t", "mangle", "FORWARD",
+			"-m", "comment", "--comment", "wirewarp-vpn-mss",
 			dir[0], dir[1],
 			"-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
 			"-j", "TCPMSS", "--set-mss", mss,
 		}
-		exec.Command("iptables", buildDelete(args)...).Run() //nolint:errcheck
+		if err := deleteRuleIfPresent(args); err != nil {
+			return err
+		}
+		if err := deleteRuleIfPresent(firewall.WithoutOwnership(args)); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-// VpnFlushMSSClamps drops every mangle-FORWARD TCPMSS rule that
-// mentions `iface`, regardless of the configured MSS value. Used at
-// `vpn_endpoint_up` to converge to a single canonical clamp pair on
-// every restart, even if a previous run had a different vpnMSS or a
-// human applied an ad-hoc rule during incident response.
-func VpnFlushMSSClamps(iface string) {
+// VpnFlushMSSClamps removes owned clamps and the current exact legacy pair.
+func VpnFlushMSSClamps(iface string, mssValue int) error {
 	out, err := exec.Command("iptables-save", "-t", "mangle").CombinedOutput()
 	if err != nil {
-		return
+		return fmt.Errorf("inspect VPN MSS clamps: %w: %s", err, out)
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		if !strings.HasPrefix(line, "-A FORWARD") {
 			continue
 		}
 		if !strings.Contains(line, "TCPMSS") {
+			continue
+		}
+		if strings.Contains(line, "--comment") && !strings.Contains(line, "wirewarp-vpn-mss") {
 			continue
 		}
 		if !strings.Contains(line, " -i "+iface+" ") && !strings.Contains(line, " -o "+iface+" ") {
@@ -142,10 +152,28 @@ func VpnFlushMSSClamps(iface string) {
 		if len(fields) < 2 {
 			continue
 		}
+		if !strings.Contains(line, "--comment") {
+			legacy := false
+			for _, direction := range []string{"-i", "-o"} {
+				want := fmt.Sprintf("-A FORWARD %s %s -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss %d", direction, iface, mssValue)
+				if line == want {
+					legacy = true
+				}
+			}
+			if !legacy {
+				continue
+			}
+		}
+		for i := range fields {
+			fields[i] = strings.Trim(fields[i], `"`)
+		}
 		fields[0] = "-D"
 		args := append([]string{"-t", "mangle"}, fields...)
-		exec.Command("iptables", args...).Run() //nolint:errcheck — idempotent
+		if out, err := exec.Command("iptables", args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("remove owned VPN MSS clamp: %w: %s", err, out)
+		}
 	}
+	return nil
 }
 
 // VpnPeerRemoveAll removes every FORWARD ACCEPT rule whose source matches
@@ -160,7 +188,7 @@ func VpnPeerRemoveAll(srcIP string) error {
 // can only reach what its own ACCEPT rules permit; everything else is
 // rejected at the gateway even if WireGuard would otherwise route it.
 func VpnEnsureDefaultDrop(vpnNetwork string) error {
-	args := []string{"FORWARD", "-s", vpnNetwork, "-j", "DROP"}
+	args := []string{"FORWARD", "-s", vpnNetwork, "-m", "comment", "--comment", "wirewarp-vpn-drop", "-j", "DROP"}
 	return checkOrAppend(args)
 }
 
@@ -168,9 +196,11 @@ func VpnEnsureDefaultDrop(vpnNetwork string) error {
 // endpoint is torn down so we don't leave a dangling block on a /24
 // that may later be reused for something else.
 func VpnRemoveDefaultDrop(vpnNetwork string) error {
-	args := []string{"FORWARD", "-s", vpnNetwork, "-j", "DROP"}
-	deleteRule(args)
-	return nil
+	args := []string{"FORWARD", "-s", vpnNetwork, "-m", "comment", "--comment", "wirewarp-vpn-drop", "-j", "DROP"}
+	if err := deleteRuleIfPresent(args); err != nil {
+		return err
+	}
+	return deleteRuleIfPresent(firewall.WithoutOwnership(args))
 }
 
 // --- helpers ---
@@ -190,22 +220,21 @@ func vpnPeerRuleArgs(srcIP string, r VpnRule) []string {
 			args = append(args, "--dport", portRangeForIptables(r.PortRangeStart, r.PortRangeEnd))
 		}
 	}
-	args = append(args, "-j", "ACCEPT")
+	args = append(args, "-m", "comment", "--comment", "wirewarp-vpn-peer", "-j", "ACCEPT")
 	return args
 }
 
 // checkOrInsert mirrors checkOrAppend but uses -I (insert at top) so the
 // rule sits ahead of any later -A appended rules in the same chain.
 func checkOrInsert(args []string) error {
+	if err := adoptExactLegacy(args); err != nil {
+		return err
+	}
 	if exec.Command("iptables", buildCheck(args)...).Run() == nil {
 		return nil
 	}
 	insertArgs := replaceAction(args, "-I")
-	out, err := exec.Command("iptables", insertArgs...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("iptables %s: %w — %s", strings.Join(insertArgs, " "), err, out)
-	}
-	return nil
+	return firewall.Insert(context.Background(), insertArgs)
 }
 
 func portRangeForIptables(start, end int) string {
@@ -254,9 +283,18 @@ func vpnPeerDeleteArgs(srcIP, table, savedRules string) [][]string {
 		if !matched {
 			continue
 		}
+		if strings.Contains(line, "--comment") && !strings.Contains(line, "wirewarp-vpn-peer") {
+			continue
+		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
+		}
+		if table == "filter" && (fields[1] != "FORWARD" || !strings.Contains(line, " -j ACCEPT")) || table == "nat" && (fields[1] != "POSTROUTING" || !strings.Contains(line, " -j MASQUERADE")) {
+			continue
+		}
+		for i := range fields {
+			fields[i] = strings.Trim(fields[i], `"`)
 		}
 		fields[0] = "-D"
 		commands = append(commands, append([]string{"-t", table}, fields...))

@@ -99,12 +99,12 @@ func HealAttachment(cfg GatewayConfig) (healed []string, firstErr error) {
 	// 8. NAT POSTROUTING MASQUERADE for tunnel-ingress traffic toward LAN.
 	if cfg.LANIface != "" && cfg.TunnelIface != "" {
 		if cfg.WGSubnet != "" {
-			_ = exec.Command("iptables",
+			_ = gatewayCommand(
 				"-t", "nat", "-D", "POSTROUTING",
 				"-s", cfg.WGSubnet, "-o", cfg.LANIface, "-j", "MASQUERADE",
 			).Run()
 		}
-		_ = exec.Command("iptables",
+		_ = gatewayCommand(
 			"-t", "nat", "-D", "POSTROUTING",
 			"-i", cfg.TunnelIface, "-o", cfg.LANIface, "-j", "MASQUERADE",
 		).Run()
@@ -116,14 +116,14 @@ func HealAttachment(cfg GatewayConfig) (healed []string, firstErr error) {
 		} else {
 			checkArgs := iptablesAction(rule, "-C")
 			insertArgs := iptablesAction(rule, "-A")
-			if exec.Command("iptables", checkArgs...).Run() != nil {
+			if gatewayCommand(checkArgs...).Run() != nil {
 				record("nat-masquerade", iptE(insertArgs...))
 			}
 		}
 	}
 
 	// 9. mangle POSTROUTING MSS clamp.
-	if exec.Command("iptables",
+	if gatewayCommand(
 		"-t", "mangle", "-C", "POSTROUTING",
 		"-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
 		"-o", cfg.TunnelIface, "-j", "TCPMSS", "--clamp-mss-to-pmtu",
@@ -136,14 +136,19 @@ func HealAttachment(cfg GatewayConfig) (healed []string, firstErr error) {
 	}
 
 	// 10. DOCKER-USER pass-through, only for gateway-mode attachments where
+	for _, rule := range gatewayForwardRules(cfg) {
+		if gatewayCommand(iptablesAction(rule, "-C")...).Run() != nil {
+			record("gateway-forward", iptE(iptablesAction(rule, "-I")...))
+		}
+	}
 	// the chain exists.
 	if cfg.IsGateway && dockerUserChainExists() {
 		inRule := gatewayDockerUserRule(cfg.TunnelIface, cfg.LANIface, true)
-		if exec.Command("iptables", iptablesAction(inRule, "-C")...).Run() != nil {
+		if gatewayCommand(iptablesAction(inRule, "-C")...).Run() != nil {
 			record("docker-user-in", iptE(iptablesAction(inRule, "-I")...))
 		}
 		outRule := gatewayDockerUserRule(cfg.LANIface, cfg.TunnelIface, true)
-		if exec.Command("iptables", iptablesAction(outRule, "-C")...).Run() != nil {
+		if gatewayCommand(iptablesAction(outRule, "-C")...).Run() != nil {
 			record("docker-user-out", iptE(iptablesAction(outRule, "-I")...))
 		}
 	}
@@ -186,7 +191,7 @@ func ensureSysctls(tunnelIface, lanIface string) (changed bool, err error) {
 // surfaces the diff for the heal log.
 func ensureOutputConnmarkAndReport() (healed []string, err error) {
 	outputArgs := []string{"-t", "mangle", "OUTPUT", "-j", "CONNMARK", "--restore-mark"}
-	if exec.Command("iptables", iptablesAction(outputArgs, "-C")...).Run() != nil {
+	if gatewayCommand(iptablesAction(outputArgs, "-C")...).Run() != nil {
 		if e := iptE(iptablesAction(outputArgs, "-A")...); e != nil {
 			return healed, e
 		}
@@ -194,7 +199,7 @@ func ensureOutputConnmarkAndReport() (healed []string, err error) {
 	}
 
 	preArgs := []string{"-t", "mangle", "PREROUTING", "!", "-i", "wg+", "-j", "CONNMARK", "--restore-mark"}
-	if exec.Command("iptables", iptablesAction(preArgs, "-C")...).Run() != nil {
+	if gatewayCommand(iptablesAction(preArgs, "-C")...).Run() != nil {
 		if e := iptE(iptablesAction(preArgs, "-A")...); e != nil {
 			return healed, e
 		}
@@ -262,7 +267,7 @@ func ipRuleExists(cfg GatewayConfig) bool {
 // mangleSetConnmarkExists checks for the per-attachment CONNMARK --set-mark
 // rule that tags inbound tunnel packets with the attachment's fwmark.
 func mangleSetConnmarkExists(cfg GatewayConfig) bool {
-	return exec.Command("iptables",
+	return gatewayCommand(
 		"-t", "mangle", "-C", "PREROUTING",
 		"-i", cfg.TunnelIface,
 		"-j", "CONNMARK", "--set-mark", cfg.Fwmark,

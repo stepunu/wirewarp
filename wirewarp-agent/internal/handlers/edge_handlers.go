@@ -10,6 +10,7 @@ import (
 
 	"github.com/wirewarp/agent/internal/config"
 	"github.com/wirewarp/agent/internal/executor"
+	"github.com/wirewarp/agent/internal/firewall"
 )
 
 // EdgeHandlers manages HTTP edge services independently of tunnel networking.
@@ -31,7 +32,18 @@ func NewEdge(cfg *config.Config, cfgPath string) *EdgeHandlers {
 	h := &EdgeHandlers{cfg: cfg, cfgPath: cfgPath}
 	h.applyDesired = h.reconcileDesiredEdge
 	h.applyTraefik = h.reconcileEdgeTraefik
-	h.applyIngress = reconcileEdgeIngress
+	h.applyIngress = func(ctx context.Context, ingress []config.EdgePublicIngress) error {
+		if err := preflightFirewallOwnership(ctx, cfg.Snapshot()); err != nil {
+			return err
+		}
+		if err := reconcileEdgeIngress(ctx, ingress); err != nil {
+			return err
+		}
+		if err := firewall.Save(ctx); err != nil {
+			return fmt.Errorf("edge ingress changed but persistence failed: %w", err)
+		}
+		return nil
+	}
 	h.ensureACMEHook = EnsureACMEDNSHook
 	h.snapshotRuntime = func() (func() error, error) {
 		return snapshotEdgeFiles([]string{traefikStaticCfg, traefikDynamicCfg, traefikUnitPath, traefikEnvPath, traefikCFTokenPath, "/etc/traefik/secrets/rfc2136_tsig_secret", traefikEnvPath + ".pending-restart", nginxCacheConfigPath, ACMEHookPath})

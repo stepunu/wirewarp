@@ -310,7 +310,7 @@ func (h *ClientHandlers) handleWGDetach(raw json.RawMessage) (string, error) {
 	if saved != nil {
 		gwCfg := h.buildGatewayConfig(saved)
 		if err := wireguard.TeardownGatewayRouting(gwCfg); err != nil {
-			log.Printf("[client] WARN: teardown gateway routing for %s: %v", iface, err)
+			return "", fmt.Errorf("teardown gateway routing for %s: %w", iface, err)
 		}
 	} else {
 		// Best-effort teardown using the params we received.
@@ -321,7 +321,9 @@ func (h *ClientHandlers) handleWGDetach(raw json.RawMessage) (string, error) {
 			RouteTableID:  fmt.Sprintf("%d", p.RouteTableID),
 			ReplyPriority: replyPriorityForIface(iface),
 		}
-		wireguard.TeardownGatewayRouting(gwCfg) //nolint:errcheck
+		if err := wireguard.TeardownGatewayRouting(gwCfg); err != nil {
+			return "", err
+		}
 	}
 
 	if wg, ok := h.wgs[iface]; ok {
@@ -338,7 +340,12 @@ func (h *ClientHandlers) handleWGDetach(raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("attachment network removed but config save failed: %w", err)
 	}
 	if saveErr := wireguard.SaveIPTables(); saveErr != nil {
-		log.Printf("[client] WARN: iptables save failed: %v", saveErr)
+		if saved != nil {
+			if err := h.cfg.UpdateAndSave(h.cfgPath, func(next *config.Config) error { next.UpsertAttachment(*saved); return nil }); err != nil {
+				return "", fmt.Errorf("attachment detached but firewall persistence failed: %w; restore attachment intent failed: %v", saveErr, err)
+			}
+		}
+		return "", fmt.Errorf("attachment detached but firewall persistence failed: %w", saveErr)
 	}
 
 	return fmt.Sprintf("attachment %s detached", iface), nil

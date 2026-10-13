@@ -57,6 +57,31 @@ fi
 BINARY_URL="https://github.com/stepunu/wirewarp/raw/main/wirewarp-agent/dist/wirewarp-agent"
 SERVICE_URL="https://raw.githubusercontent.com/stepunu/wirewarp/main/wirewarp-agent/scripts/wirewarp-agent.service"
 
+# Choose persistence before stopping services or changing packages.
+wirewarp_select_persistence() {
+  local ufw_config="$1" ufw_defaults="$2" enabled manage
+  PRESERVE_UFW=0
+  if [[ ! -e "$ufw_config" ]]; then return 0; fi
+  if [[ ! -f "$ufw_config" || ! -r "$ufw_config" ]]; then
+    echo "Cannot read UFW enablement. Installation stopped before any changes." >&2
+    return 1
+  fi
+  if ! enabled=$(awk -F= '/^[[:space:]]*ENABLED[[:space:]]*=/ {sub(/#.*/,"",$2); gsub(/[[:space:]\047\042]/,"",$2); value=tolower($2)} END {print value}' "$ufw_config"); then return 1; fi
+  if [[ "$enabled" != yes && "$enabled" != no ]]; then
+    echo "Cannot determine UFW enablement. Installation stopped before any changes." >&2
+    return 1
+  fi
+  if [[ "$enabled" == yes ]]; then
+    manage=$(awk -F= '/^[[:space:]]*MANAGE_BUILTINS[[:space:]]*=/ {sub(/#.*/,"",$2); gsub(/[[:space:]\047\042]/,"",$2); value=tolower($2)} END {print value}' "$ufw_defaults" 2>/dev/null || true)
+    if [[ "$manage" != no ]]; then
+      echo "Enabled UFW requires MANAGE_BUILTINS=no. Installation stopped before any changes." >&2
+      return 1
+    fi
+    PRESERVE_UFW=1
+  fi
+}
+wirewarp_select_persistence /etc/ufw/ufw.conf /etc/default/ufw
+
 # If a previous install is present, stop it cleanly so we can overwrite the
 # binary without ETXTBSY ("text file busy") and so the new agent comes up with
 # fresh state. The WireGuard private key at /etc/wireguard/wg0.key is preserved.
@@ -84,8 +109,12 @@ echo "==> Installing dependencies..."
 if command -v apt-get &>/dev/null; then
   apt-get update -qq
   apt-get install -y -qq curl wireguard-tools iptables iproute2 conntrack >/dev/null
-  # netfilter-persistent for iptables save (optional, noninteractive)
-  apt-get install -y -qq netfilter-persistent iptables-persistent >/dev/null 2>&1 || true
+  if [[ "$PRESERVE_UFW" == 1 ]]; then
+    echo "==> Preserving UFW. WireWarp will use owned firewall persistence."
+  elif ! apt-get install -y -qq netfilter-persistent iptables-persistent; then
+    echo "Traditional firewall persistence installation failed. Resolve the package error before retrying." >&2
+    exit 1
+  fi
 elif command -v dnf &>/dev/null; then
   dnf install -y -q curl wireguard-tools iptables iproute conntrack-tools >/dev/null
 elif command -v yum &>/dev/null; then

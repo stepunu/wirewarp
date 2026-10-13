@@ -186,6 +186,7 @@ func TestConfigureWGInitRuntimeReturnsNewMasqueradeFailure(t *testing.T) {
 	iptablesPath := filepath.Join(binDir, "iptables")
 	if err := os.WriteFile(iptablesPath, []byte(`#!/bin/sh
 case "$*" in
+  "-t nat -C POSTROUTING -o eth1 -j MASQUERADE") exit 1 ;;
   "-t nat -C POSTROUTING -o eth1 -m comment --comment wirewarp-server-masquerade -j MASQUERADE") exit 1 ;;
   "-t nat -A POSTROUTING -o eth1 -m comment --comment wirewarp-server-masquerade -j MASQUERADE") echo masquerade-failed; exit 2 ;;
 esac

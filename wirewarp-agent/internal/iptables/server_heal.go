@@ -40,30 +40,15 @@ func HealServerNetwork(publicIface, wgIface string) (healed []string, firstErr e
 	}
 
 	if publicIface != "" {
-		if exec.Command("iptables",
-			"-t", "nat", "-C", "POSTROUTING",
-			"-o", publicIface, "-j", "MASQUERADE",
-		).Run() != nil {
-			record("nat-masquerade", appendRule(
-				"-t", "nat", "POSTROUTING",
-				"-o", publicIface, "-j", "MASQUERADE",
-			))
+		args := serverMasqueradeArgs(publicIface)
+		if exec.Command("iptables", buildCheck(args)...).Run() != nil {
+			record("nat-masquerade", EnsureMasquerade(publicIface))
 		}
 	}
-
 	if wgIface != "" {
-		if exec.Command("iptables",
-			"-t", "mangle", "-C", "POSTROUTING",
-			"-o", wgIface,
-			"-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-			"-j", "TCPMSS", "--clamp-mss-to-pmtu",
-		).Run() != nil {
-			record("mss-clamp", appendRule(
-				"-t", "mangle", "POSTROUTING",
-				"-o", wgIface,
-				"-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
-				"-j", "TCPMSS", "--clamp-mss-to-pmtu",
-			))
+		args := []string{"-t", "mangle", "POSTROUTING", "-o", wgIface, "-m", "comment", "--comment", "wirewarp-server-mss", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"}
+		if exec.Command("iptables", buildCheck(args)...).Run() != nil {
+			record("mss-clamp", EnsureMSSClamp(wgIface))
 		}
 	}
 
@@ -82,15 +67,4 @@ func ensureIPForward() (changed bool, err error) {
 		return false, fmt.Errorf("sysctl -w ip_forward: %w — %s", setErr, out)
 	}
 	return true, nil
-}
-
-// appendRule runs `iptables -A <chain> <args>` and turns the table-prefix
-// args into an -A invocation via the existing replaceAction helper.
-func appendRule(args ...string) error {
-	insertArgs := buildInsert(args)
-	out, err := exec.Command("iptables", insertArgs...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("iptables %s: %w — %s", strings.Join(insertArgs, " "), err, out)
-	}
-	return nil
 }

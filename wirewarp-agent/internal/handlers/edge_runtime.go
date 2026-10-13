@@ -374,5 +374,8 @@ func edgeIngressRules(ingress []config.EdgePublicIngress) []string {
 		rules = append(rules, fmt.Sprintf("-A %s -i lo -s %s/32 -d %s/32 -p tcp -m multiport --dports 80,443 -j ACCEPT", edgeIngressChain, ip, ip))
 		rules = append(rules, fmt.Sprintf("-A %s -d %s/32 -p tcp -m multiport --dports 80,443 -j DROP", edgeIngressChain, ip))
 	}
+	for i, line := range rules {
+		rules[i] = strings.Replace(line, " -j ", " -m comment --comment "+edgeIngressComment+" -j ", 1)
+	}
 	return rules
 }

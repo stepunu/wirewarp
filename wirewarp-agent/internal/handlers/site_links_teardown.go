@@ -7,14 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/wirewarp/agent/internal/config"
+	"github.com/wirewarp/agent/internal/firewall"
 )
 
 type siteTeardownParams struct {
@@ -91,25 +89,7 @@ func (h *SiteLinkHandlers) handleTeardown(raw json.RawMessage) (string, error) {
 }
 
 func persistSiteFirewall(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	bin := resolveBin("netfilter-persistent", "/usr/sbin/netfilter-persistent", "/sbin/netfilter-persistent")
-	cmd := exec.CommandContext(ctx, bin, "save")
-	// Save plugins are child processes. Cancel the exact command group so a
-	// timed-out plugin cannot save old rules after guard rollback.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
-		}
-		return err
-	}
-	cmd.WaitDelay = time.Second
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("persist site-link firewall: %w: %s", err, tail(out, 6))
-	}
-	return nil
+	return firewall.Save(ctx)
 }
 
 // Inspect both tables before committing either. Unknown references and foreign

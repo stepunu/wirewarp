@@ -15,8 +15,8 @@ func TestBuildVpnPeerPlanSplitUsesOnlyPermissionRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := [][]string{
-		{"FORWARD", "-s", "10.21.0.2/32", "-d", "192.168.1.0/24", "-j", "ACCEPT"},
-		{"FORWARD", "-s", "10.21.0.2/32", "-d", "192.168.2.20", "-p", "tcp", "--dport", "443", "-j", "ACCEPT"},
+		{"FORWARD", "-s", "10.21.0.2/32", "-d", "192.168.1.0/24", "-m", "comment", "--comment", "wirewarp-vpn-peer", "-j", "ACCEPT"},
+		{"FORWARD", "-s", "10.21.0.2/32", "-d", "192.168.2.20", "-p", "tcp", "--dport", "443", "-m", "comment", "--comment", "wirewarp-vpn-peer", "-j", "ACCEPT"},
 	}
 	if !reflect.DeepEqual(plan.acceptRules, want) {
 		t.Fatalf("split accept rules:\nwant %#v\n got %#v", want, plan.acceptRules)
@@ -34,19 +34,19 @@ func TestBuildVpnPeerPlanFullScopesInternetAcceptToWan(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantWan := []string{
-		"FORWARD", "-s", "10.21.0.3/32", "-o", "eth0", "-j", "ACCEPT",
+		"FORWARD", "-s", "10.21.0.3/32", "-o", "eth0", "-m", "comment", "--comment", "wirewarp-vpn-peer", "-j", "ACCEPT",
 	}
 	if !reflect.DeepEqual(plan.acceptRules[1], wantWan) {
 		t.Fatalf("WAN accept:\nwant %#v\n got %#v", wantWan, plan.acceptRules[1])
 	}
-	blanket := []string{"FORWARD", "-s", "10.21.0.3/32", "-j", "ACCEPT"}
+	blanket := []string{"FORWARD", "-s", "10.21.0.3/32", "-m", "comment", "--comment", "wirewarp-vpn-peer", "-j", "ACCEPT"}
 	for _, rule := range plan.acceptRules {
 		if reflect.DeepEqual(rule, blanket) {
 			t.Fatalf("full plan contains blanket source-only ACCEPT: %#v", rule)
 		}
 	}
 	wantMasquerade := []string{
-		"-t", "nat", "POSTROUTING", "-s", "10.21.0.3/32", "-o", "eth0", "-j", "MASQUERADE",
+		"-t", "nat", "POSTROUTING", "-s", "10.21.0.3/32", "-o", "eth0", "-m", "comment", "--comment", "wirewarp-vpn-peer", "-j", "MASQUERADE",
 	}
 	if !reflect.DeepEqual(plan.masqueradeRule, wantMasquerade) {
 		t.Fatalf("masquerade:\nwant %#v\n got %#v", wantMasquerade, plan.masqueradeRule)

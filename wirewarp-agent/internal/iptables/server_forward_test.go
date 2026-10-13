@@ -75,7 +75,7 @@ func TestRemoveForwardAndSaveRestoresExactRulesAfterSaveFailure(t *testing.T) {
 	want := []string{
 		testDNATCheck(), testForwardCheck(),
 		testDNATCheck(), testDNATDelete(), testForwardCheck(), testForwardDelete(),
-		testDNATCheck(), testDNATAppend(), testForwardCheck(), testForwardAppend(),
+		testDNATCheck(), strings.ReplaceAll(testDNATCheck(), " -m comment --comment wirewarp-raw-forward", ""), testDNATCheck(), testDNATAppend(), testForwardCheck(), strings.ReplaceAll(testForwardCheck(), " -m comment --comment wirewarp-raw-forward", ""), testForwardCheck(), "-w 5 -t filter -S FORWARD", testForwardAppend(),
 		testDNATCheck(), testDNATDelete(), testForwardCheck(), testForwardDelete(),
 	}
 	assertForwardCommandLog(t, logPath, want)
@@ -92,7 +92,7 @@ func TestRemoveForwardAndSaveReportsRollbackFailure(t *testing.T) {
 	want := []string{
 		testDNATCheck(), testForwardCheck(),
 		testDNATCheck(), testDNATDelete(), testForwardCheck(), testForwardDelete(),
-		testDNATCheck(), testDNATAppend(), testForwardCheck(), testForwardAppend(),
+		testDNATCheck(), strings.ReplaceAll(testDNATCheck(), " -m comment --comment wirewarp-raw-forward", ""), testDNATCheck(), testDNATAppend(), testForwardCheck(), strings.ReplaceAll(testForwardCheck(), " -m comment --comment wirewarp-raw-forward", ""), testForwardCheck(), "-w 5 -t filter -S FORWARD", testForwardAppend(),
 	}
 	assertForwardCommandLog(t, logPath, want)
 }
@@ -109,11 +109,16 @@ func installForwardIPTablesStub(t *testing.T, dnatPresent, forwardPresent bool, 
 	iptablesPath := filepath.Join(binDir, "iptables")
 	stub := `#!/bin/sh
 printf '%s\n' "$*" >> "$IPTABLES_LOG"
+case "$*" in
+  "-w 5 -t filter -S FORWARD") exit 0 ;;
+  *--comment*) ;;
+  *) exit 1 ;;
+esac
 action=""
 chain=""
 for value in "$@"; do
   case "$value" in
-    -C|-D|-A) action="$value" ;;
+    -C|-D|-A|-I) action="$value" ;;
     PREROUTING|FORWARD) chain="$value" ;;
   esac
 done
@@ -143,7 +148,7 @@ if [ "$action" = "-D" ]; then
   printf '0\n' > "$state_path"
   exit 0
 fi
-if [ "$action" = "-A" ]; then
+if [ "$action" = "-A" ] || [ "$action" = "-I" ]; then
   if [ "$IPTABLES_FAIL" = "rollback-dnat" ] && [ "$failure" = "dnat" ]; then
     echo "restore failed"
     exit 2
@@ -201,27 +206,27 @@ func testForwardPublicIP() string {
 }
 
 func testDNATCheck() string {
-	return "-t nat -C PREROUTING -p tcp -j DNAT --to-destination 10.21.0.2:80 --dport 8080 -d 203.0.113.2"
+	return "-t nat -C PREROUTING -m comment --comment wirewarp-raw-forward -p tcp -j DNAT --to-destination 10.21.0.2:80 --dport 8080 -d 203.0.113.2"
 }
 
 func testDNATDelete() string {
-	return "-t nat -D PREROUTING -p tcp -j DNAT --to-destination 10.21.0.2:80 --dport 8080 -d 203.0.113.2"
+	return "-t nat -D PREROUTING -m comment --comment wirewarp-raw-forward -p tcp -j DNAT --to-destination 10.21.0.2:80 --dport 8080 -d 203.0.113.2"
 }
 
 func testDNATAppend() string {
-	return "-t nat -A PREROUTING -p tcp -j DNAT --to-destination 10.21.0.2:80 --dport 8080 -d 203.0.113.2"
+	return "-t nat -A PREROUTING -m comment --comment wirewarp-raw-forward -p tcp -j DNAT --to-destination 10.21.0.2:80 --dport 8080 -d 203.0.113.2"
 }
 
 func testForwardCheck() string {
-	return "-C FORWARD -p tcp -d 10.21.0.2 --dport 80 -j ACCEPT"
+	return "-C FORWARD -m comment --comment wirewarp-raw-forward -p tcp -d 10.21.0.2 --dport 80 -j ACCEPT"
 }
 
 func testForwardDelete() string {
-	return "-D FORWARD -p tcp -d 10.21.0.2 --dport 80 -j ACCEPT"
+	return "-D FORWARD -m comment --comment wirewarp-raw-forward -p tcp -d 10.21.0.2 --dport 80 -j ACCEPT"
 }
 
 func testForwardAppend() string {
-	return "-A FORWARD -p tcp -d 10.21.0.2 --dport 80 -j ACCEPT"
+	return "-I FORWARD 1 -m comment --comment wirewarp-raw-forward -p tcp -d 10.21.0.2 --dport 80 -j ACCEPT"
 }
 
 func assertForwardCommandLog(t *testing.T, logPath string, want []string) {

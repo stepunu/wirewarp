@@ -21,6 +21,7 @@ func TestGatewayLANMasqueradeRuleCoversAllTunnelIngress(t *testing.T) {
 		"-t", "nat", "POSTROUTING",
 		"-m", "connmark", "--mark", "0x102",
 		"-o", "eth0",
+		"-m", "comment", "--comment", "wirewarp-gateway-nat",
 		"-j", "MASQUERADE",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -135,6 +136,21 @@ func TestPlainClientReplayRemovesPersistedGatewayRules(t *testing.T) {
 	}
 }
 
+func TestDetachRemovesPresentDockerOwnedAndLegacyPair(t *testing.T) {
+	_, state := installGatewayOnlyIPTablesStub(t)
+	// The remaining routing rules are absent. Docker rules remain present.
+	if err := TeardownGatewayRouting(GatewayConfig{TunnelIface: "wg1", LANIface: "eth0", IsGateway: true}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "wirewarp-gateway-docker-user") || strings.Contains(string(data), "-i wg1 -o eth0 -j ACCEPT") || !strings.Contains(string(data), "operator-rule") {
+		t.Fatal("detach retained owned bypass or damaged foreign Docker rule", string(data))
+	}
+}
+
 func installGatewayOnlyIPTablesStub(t *testing.T) (string, string) {
 	t.Helper()
 	binDir := t.TempDir()
@@ -152,6 +168,11 @@ func installGatewayOnlyIPTablesStub(t *testing.T) (string, string) {
 	iptablesPath := filepath.Join(binDir, "iptables")
 	stub := `#!/bin/sh
 printf '%s\n' "$*" >> "$IPTABLES_LOG"
+if [ "$1" = "-t" ]; then
+  case "$*" in
+    "-t mangle -C PREROUTING "*|"-t mangle -C POSTROUTING "*|"-t nat -C POSTROUTING "*) exit 1 ;;
+  esac
+fi
 action="$1"
 shift
 rule="-A $*"

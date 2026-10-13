@@ -1,8 +1,10 @@
 package iptables
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"github.com/wirewarp/agent/internal/firewall"
 	"net/netip"
 	"os/exec"
 	"sort"
@@ -32,6 +34,9 @@ type ForwardRule struct {
 // AddForward adds a DNAT PREROUTING rule and a FORWARD rule for the given spec.
 // It checks for duplicates before inserting.
 func AddForward(publicIP string, r ForwardRule) error {
+	if err := firewall.Check(context.Background()); err != nil {
+		return err
+	}
 	preroute := dnatArgs(publicIP, r)
 	forward := forwardArgs(r)
 
@@ -68,6 +73,20 @@ func RemoveForwardAndSave(publicIP string, r ForwardRule) error {
 	forwardPresent, err := ruleExists(forward)
 	if err != nil {
 		return fmt.Errorf("inspect FORWARD rule: %w", err)
+	}
+	for _, item := range []struct {
+		args    []string
+		present *bool
+	}{{dnat, &dnatPresent}, {forward, &forwardPresent}} {
+		if !*item.present {
+			if err := adoptExactLegacy(item.args); err != nil {
+				return err
+			}
+			*item.present, err = ruleExists(item.args)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	if err := RemoveForward(publicIP, r); err != nil {
 		return err
@@ -149,7 +168,7 @@ func CleanupServerNAT(iface string) error {
 func EnsureMSSClamp(iface string) error {
 	args := []string{
 		"-t", "mangle", "POSTROUTING",
-		"-o", iface,
+		"-o", iface, "-m", "comment", "--comment", "wirewarp-server-mss",
 		"-p", "tcp",
 		"--tcp-flags", "SYN,RST", "SYN",
 		"-j", "TCPMSS",
@@ -443,6 +462,9 @@ func isIPv4Address(value string) bool {
 
 // EnableIPForward enables IPv4 packet forwarding via sysctl.
 func EnableIPForward() error {
+	if err := firewall.Check(context.Background()); err != nil {
+		return err
+	}
 	out, err := exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("sysctl ip_forward: %w — %s", err, out)
@@ -450,13 +472,9 @@ func EnableIPForward() error {
 	return nil
 }
 
-// SaveRules persists iptables rules via netfilter-persistent.
+// SaveRules selects the host's compatible persistence backend.
 func SaveRules() error {
-	out, err := exec.Command("netfilter-persistent", "save").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("netfilter-persistent save: %w — %s", err, out)
-	}
-	return nil
+	return firewall.Save(context.Background())
 }
 
 // --- helpers ---
@@ -477,6 +495,7 @@ func dnatArgs(publicIP string, r ForwardRule) []string {
 		dport = fmt.Sprintf("%d", r.PublicPort)
 	}
 	args := []string{"-t", "nat", "PREROUTING",
+		"-m", "comment", "--comment", "wirewarp-raw-forward",
 		"-p", r.Protocol,
 		"-j", "DNAT",
 		"--to-destination", dst,
@@ -496,6 +515,7 @@ func forwardArgs(r ForwardRule) []string {
 		dport = fmt.Sprintf("%d", r.DestPort)
 	}
 	return []string{"FORWARD",
+		"-m", "comment", "--comment", "wirewarp-raw-forward",
 		"-p", r.Protocol,
 		"-d", r.DestIP,
 		"--dport", dport,
@@ -505,18 +525,55 @@ func forwardArgs(r ForwardRule) []string {
 
 // checkOrAppend uses `iptables -C` to check; inserts with `-A` if absent.
 func checkOrAppend(args []string) error {
+	if err := firewall.Check(context.Background()); err != nil {
+		return err
+	}
 	// Build check args: replace the chain position (index 1 in args, after optional -t table)
 	// args format is either: ["-t", "nat", "CHAIN", ...flags] or ["CHAIN", ...flags]
 	checkArgs := buildCheck(args)
 	if exec.Command("iptables", checkArgs...).Run() == nil {
 		return nil // already present
 	}
+	if err := adoptExactLegacy(args); err != nil {
+		return err
+	}
+	if exec.Command("iptables", checkArgs...).Run() == nil {
+		return nil
+	}
 	insertArgs := buildInsert(args)
+	if len(args) > 0 && args[0] == "FORWARD" {
+		return firewall.Insert(context.Background(), insertArgs)
+	}
 	out, err := exec.Command("iptables", insertArgs...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("iptables %s: %w — %s", strings.Join(insertArgs, " "), err, out)
 	}
 	return nil
+}
+
+// Only the caller's exact validated tuple can adopt an untagged legacy rule.
+func adoptExactLegacy(args []string) error {
+	legacy := firewall.WithoutOwnership(args)
+	if strings.Join(legacy, " ") == strings.Join(args, " ") {
+		return nil
+	}
+	present, err := ruleExists(legacy)
+	if err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
+	if len(args) > 0 && args[0] == "FORWARD" {
+		if err := firewall.Insert(context.Background(), buildInsert(args)); err != nil {
+			return err
+		}
+		return deleteRuleIfPresent(legacy)
+	}
+	if _, err := exec.Command("iptables", buildInsert(args)...).CombinedOutput(); err != nil {
+		return fmt.Errorf("adopt exact legacy firewall rule: %w", err)
+	}
+	return deleteRuleIfPresent(legacy)
 }
 
 func deleteRule(args []string) {

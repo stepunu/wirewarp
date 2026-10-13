@@ -104,6 +104,11 @@ func siteFirewallRules(saved *config.Config, p *config.SiteLinkSnapshot, peers [
 			rules[chain] = append(rules[chain], "-A "+chain+" -s "+subnet+" -j WW-SITE-DST")
 		}
 	}
+	for chain, list := range rules {
+		for i, line := range list {
+			rules[chain][i] = strings.Replace(line, " -j ", " -m comment --comment "+siteComment+" -j ", 1)
+		}
+	}
 	return rules
 }
 

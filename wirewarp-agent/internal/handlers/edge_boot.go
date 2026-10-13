@@ -36,6 +36,9 @@ func RestoreEdgeIngressGuard(ctx context.Context, cfg *config.Config) error {
 	if len(guard) == 0 {
 		return nil
 	}
+	if err := preflightFirewallOwnership(ctx, saved); err != nil {
+		return err
+	}
 	return reconcileEdgeIngress(ctx, guard)
 }
 

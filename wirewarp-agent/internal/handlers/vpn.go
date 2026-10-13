@@ -155,6 +155,9 @@ func (h *VpnHandlers) handleEndpointUp(raw json.RawMessage) (string, error) {
 	}
 
 	pub := h.PublicKeyFor(p.Interface)
+	if err := iptables.SaveRules(); err != nil {
+		return "", fmt.Errorf("VPN endpoint started but firewall persistence failed: %w", err)
+	}
 	return fmt.Sprintf("vpn endpoint %s up; public key: %s", p.Interface, pub), nil
 }
 
@@ -186,10 +189,14 @@ func (h *VpnHandlers) handleEndpointDown(raw json.RawMessage) (string, error) {
 
 	saved := h.cfg.Snapshot().FindVpnEndpoint(p.Interface)
 	if saved != nil {
-		_ = iptables.VpnRemoveDefaultDrop(saved.VpnNetwork)
+		if err := iptables.VpnRemoveDefaultDrop(saved.VpnNetwork); err != nil {
+			return "", fmt.Errorf("VPN endpoint stopped but default-drop cleanup failed: %w", err)
+		}
 		removeVpnRoutingRule(saved.VpnNetwork)
 	}
-	iptables.VpnRemoveMSSClamp(p.Interface, vpnMSS)
+	if err := iptables.VpnRemoveMSSClamp(p.Interface, vpnMSS); err != nil {
+		return "", fmt.Errorf("VPN endpoint stopped but MSS cleanup failed: %w", err)
+	}
 
 	if err := h.cfg.UpdateAndSave(h.cfgPath, func(next *config.Config) error {
 		next.RemoveVpnEndpoint(p.Interface)
@@ -198,7 +205,7 @@ func (h *VpnHandlers) handleEndpointDown(raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("VPN endpoint stopped but config save failed: %w", err)
 	}
 	if saveErr := iptables.SaveRules(); saveErr != nil {
-		log.Printf("[vpn] WARN: iptables save failed: %v", saveErr)
+		return "", fmt.Errorf("VPN runtime changed but firewall persistence failed: %w", saveErr)
 	}
 	return fmt.Sprintf("vpn endpoint %s down", p.Interface), nil
 }
@@ -274,11 +281,11 @@ func (h *VpnHandlers) handlePeerAdd(raw json.RawMessage) (string, error) {
 	}
 	if p.VpnNetwork != "" {
 		if err := iptables.VpnEnsureDefaultDrop(p.VpnNetwork); err != nil {
-			log.Printf("[vpn] WARN: ensuring default-drop for %s: %v", p.VpnNetwork, err)
+			return "", fmt.Errorf("VPN peer changed but default-drop failed: %w", err)
 		}
 	}
 	if saveErr := iptables.SaveRules(); saveErr != nil {
-		log.Printf("[vpn] WARN: iptables save failed: %v", saveErr)
+		return "", fmt.Errorf("VPN runtime changed but firewall persistence failed: %w", saveErr)
 	}
 	return fmt.Sprintf("vpn peer %s added at %s with %d rule(s)", p.PublicKey[:8], p.TunnelIP, len(rules)), nil
 }
@@ -323,7 +330,7 @@ func (h *VpnHandlers) handlePeerRemove(raw json.RawMessage) (string, error) {
 		}
 	}
 	if saveErr := iptables.SaveRules(); saveErr != nil {
-		log.Printf("[vpn] WARN: iptables save failed: %v", saveErr)
+		return "", fmt.Errorf("VPN runtime changed but firewall persistence failed: %w", saveErr)
 	}
 	return fmt.Sprintf("vpn peer %s removed", p.PublicKey[:8]), nil
 }
@@ -366,10 +373,12 @@ func (h *VpnHandlers) handlePeerUpdateRules(raw json.RawMessage) (string, error)
 		return "", err
 	}
 	if p.VpnNetwork != "" {
-		_ = iptables.VpnEnsureDefaultDrop(p.VpnNetwork)
+		if err := iptables.VpnEnsureDefaultDrop(p.VpnNetwork); err != nil {
+			return "", fmt.Errorf("VPN rules changed but default-drop failed: %w", err)
+		}
 	}
 	if saveErr := iptables.SaveRules(); saveErr != nil {
-		log.Printf("[vpn] WARN: iptables save failed: %v", saveErr)
+		return "", fmt.Errorf("VPN runtime changed but firewall persistence failed: %w", saveErr)
 	}
 	return fmt.Sprintf("vpn peer rules for %s updated (%d rule(s))", p.TunnelIP, len(rules)), nil
 }
@@ -392,18 +401,20 @@ func (h *VpnHandlers) bringEndpointUp(ep *config.VpnEndpointState) error {
 	}
 
 	if err := iptables.EnableIPForward(); err != nil {
-		log.Printf("[vpn] WARN: %v", err)
+		return err
 	}
 	if err := iptables.VpnEnsureDefaultDrop(ep.VpnNetwork); err != nil {
-		log.Printf("[vpn] WARN: vpn default-drop: %v", err)
+		return fmt.Errorf("VPN default-drop: %w", err)
 	}
 	// Flush any stale MSS-clamp rules (from a prior agent run with a
 	// different mss value, or hand-applied via SSH during incident
 	// response) before installing the canonical pair. Avoids stacked
 	// duplicates on every restart.
-	iptables.VpnFlushMSSClamps(ep.WGInterface)
+	if err := iptables.VpnFlushMSSClamps(ep.WGInterface, vpnMSS); err != nil {
+		return err
+	}
 	if err := iptables.VpnEnsureMSSClamp(ep.WGInterface, vpnMSS); err != nil {
-		log.Printf("[vpn] WARN: mss clamp: %v", err)
+		return fmt.Errorf("VPN MSS clamp: %w", err)
 	}
 
 	// Critical: when this gateway also hosts wirewarp tunnel-attachment

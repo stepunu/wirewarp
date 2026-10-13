@@ -47,12 +47,25 @@ func main() {
 	restoreRouting := flag.Bool("restore-routing", false,
 		"Run as oneshot: re-install routing state from saved config and exit (used by wirewarp-routing.service)")
 	restoreEdge := flag.Bool("restore-edge-ingress", false, "Restore the edge guard before Traefik startup and exit")
+	restoreFirewall := flag.Bool("restore-firewall", false, "Restore owned firewall state without the controller and exit")
 	flag.Parse()
+	if *restoreFirewall {
+		cfg, err := config.Load(*cfgPath)
+		if err != nil {
+			log.Fatal("Cannot load owned firewall config")
+		}
+		handlers.ConfigureFirewallPersistence(cfg, *cfgPath)
+		if err := handlers.RestoreFirewall(cfg); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if *restoreEdge {
 		cfg, err := config.Load(*cfgPath)
 		if err != nil {
 			log.Fatal("Cannot load saved edge guard config")
 		}
+		handlers.ConfigureFirewallPersistence(cfg, *cfgPath)
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		if err := handlers.PrepareEdgeStart(ctx, cfg); err != nil {
@@ -102,6 +115,10 @@ func main() {
 	}
 
 	log.Printf("Starting WireWarp agent (mode=%s, version=%s)", cfg.Mode, version)
+	handlers.ConfigureFirewallPersistence(cfg, *cfgPath)
+	if err := handlers.RestoreFirewall(cfg); err != nil {
+		log.Fatalf("Failed to restore owned firewall: %v", err)
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -109,16 +126,6 @@ func main() {
 	client := wsclient.New(cfg, *cfgPath, version)
 	siteLinks := handlers.NewSiteLinks(cfg, *cfgPath)
 	siteLinks.SetEmit(client.Emit)
-	guardCtx, guardCancel := context.WithTimeout(ctx, 20*time.Second)
-	if err := handlers.RestoreEdgeIngressGuard(guardCtx, cfg); err != nil {
-		guardCancel()
-		log.Fatalf("Failed to restore edge ingress guard: %v", err)
-	}
-	guardErr := handlers.RestoreSiteLinkGuard(guardCtx, cfg)
-	guardCancel()
-	if guardErr != nil {
-		log.Fatalf("Failed to restore site-link guard: %v", guardErr)
-	}
 
 	// shutdownFn is called after the WebSocket loop exits to clean up.
 	var shutdownFn func()
@@ -194,6 +201,7 @@ func runRestoreRouting(cfgPath string) {
 		}
 		log.Fatalf("[restore-routing] failed to load config: %v", err)
 	}
+	handlers.ConfigureFirewallPersistence(cfg, cfgPath)
 	if err := handlers.RestoreRouting(cfg); err != nil {
 		log.Fatalf("[restore-routing] %v", err)
 	}

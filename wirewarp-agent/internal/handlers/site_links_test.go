@@ -352,6 +352,9 @@ func TestSitePolicyJSONPrefixLengthsAreNormalized(t *testing.T) {
 }
 
 func TestSiteGatewayPeerInstallsDenyGuardBeforeAdmission(t *testing.T) {
+	oldPreflight := firewallOwnershipPreflight
+	t.Cleanup(func() { firewallOwnershipPreflight = oldPreflight })
+	firewallOwnershipPreflight = func(context.Context, map[string][]string) error { return nil }
 	cfg, p := siteFixture("hub")
 	cfg.SiteLinkDesired = p
 	oldRun, oldRestore := edgeIPTables, edgeIPTablesRestore
