@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"sort"
 	"strings"
@@ -109,7 +110,13 @@ func (t acmeDNSTester) run(ctx context.Context, p ACMEDNSTestParams) (result ACM
 	result.RecordName = "_acme-challenge." + domain + "."
 	result.Stage = "discovery"
 	result.Detail = "Could not discover the authoritative zone and servers."
-	zone, servers, err := t.discover(ctx, domain+".", p.Credentials.RFC2136Nameserver)
+	owner, err := acmeDNSEffectiveOwner(ctx, p.Credentials.RFC2136Nameserver, result.RecordName)
+	if err != nil {
+		result.Detail = "Could not resolve the authoritative challenge CNAME chain. Check its target, authority, and length."
+		return result
+	}
+	result.RecordName = owner
+	zone, servers, err := t.discover(ctx, owner, p.Credentials.RFC2136Nameserver)
 	if err != nil || len(servers) == 0 {
 		return result
 	}
@@ -136,6 +143,7 @@ func (t acmeDNSTester) run(ctx context.Context, p ACMEDNSTestParams) (result ACM
 	result.Stage = "update"
 	result.Detail = "The signed DNS update failed or was denied."
 	if err := signedACMEUpdate(ctx, zone, record, p.Credentials, false); err != nil {
+		result.Detail = err.Error()
 		return result
 	}
 	result.Stage = "propagation"
@@ -193,6 +201,36 @@ func validACMEDomain(domain string) bool {
 type acmeNameServer struct {
 	name      string
 	addresses []string
+}
+
+// The exec certificate provider also writes at the effective challenge owner.
+func acmeDNSEffectiveOwner(ctx context.Context, primary, name string) (string, error) {
+	seen := map[string]bool{}
+	for hops := 0; hops < 8; hops++ {
+		name = dns.CanonicalName(name)
+		if !validACMEHookName(name) || seen[name] {
+			return "", errors.New("invalid or cyclic challenge CNAME")
+		}
+		seen[name] = true
+		response, err := queryACMEDNS(ctx, primary, name, dns.TypeCNAME)
+		if err != nil || !response.Authoritative || response.Rcode != dns.RcodeSuccess && response.Rcode != dns.RcodeNameError {
+			return "", errors.New("challenge CNAME query failed")
+		}
+		target := ""
+		for _, rr := range response.Answer {
+			if alias, ok := rr.(*dns.CNAME); ok && strings.EqualFold(alias.Hdr.Name, name) {
+				if target != "" || response.Rcode != dns.RcodeSuccess {
+					return "", errors.New("ambiguous challenge CNAME")
+				}
+				target = alias.Target
+			}
+		}
+		if target == "" {
+			return name, nil
+		}
+		name = target
+	}
+	return "", errors.New("challenge CNAME chain is too long")
 }
 
 func (t acmeDNSTester) discover(ctx context.Context, domain, primary string) (string, []acmeNameServer, error) {
@@ -255,7 +293,17 @@ func queryACMEDNS(ctx context.Context, server, name string, kind uint16) (*dns.M
 	message.RecursionDesired = false
 	client := &dns.Client{Net: "tcp", Timeout: 3 * time.Second}
 	response, _, err := client.ExchangeContext(ctx, message, server)
-	return response, err
+	if err != nil {
+		return nil, err
+	}
+	if response == nil || !response.Response || response.Opcode != dns.OpcodeQuery || response.Truncated || len(response.Question) != 1 {
+		return nil, errors.New("invalid DNS query response")
+	}
+	question := response.Question[0]
+	if !strings.EqualFold(question.Name, dns.Fqdn(name)) || question.Qtype != kind || question.Qclass != dns.ClassINET {
+		return nil, errors.New("DNS query response question does not match")
+	}
+	return response, nil
 }
 
 func queryACMETXT(ctx context.Context, server, name, value string) (bool, bool, error) {
@@ -286,10 +334,56 @@ func signedACMEUpdate(ctx context.Context, zone string, record *dns.TXT, credent
 	message.SetTsig(key, dns.Fqdn(credentials.RFC2136TSIGAlgorithm), 300, time.Now().Unix())
 	client := &dns.Client{Net: "tcp", Timeout: 3 * time.Second, TsigSecret: map[string]string{key: credentials.RFC2136TSIGSecret}}
 	response, _, err := client.ExchangeContext(ctx, message, credentials.RFC2136Nameserver)
-	if err != nil || response == nil || response.Rcode != dns.RcodeSuccess || response.IsTsig() == nil {
-		return errors.New("signed update failed")
+	return signedACMEUpdateResult(response, err)
+}
+
+// Classify protocol errors without returning library text that may contain credentials.
+func signedACMEUpdateResult(response *dns.Msg, err error) error {
+	if response != nil {
+		if tsig := response.IsTsig(); tsig != nil && tsig.Error != 0 {
+			return fmt.Errorf("DNS server reported TSIG %s. Check the key, algorithm, secret, and clocks.", acmeDNSResponseCode(int(tsig.Error)))
+		}
+		if response.Rcode != dns.RcodeSuccess {
+			return fmt.Errorf("DNS server rejected the signed update: %s. Check the TSIG key and zone update policy.", acmeDNSResponseCode(response.Rcode))
+		}
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, dns.ErrSig):
+			return errors.New("DNS response signature verification failed. Check the TSIG secret.")
+		case errors.Is(err, dns.ErrTime):
+			return errors.New("DNS TSIG clock check failed. Check the node and DNS server clocks.")
+		case errors.Is(err, dns.ErrSecret), errors.Is(err, dns.ErrKey), errors.Is(err, dns.ErrAlg):
+			return errors.New("DNS TSIG key or algorithm verification failed. Check the saved TSIG settings.")
+		case errors.Is(err, context.DeadlineExceeded):
+			return errors.New("The signed DNS update timed out.")
+		case errors.Is(err, context.Canceled):
+			return errors.New("The signed DNS update was canceled.")
+		default:
+			var networkError net.Error
+			if errors.As(err, &networkError) && networkError.Timeout() {
+				return errors.New("The signed DNS update timed out.")
+			}
+			return errors.New("The signed DNS update failed during encoding or transport. Check the saved secret and TCP port 53.")
+		}
+	}
+	if response == nil {
+		return errors.New("The signed DNS update returned no response.")
+	}
+	if !response.Response || response.Opcode != dns.OpcodeUpdate || response.Truncated {
+		return errors.New("The signed DNS update returned an invalid response.")
+	}
+	if response.IsTsig() == nil {
+		return errors.New("The DNS update response has no TSIG signature.")
 	}
 	return nil
+}
+
+func acmeDNSResponseCode(code int) string {
+	if name, ok := dns.RcodeToString[code]; ok {
+		return name
+	}
+	return fmt.Sprintf("response code %d", code)
 }
 
 func (t acmeDNSTester) cleanup(ctx context.Context, zone string, record *dns.TXT, credentials TraefikACMEParams) bool {

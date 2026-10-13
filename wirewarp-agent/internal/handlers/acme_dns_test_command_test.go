@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -16,6 +17,62 @@ const acmeTestZone = "example.test."
 const acmeTestKey = "acme.example.test."
 const acmeTestSecret = "dGVzdC1hY21lLXNlY3JldA=="
 
+func TestACMEDNSMalformedQueryCannotConfirmCleanup(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*dns.Msg)
+	}{
+		{"truncated", func(m *dns.Msg) { m.Truncated = true }},
+		{"not-response", func(m *dns.Msg) { m.Response = false }},
+		{"wrong-opcode", func(m *dns.Msg) { m.Opcode = dns.OpcodeUpdate }},
+		{"wrong-question", func(m *dns.Msg) { m.Question[0].Name = "other.example.test." }},
+		{"missing-question", func(m *dns.Msg) { m.Question = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := startACMETestDNS(t, dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+				response := new(dns.Msg)
+				response.SetReply(req)
+				response.Authoritative = true
+				tc.mutate(response)
+				_ = w.WriteMsg(response)
+			}))
+			present, authoritative, err := queryACMETXT(context.Background(), server, "_acme-challenge.app.example.test.", "existing-challenge")
+			if err == nil || present || authoritative {
+				t.Fatalf("invalid response cannot verify TXT absence: present=%v authoritative=%v err=%v", present, authoritative, err)
+			}
+		})
+	}
+}
+
+func TestSignedACMEUpdateSafeFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response *dns.Msg
+		err      error
+		want     string
+	}{
+		{"refused", &dns.Msg{MsgHdr: dns.MsgHdr{Rcode: dns.RcodeRefused}}, nil, "REFUSED"},
+		{"not-authorized", &dns.Msg{MsgHdr: dns.MsgHdr{Rcode: dns.RcodeNotAuth}}, nil, "NOTAUTH"},
+		{"signature", nil, dns.ErrSig, "signature"},
+		{"time", nil, dns.ErrTime, "clock"},
+		{"timeout", nil, context.DeadlineExceeded, "timed out"},
+		{"untrusted-error", nil, errors.New(acmeTestSecret), "transport"},
+		{"empty-response", nil, nil, "no response"},
+		{"unsigned-success", &dns.Msg{MsgHdr: dns.MsgHdr{Response: true, Opcode: dns.OpcodeUpdate}}, nil, "no TSIG"},
+		{"wrong-opcode", &dns.Msg{MsgHdr: dns.MsgHdr{Response: true}}, nil, "invalid response"},
+		{"bad-key", &dns.Msg{Extra: []dns.RR{&dns.TSIG{Hdr: dns.RR_Header{Rrtype: dns.TypeTSIG}, Error: dns.RcodeBadKey}}}, dns.ErrSecret, "BADKEY"},
+		{"bad-signature", &dns.Msg{Extra: []dns.RR{&dns.TSIG{Hdr: dns.RR_Header{Rrtype: dns.TypeTSIG}, Error: dns.RcodeBadSig}}}, dns.ErrSig, "BADSIG"},
+		{"bad-time", &dns.Msg{Extra: []dns.RR{&dns.TSIG{Hdr: dns.RR_Header{Rrtype: dns.TypeTSIG}, Error: dns.RcodeBadTime}}}, dns.ErrTime, "BADTIME"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := signedACMEUpdateResult(tc.response, tc.err)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), acmeTestSecret) {
+				t.Fatalf("missing safe failure classification: %v", err)
+			}
+		})
+	}
+}
+
 type acmeTestDNS struct {
 	mu           sync.Mutex
 	values       map[string]bool
@@ -27,6 +84,7 @@ type acmeTestDNS struct {
 	inserts      int
 	removes      int
 	badSignature bool
+	cnameTarget  string
 }
 
 func (state *acmeTestDNS) handler(secondary bool) dns.HandlerFunc {
@@ -43,7 +101,11 @@ func (state *acmeTestDNS) handler(secondary bool) dns.HandlerFunc {
 			} else {
 				for _, record := range request.Ns {
 					txt, ok := record.(*dns.TXT)
-					if !ok || txt.Hdr.Name != "_acme-challenge.app.example.test." || len(txt.Txt) != 1 {
+					owner := "_acme-challenge.app.example.test."
+					if state.cnameTarget != "" {
+						owner = state.cnameTarget
+					}
+					if !ok || txt.Hdr.Name != owner || len(txt.Txt) != 1 {
 						response.Rcode = dns.RcodeRefused
 						continue
 					}
@@ -99,6 +161,10 @@ func (state *acmeTestDNS) handler(secondary bool) dns.HandlerFunc {
 						continue
 					}
 					response.Answer = append(response.Answer, &dns.TXT{Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60}, Txt: []string{value}})
+				}
+			case dns.TypeCNAME:
+				if state.cnameTarget != "" && question.Name == "_acme-challenge.app.example.test." {
+					response.Answer = []dns.RR{&dns.CNAME{Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60}, Target: state.cnameTarget}}
 				}
 			}
 		}
@@ -195,12 +261,38 @@ func TestACMEDNSPrimarySecondarySuccessPreservesExistingTXT(t *testing.T) {
 	assertACMESafeOutput(t, result)
 }
 
+func TestACMEDNSFollowsChallengeCNAME(t *testing.T) {
+	state := &acmeTestDNS{values: map[string]bool{"existing-challenge": true}, propagate: true, cnameTarget: "lan.example.test."}
+	tester, params := acmeDNSFixture(t, state)
+	result := tester.run(context.Background(), params)
+	if !result.OK || !result.CleanupOK || result.RecordName != state.cnameTarget || len(result.AuthoritativeResults) != 2 {
+		t.Fatalf("challenge must update and clean its effective CNAME owner: %+v", result)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.inserts != 1 || state.removes != 1 || len(state.values) != 1 || !state.values["existing-challenge"] {
+		t.Fatal("alias test must preserve existing TXT values")
+	}
+}
+
+func TestACMEDNSCNAMECycleDoesNotWrite(t *testing.T) {
+	state := &acmeTestDNS{values: map[string]bool{}, propagate: true, cnameTarget: "_acme-challenge.app.example.test."}
+	tester, params := acmeDNSFixture(t, state)
+	result := tester.run(context.Background(), params)
+	if result.OK || result.Stage != "discovery" || state.inserts != 0 || state.removes != 0 {
+		t.Fatalf("CNAME cycle must fail before DNS mutation: %+v", result)
+	}
+}
+
 func TestACMEDNSDeniedUpdate(t *testing.T) {
 	state := &acmeTestDNS{values: map[string]bool{}, propagate: true, denyInsert: true}
 	tester, params := acmeDNSFixture(t, state)
 	result := tester.run(context.Background(), params)
 	if result.OK || result.Stage != "update" || !result.CleanupOK {
 		t.Fatalf("unexpected denied update result: %+v", result)
+	}
+	if !strings.Contains(result.Detail, "REFUSED") {
+		t.Fatalf("update rejection must identify the DNS response code: %q", result.Detail)
 	}
 	assertACMESafeOutput(t, result)
 }
