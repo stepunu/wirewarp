@@ -96,6 +96,13 @@ func siteFirewallRules(saved *config.Config, p *config.SiteLinkSnapshot, peers [
 			rules["WW-SITE-FWD"] = append(rules["WW-SITE-FWD"], "-A WW-SITE-FWD -i "+att.LANIface+" -o "+att.LANIface+" -s "+cidr+" -d "+cidr+" -j RETURN")
 			rules["WW-SITE-IN"] = append(rules["WW-SITE-IN"], "-A WW-SITE-IN -i "+att.LANIface+" -s "+cidr+" -d "+cidr+" -j RETURN")
 			rules["WW-SITE-OUT"] = append(rules["WW-SITE-OUT"], "-A WW-SITE-OUT -o "+att.LANIface+" -s "+cidr+" -d "+cidr+" -j RETURN")
+			// Requests to this gateway's LAN listener use loopback locally.
+			address, err := netip.ParseAddr(att.LANIP)
+			if err == nil && address.Is4() && prefix.Contains(address) && !address.IsUnspecified() && !address.IsMulticast() && !address.IsLoopback() {
+				local := address.String() + "/32"
+				rules["WW-SITE-IN"] = append(rules["WW-SITE-IN"], "-A WW-SITE-IN -i lo -s "+local+" -d "+local+" -j RETURN")
+				rules["WW-SITE-OUT"] = append(rules["WW-SITE-OUT"], "-A WW-SITE-OUT -o lo -s "+local+" -d "+local+" -j RETURN")
+			}
 		}
 	}
 	for _, subnet := range siteSubnets(peers) {
