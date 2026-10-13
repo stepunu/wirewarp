@@ -111,6 +111,8 @@ The currently managed Traefik 3.3.4 uses Lego 4.22.2. Its RFC2136 challenge crea
 
 The hook runs as an agent binary subcommand before normal startup. It works without an active control connection. Bound its queries, signed TCP updates, and retries. Require a valid signed response. Keep credential generation files immutable during rotation and include the hook and environment in rollback. Record failed exact-value cleanup for a bounded retry.
 
+DNS challenge tests must follow authoritative challenge CNAMEs, as the certificate provider does. Bound the chain and reject cycles or invalid responses before updates. Report the effective TXT owner and remove only the test value there. For this installation, `_acme-challenge.step1.ro` points to `lan.step1.ro`.
+
 Keep separate ACME accounts on each node. Do not copy ACME account storage between nodes. External ACME clients must also preserve sibling TXT values. The current acme.sh Knot plugin deletes the whole TXT set during cleanup. If Proxmox uses it, avoid overlapping challenge owners or fix that external plugin before claiming cross-client protection. Changing Proxmox or DNS infrastructure requires separate authorization.
 
 Provide an explicit DNS challenge test on the selected edge node. Create a unique temporary TXT value within the allowed challenge scope, verify both servers, and remove only that value. Preserve concurrent challenges and pre-existing TXT values. Report update denial, timeout, propagation failure, and cleanup failure separately.
@@ -153,6 +155,7 @@ Acceptance:
 - Missing credentials produce a clear unavailable state.
 - A permitted challenge reaches both authoritative servers and is cleaned up.
 - A denied update reports failure without exposing credentials.
+- DNS challenge tests identify DNS and TSIG rejection codes, timeout, and transport failures without returning credential contents or library error text.
 - Staging issuance and renewal succeed from the actual edge host.
 
 ### Phase 3: Node capability and independent HTTP routes
@@ -177,6 +180,12 @@ Enable the shared edge runtime on gateway agents. Add gateway capability control
 
 Implement explicit LAN and public listeners, last-known-state restoration, safe reload, and reversible disable.
 
+Preserve an active UFW firewall on existing nodes. Firewall persistence must work without installing packages that remove UFW. Restore only WireWarp-owned rules after startup or reload. Preserve unrelated firewall rules. Apply and teardown must report persistence failures.
+
+When UFW is enabled with `MANAGE_BUILTINS=no`, persist WireWarp-owned rules in an atomic, root-only journal. Keep the existing persistence adapter on other nodes. Reject unsafe UFW modes and ownership collisions before changing rules. Restore the journal after UFW starts. Preserve UFW files, hooks, global policies, and foreign chains.
+
+Tag managed rules and adopt legacy rules only when a runtime command identifies their exact tuple. Persist deletions before releasing teardown ownership. Defer scoped Docker pass-through allowances while `DOCKER-USER` is absent, then restore them when Docker creates it. Keep deferred rules in the journal and remove them on teardown. Never defer security guards or create a foreign chain.
+
 Use separate local AppSec listeners for block and observe policies. Block uses port 7422. Observe uses port 7423, an allow remediation override, and AppSec-only bouncer mode. Observe must not inherit block remediation or IP bans from another route. Anti-bot decisions remain a separate policy.
 
 Acceptance:
@@ -186,6 +195,7 @@ Acceptance:
 - LAN routes survive agent restart and controller outage.
 - Invalid configuration preserves the last working configuration and reports failure.
 - Enable/disable leaves existing gateway routing and VPN behavior intact.
+- UFW remains active while WireWarp persists, restores, and removes its owned rules.
 - Listener conflicts are reported before services are replaced.
 
 ### Phase 5: Public relay and exposure controls
