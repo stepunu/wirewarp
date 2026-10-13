@@ -254,6 +254,8 @@ Start with one LAN-only route, then one public gateway route, then one migrated 
 
 When commit, push, and deployment are authorized, follow the repository contract: rebase on `origin/main`, run relevant checks, push, wait for CI and generated commits, rebuild the control server, update changed agents, and verify actual nodes.
 
+Persist each agent update receipt before restarting the service. Bind it to the authenticated node and command. Replay it after reconnect until the control server confirms its database commit. Verify the installed binary before reporting success. Do not clear a receipt for another node or command.
+
 Use `.agents/skills/wirewarp-rebuild/SKILL.md` for the control server rebuild. Do not include unrelated workspace files in commits.
 
 Acceptance:
@@ -270,6 +272,8 @@ Acceptance:
 ### Phase 8: Gateway site links through Alwyzon
 
 Decision agreed on 2026-10-12: use the current Alwyzon VPS as the shared WireGuard hub. Direct gateway tunnels are outside the initial scope. Confirm its live attachments, configuration, and capacity before rollout.
+
+The selected hub is `vps-at-1` at `205.147.200.16`. The approved initial direction is Home -> Vienna, with SNAT on the Vienna gateway. Use Vienna's Proxmox host at `192.168.0.11:8006` for the first TCP connectivity check. This gateway probe does not verify routes on Home LAN devices.
 
 The initial sites are Home (`192.168.20.0/24`) and Vienna (`192.168.0.0/24`). Both gateways connect to Alwyzon. The hub routes traffic between the selected attachments and enforces link permissions. Ordinary WireGuard hub routing decrypts and re-encrypts packets on Alwyzon, so the hub is trusted with site traffic.
 
