@@ -256,6 +256,10 @@ When commit, push, and deployment are authorized, follow the repository contract
 
 Persist each agent update receipt before restarting the service. Bind it to the authenticated node and command. Replay it after reconnect until the control server confirms its database commit. Verify the installed binary before reporting success. Do not clear a receipt for another node or command.
 
+Persist restart verification intent before requesting a service restart. If systemd terminates the restart helper, retain the pending state. Confirm restart only from a process running the expected version and binary hash. Preserve genuine restart failures.
+
+Restore an empty local agent ID from the control server's authenticated identity before processing commands. Reject conflicting saved ownership. If the existing agent cannot update without its ID, deploy the verified CI binary through authorized SSH, then verify a fresh Nodes API update.
+
 Use `.agents/skills/wirewarp-rebuild/SKILL.md` for the control server rebuild. Do not include unrelated workspace files in commits.
 
 Acceptance:
@@ -280,6 +284,12 @@ The initial sites are Home (`192.168.20.0/24`) and Vienna (`192.168.0.0/24`). Bo
 Model a site link with named gateway endpoints, shared subnets, selected hub attachments, enabled state, access direction, and destination-side SNAT settings. Offer Home -> Vienna, Vienna -> Home, and bidirectional access. One-way access restricts new connections and permits established reply traffic.
 
 Keep destination-specific site routes separate from per-host internet egress pins. Site routes must take precedence for selected remote subnets even when a host uses another attachment for internet egress. Validate overlapping subnet advertisements and conflicting peer `AllowedIPs` before applying changes. Do not permit transit between unrelated sites implicitly.
+
+Apply isolation to packets from attachment tunnel IPs as well as LAN IPs. Preserve traffic initiated by the hub.
+
+Bind the hub WireGuard interface to the desired-state hash. Stage its ingress deny guard before attachments become ready. Permit authorized link traffic before this guard. Preserve public forwarding through other ingress interfaces and management traffic initiated by the hub.
+
+Preserve the gateway's access to its own LAN listener through loopback. Limit the exception to that gateway IP as both source and destination. Keep forwarding permissions unchanged.
 
 Support source-preserving routing when the destination LAN has a return route. Offer destination-side SNAT when it does not. SNAT hides the original source IP and solves replies only. It does not route new connections from destination LAN devices into the tunnel.
 
