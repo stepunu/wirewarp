@@ -50,9 +50,16 @@ func siteFlowInterfaces(saved *config.Config, flow siteFlow) (incoming, outgoing
 
 func siteFirewallRules(saved *config.Config, p *config.SiteLinkSnapshot, peers []config.SiteLinkTransitPeer, allow bool) map[string][]string {
 	rules := map[string][]string{}
+	hubInterface := ""
+	if p.NodeRole == "hub" {
+		hubInterface, _ = siteHubIngressInterface(saved, p)
+	}
 	if allow {
 		for _, flow := range compileSiteFlows(p) {
 			in, out, _ := siteFlowInterfaces(saved, flow)
+			if hubInterface != "" {
+				in, out = hubInterface, hubInterface
+			}
 			if in == "" {
 				continue
 			}
@@ -106,6 +113,11 @@ func siteFirewallRules(saved *config.Config, p *config.SiteLinkSnapshot, peers [
 		}
 	}
 	for _, subnet := range siteSubnets(peers) {
+		// Every authenticated peer can use its own tunnel address. LAN-only
+		// source classification cannot distinguish that traffic from management.
+		if hubInterface != "" {
+			rules["WW-SITE-FWD"] = append(rules["WW-SITE-FWD"], "-A WW-SITE-FWD -i "+hubInterface+" -d "+subnet+" -j DROP")
+		}
 		rules["WW-SITE-DST"] = append(rules["WW-SITE-DST"], "-A WW-SITE-DST -d "+subnet+" -j DROP")
 		for _, chain := range []string{"WW-SITE-FWD", "WW-SITE-IN", "WW-SITE-OUT"} {
 			rules[chain] = append(rules[chain], "-A "+chain+" -s "+subnet+" -j WW-SITE-DST")
@@ -120,6 +132,11 @@ func siteFirewallRules(saved *config.Config, p *config.SiteLinkSnapshot, peers [
 }
 
 func reconcileSiteFirewall(ctx context.Context, saved *config.Config, p *config.SiteLinkSnapshot, peers []config.SiteLinkTransitPeer, allow bool) error {
+	if p.NodeRole == "hub" {
+		if _, err := siteHubIngressInterface(saved, p); err != nil {
+			return err
+		}
+	}
 	rules := siteFirewallRules(saved, p, peers, allow)
 	for _, table := range []string{"filter", "nat"} {
 		parents := []string{"FORWARD", "INPUT", "OUTPUT"}

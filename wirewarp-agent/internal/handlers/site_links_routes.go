@@ -29,10 +29,11 @@ func siteRoutePlan(saved *config.Config, p *config.SiteLinkSnapshot) ([]config.S
 	add := func(src, dst, site string, endpoint config.SiteLinkSite) error {
 		r := config.SiteLinkRoute{Source: src, Destination: dst}
 		if p.NodeRole == "hub" {
-			if saved.Server == nil || !saved.Server.Initialized || !siteInterface.MatchString(saved.Server.WGInterface) {
-				return fmt.Errorf("site-link hub WireGuard interface is not ready")
+			var err error
+			r.Interface, err = siteHubIngressInterface(saved, p)
+			if err != nil {
+				return err
 			}
-			r.Interface = saved.Server.WGInterface
 		} else {
 			if site != saved.AgentID {
 				return nil

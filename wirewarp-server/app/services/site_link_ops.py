@@ -164,7 +164,13 @@ async def aggregate_payload(agent_id: uuid.UUID, db: AsyncSession) -> dict:
         server_ids &= attached
     peers = (await db.execute(select(TunnelClientAttachment, TunnelClient).join(TunnelClient, TunnelClient.id == TunnelClientAttachment.tunnel_client_id).where(TunnelClientAttachment.tunnel_server_id.in_(server_ids), TunnelClient.is_gateway.is_(True)).order_by(TunnelClientAttachment.id))).all()
     transit_peers = [{"gateway_agent_id": str(client.agent_id), "attachment_id": str(attachment.id), "advertised_subnets": [str(network(client.vm_network))], "wireguard_public_key": attachment.wg_public_key or ""} for attachment, client in peers if client.vm_network]
-    return {"schema_version": 1, "node_role": "hub" if agent.type == "server" else "gateway", "links": [link_payload(link) for link in links], "transit_peers": transit_peers}
+    payload = {"schema_version": 1, "node_role": "hub" if agent.type == "server" else "gateway", "links": [link_payload(link) for link in links], "transit_peers": transit_peers}
+    if agent.type == "server":
+        server = next((server for server in servers if server.agent_id == agent_id), None)
+        if server is None:
+            raise HTTPException(409, "Site link hub networking metadata is unavailable")
+        payload["hub_wireguard_interface"] = server.wg_interface
+    return payload
 
 
 async def prepare_snapshots(agent_ids: set[uuid.UUID], db: AsyncSession, *, include_managed: bool = True) -> list[tuple[uuid.UUID, dict]]:

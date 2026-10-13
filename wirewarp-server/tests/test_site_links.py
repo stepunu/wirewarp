@@ -71,7 +71,9 @@ async def test_site_links_complete_payload_and_applied_readiness(client, db, fac
         link = payload["links"][0]
         assert link["allow_new_a_to_b"] and not link["allow_new_b_to_a"]
         assert link["snat_at_b"] == "gateway_lan_ip"
-        assert "interface" not in str(payload)
+        assert payload.get("hub_wireguard_interface") == (hub.wg_interface if payload["node_role"] == "hub" else None)
+        assert "interface" not in str(payload["links"])
+        assert "interface" not in str(payload["transit_peers"])
     await apply_all(db)
     read = await client.get(f"/api/site-links/{result['id']}")
     assert read.json()["phase"] == "applied"

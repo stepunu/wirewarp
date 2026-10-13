@@ -104,7 +104,13 @@ func validateSiteSnapshot(saved *config.Config, p *config.SiteLinkSnapshot) erro
 		if saved.Mode != "server" {
 			return fmt.Errorf("site-link hub requires a server node")
 		}
+		if _, err := siteHubIngressInterface(saved, p); err != nil {
+			return err
+		}
 	} else if p.NodeRole == "gateway" {
+		if p.HubWGInterface != "" {
+			return fmt.Errorf("gateway site-link snapshot cannot name a hub interface")
+		}
 		if saved.Mode != "client" || !saved.Gateway() {
 			return fmt.Errorf("site-link gateway requires a gateway node")
 		}

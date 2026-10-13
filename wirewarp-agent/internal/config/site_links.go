@@ -7,13 +7,14 @@ type SiteLinkTeardownReceipt struct {
 }
 
 type SiteLinkSnapshot struct {
-	OwnerAgentID  string                `json:"-" yaml:"owner_agent_id"`
-	SchemaVersion int                   `json:"schema_version" yaml:"schema_version"`
-	Revision      int64                 `json:"revision" yaml:"revision"`
-	DesiredHash   string                `json:"desired_hash" yaml:"desired_hash"`
-	NodeRole      string                `json:"node_role" yaml:"node_role"`
-	Links         []SiteLink            `json:"links" yaml:"links"`
-	TransitPeers  []SiteLinkTransitPeer `json:"transit_peers" yaml:"transit_peers"`
+	OwnerAgentID   string                `json:"-" yaml:"owner_agent_id"`
+	SchemaVersion  int                   `json:"schema_version" yaml:"schema_version"`
+	Revision       int64                 `json:"revision" yaml:"revision"`
+	DesiredHash    string                `json:"desired_hash" yaml:"desired_hash"`
+	NodeRole       string                `json:"node_role" yaml:"node_role"`
+	HubWGInterface string                `json:"hub_wireguard_interface,omitempty" yaml:"hub_wireguard_interface,omitempty"`
+	Links          []SiteLink            `json:"links" yaml:"links"`
+	TransitPeers   []SiteLinkTransitPeer `json:"transit_peers" yaml:"transit_peers"`
 }
 
 type SiteLink struct {

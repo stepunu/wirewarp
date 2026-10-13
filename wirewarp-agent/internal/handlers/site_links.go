@@ -245,7 +245,7 @@ func verifySiteOwnership(ctx context.Context, saved *config.Config, p *config.Si
 	}
 	if p.NodeRole == "hub" {
 		if saved.Server == nil || !saved.Server.Initialized || !siteInterface.MatchString(saved.Server.WGInterface) {
-			return fmt.Errorf("hub WireGuard interface is not ready")
+			return fmt.Errorf("%w: hub WireGuard interface is not ready", errSitePeerPending)
 		}
 		out, err := siteNetworkCommand(ctx, "wg", "show", saved.Server.WGInterface, "allowed-ips")
 		if err != nil {
