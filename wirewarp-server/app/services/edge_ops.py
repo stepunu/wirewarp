@@ -27,6 +27,7 @@ from app.services.traefik_ops import (
 from app.services.secrets import get_letsencrypt_cloudflare_api_token, get_letsencrypt_rfc2136_tsig_secret
 from app.services.edge_ownership import get_edge_owner, edge_entrypoints, is_gateway_edge
 from app.services.edge_relay_ops import gateway_ingress, load_relay_routes, relay_dynamic_config
+from app.services.acme_dns_endpoint import effective_rfc2136_nameserver
 
 
 SECRET_KEYS = {"captchaSecretKey", "cloudflare_dns_api_token", "rfc2136_tsig_secret"}
@@ -164,7 +165,7 @@ async def build_edge_desired_state(
             "traefik_dynamic_config": await relay_dynamic_config(db, agent_id),
             "nginx_cache_config": {}, "traefik_acme": {},
         }
-    letsencrypt = await load_letsencrypt_config(db)
+    letsencrypt = await load_letsencrypt_config(db, agent_id)
     gateway = await is_gateway_edge(db, agent_id)
     if gateway and letsencrypt.complete and letsencrypt.challenge != "dns-01":
         from app.services.edge_ownership import load_http_routes
@@ -179,7 +180,7 @@ async def build_edge_desired_state(
         elif letsencrypt.dns_provider == "rfc2136":
             row = await db.get(SystemSettings, 1)
             traefik_acme = {
-                "rfc2136_nameserver": row.letsencrypt_rfc2136_nameserver,
+                "rfc2136_nameserver": await effective_rfc2136_nameserver(db, agent_id, row),
                 "rfc2136_tsig_key": row.letsencrypt_rfc2136_tsig_key,
                 "rfc2136_tsig_algorithm": row.letsencrypt_rfc2136_tsig_algorithm,
                 "rfc2136_tsig_secret": await get_letsencrypt_rfc2136_tsig_secret(db),

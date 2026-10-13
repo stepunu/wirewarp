@@ -52,7 +52,7 @@ async def capture_edge_source(agent_id, db):
     fragments = list((await db.scalars(select(EdgeFragment).where(EdgeFragment.agent_id == agent_id).order_by(EdgeFragment.id))).all())
     return {
         "schema_version": 1, "agent_id": str(agent_id),
-        "node": {key: getattr(node, key) for key in ("edge_rate_limit_rps", "edge_rate_limit_burst", "lan_bind_ip", "public_bind_ip")},
+        "node": {key: getattr(node, key) for key in ("edge_rate_limit_rps", "edge_rate_limit_burst", "lan_bind_ip", "public_bind_ip", "rfc2136_nameserver_override")},
         "node_policy": _row_data(policy), "profiles": [_row_data(profile) for profile in profiles],
         "routes": [{"route": _row_data(route), "config": _row_data(route.edge_route_config), "ingress": _row_data(route.public_ingress)} for route in routes],
         "paths": [_row_data(path) for path in paths], "pools": [_row_data(pool) for pool in pools],
@@ -114,6 +114,7 @@ async def restore_edge_source(version, db):
         profile_map[str(original)] = clone_id
     await db.flush()
     node = await db.get(EdgeNode, agent_id)
+    snapshot["node"].setdefault("rfc2136_nameserver_override", None)
     for key, value in snapshot["node"].items():
         setattr(node, key, value)
     policy = await db.get(EdgeNodePolicy, agent_id)

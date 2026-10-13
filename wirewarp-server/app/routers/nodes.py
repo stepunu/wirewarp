@@ -305,6 +305,7 @@ async def _capabilities_read(
     crowdsec: CrowdSecSnapshot | None = None,
     traefik: TraefikSnapshot | None = None,
 ) -> NodeEdgeCapabilitiesRead:
+    from app.services.acme_dns_endpoint import effective_rfc2136_nameserver
     reason = edge_unavailable_reason(server)
     return NodeEdgeCapabilitiesRead(
         agent_id=server.agent_id,
@@ -318,6 +319,8 @@ async def _capabilities_read(
         public_ingress_available=await public_ingress_available(db, server.agent_id),
         relay_enabled=server.relay_enabled,
         runtime_mode=edge_runtime_mode(server),
+        rfc2136_nameserver_override=server.rfc2136_nameserver_override,
+        rfc2136_effective_nameserver=await effective_rfc2136_nameserver(db, server.agent_id),
         components=await _component_state_map(server, db, crowdsec=crowdsec, traefik=traefik),
     )
 
@@ -520,6 +523,8 @@ async def _apply_capabilities(
 ) -> None:
     now = datetime.now(timezone.utc)
     fields = body.model_fields_set
+    if "rfc2136_nameserver_override" in fields:
+        server.rfc2136_nameserver_override = body.rfc2136_nameserver_override
     for field in ("lan_bind_ip", "public_bind_ip"):
         if field in fields:
             value = getattr(body, field)

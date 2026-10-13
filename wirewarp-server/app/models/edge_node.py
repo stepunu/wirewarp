@@ -27,3 +27,4 @@ class EdgeNode(Base):
     lan_bind_ip: Mapped[str | None] = mapped_column(String)
     public_bind_ip: Mapped[str | None] = mapped_column(String)
     relay_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    rfc2136_nameserver_override: Mapped[str | None] = mapped_column(String, nullable=True)

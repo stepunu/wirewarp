@@ -199,7 +199,7 @@ async def install_traefik_on_tunnel_server(
     if not server:
         raise HTTPException(status_code=404, detail="Tunnel server not found")
 
-    letsencrypt = await load_letsencrypt_config(db)
+    letsencrypt = await load_letsencrypt_config(db, server.agent_id)
     static_cfg = build_traefik_static_config(letsencrypt=letsencrypt)
 
     sent, command_id = await send_command(

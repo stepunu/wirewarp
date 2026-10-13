@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.system_settings import SystemSettings
+from app.services.acme_dns_endpoint import effective_rfc2136_nameserver
 from app.models.edge_fragment import EdgeFragment
 from app.services.edge_render import render_variants, policy_edge_config, path_match, origin_load_balancer, fragment_content, validate_path_cache
 from app.services.edge_ownership import get_edge_owner, load_http_routes, route_entrypoints
@@ -75,11 +76,11 @@ def letsencrypt_from_settings(
     )
 
 
-async def load_letsencrypt_config(db: AsyncSession) -> LetsEncryptConfig:
+async def load_letsencrypt_config(db: AsyncSession, agent_id: uuid.UUID | str | None = None) -> LetsEncryptConfig:
     row = await db.get(SystemSettings, 1)
     if row and row.letsencrypt_dns_provider == "rfc2136":
         ready = bool(
-            row.letsencrypt_rfc2136_nameserver
+            await effective_rfc2136_nameserver(db, agent_id, row)
             and row.letsencrypt_rfc2136_tsig_key
             and row.letsencrypt_rfc2136_tsig_algorithm
             and await get_letsencrypt_rfc2136_tsig_secret(db)
@@ -92,8 +93,8 @@ async def load_letsencrypt_config(db: AsyncSession) -> LetsEncryptConfig:
     )
 
 
-async def letsencrypt_resolver_ready(db: AsyncSession) -> bool:
-    return (await load_letsencrypt_config(db)).complete
+async def letsencrypt_resolver_ready(db: AsyncSession, agent_id: uuid.UUID | str | None = None) -> bool:
+    return (await load_letsencrypt_config(db, agent_id)).complete
 
 
 def _render_forward_auth_config(config: dict) -> dict:
@@ -260,7 +261,7 @@ async def build_traefik_dynamic_config(
     if gateway:
         middlewares["wirewarp-strip-forwarded"] = {"headers": {"customRequestHeaders": {"Forwarded": ""}}}
     servers_transports: dict = {}
-    acme_ready = await letsencrypt_resolver_ready(db)
+    acme_ready = await letsencrypt_resolver_ready(db, server_agent_id)
     node_cache_policy = await load_node_cache_policy(server_agent_id, db)
     cache_backend_available = await nginx_cache_backend_available(server_agent_id, db)
     letsencrypt_domains: list[str] = []

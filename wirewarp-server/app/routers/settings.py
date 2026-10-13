@@ -17,6 +17,7 @@ from app.models.system_settings import SystemSettings
 from app.models.agent import Agent
 from app.models.command_log import CommandLog
 from app.models.tunnel_client import TunnelClient
+from app.services.acme_dns_endpoint import effective_rfc2136_nameserver
 from app.realtime.events import emit_edge_changed, emit_security_changed
 from app.models.user import User
 from app.schemas.acme import (
@@ -210,7 +211,8 @@ async def test_dns_challenge(
         secret = await get_letsencrypt_rfc2136_tsig_secret(db)
     except InvalidToken:
         raise HTTPException(status_code=409, detail="The saved TSIG secret could not be decrypted. Re-enter and save it before testing") from None
-    if not row.letsencrypt_rfc2136_nameserver or not row.letsencrypt_rfc2136_tsig_key or not secret:
+    endpoint = await effective_rfc2136_nameserver(db, body.agent_id, row)
+    if not endpoint or not row.letsencrypt_rfc2136_tsig_key or not secret:
         raise HTTPException(status_code=409, detail="Save the update server, TSIG key, and TSIG secret before testing")
     agent = await db.get(Agent, body.agent_id)
     if agent is None:
@@ -224,7 +226,7 @@ async def test_dns_challenge(
         "domain": body.domain,
         "dns_delay_seconds": row.letsencrypt_dns_delay_seconds,
         "credentials": {
-            "rfc2136_nameserver": row.letsencrypt_rfc2136_nameserver,
+            "rfc2136_nameserver": endpoint,
             "rfc2136_tsig_key": row.letsencrypt_rfc2136_tsig_key,
             "rfc2136_tsig_algorithm": row.letsencrypt_rfc2136_tsig_algorithm,
             "rfc2136_tsig_secret": secret,

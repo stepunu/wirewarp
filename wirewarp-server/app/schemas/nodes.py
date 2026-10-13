@@ -4,10 +4,11 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints, field_validator
 
 from app.schemas.crowdsec import CrowdSecSnapshotRead
 from app.schemas.security import ServerEdgePolicyRead, SiteRead, TraefikStatusRead
+from app.schemas.system_settings import SystemSettingsUpdate
 
 
 class EdgeComponentRead(BaseModel):
@@ -61,6 +62,8 @@ class NodeEdgeCapabilitiesRead(BaseModel):
     public_ingress_available: bool = True
     relay_enabled: bool = False
     runtime_mode: str = "disabled"
+    rfc2136_nameserver_override: str | None = None
+    rfc2136_effective_nameserver: str | None = None
 
 
 class NodeEdgeCapabilitiesUpdate(BaseModel):
@@ -69,6 +72,12 @@ class NodeEdgeCapabilitiesUpdate(BaseModel):
     components: dict[str, str] | None = None
     lan_bind_ip: str | None = None
     public_bind_ip: str | None = None
+    rfc2136_nameserver_override: str | None = None
+
+    @field_validator("rfc2136_nameserver_override")
+    @classmethod
+    def validate_rfc2136_nameserver_override(cls, value: str | None) -> str | None:
+        return SystemSettingsUpdate.validate_nameserver(value)
 
 
 class NodeEdgeActionResult(BaseModel):
