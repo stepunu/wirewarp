@@ -97,6 +97,10 @@ Offer Knot / RFC2136 settings. Render Traefik's supported `exec` DNS provider wi
 - Propagation delay, initially 30 seconds.
 - DNS resolver configuration and ACME staging selection.
 
+Support an optional node-specific RFC2136 update endpoint. Keep issuer connection settings separate from route policy. A missing override uses the global endpoint. Resolve the same effective endpoint for certificate issuance, readiness checks, and challenge tests on the selected node. Show the effective endpoint and provide an explicit action to clear the override.
+
+For Home, use `10.50.30.53:53` through `wg-dns` as source `10.24.0.1`. The primary's existing TXT update ACL permits this source. Keep other nodes on their configured global endpoint until their network path and source authorization are verified. Existing key and DNS ACL changes require separate authorization.
+
 Optionally accept the Proxmox `algorithm:key-name:secret` format as an input convenience. Parse it into the same validated fields without displaying the secret afterward.
 
 Map credentials to `RFC2136_NAMESERVER`, `RFC2136_TSIG_ALGORITHM`, `RFC2136_TSIG_KEY`, and `RFC2136_TSIG_SECRET`. Verify the environment-file or secret-file mechanism supported by the deployed Traefik/Lego version before implementation. Keep node secret files root-readable only.
@@ -155,6 +159,7 @@ Acceptance:
 - Missing credentials produce a clear unavailable state.
 - A permitted challenge reaches both authoritative servers and is cleaned up.
 - A denied update reports failure without exposing credentials.
+- Node-specific update endpoints persist and clear correctly. Issuance and challenge tests use the same effective endpoint.
 - DNS challenge tests identify DNS and TSIG rejection codes, timeout, and transport failures without returning credential contents or library error text.
 - Staging issuance and renewal succeed from the actual edge host.
 
@@ -284,6 +289,8 @@ The initial sites are Home (`192.168.20.0/24`) and Vienna (`192.168.0.0/24`). Bo
 Model a site link with named gateway endpoints, shared subnets, selected hub attachments, enabled state, access direction, and destination-side SNAT settings. Offer Home -> Vienna, Vienna -> Home, and bidirectional access. One-way access restricts new connections and permits established reply traffic.
 
 Keep destination-specific site routes separate from per-host internet egress pins. Site routes must take precedence for selected remote subnets even when a host uses another attachment for internet egress. Validate overlapping subnet advertisements and conflicting peer `AllowedIPs` before applying changes. Do not permit transit between unrelated sites implicitly.
+
+Limit TCP segment size for authorized Site Link flows when the tunnel's interface MTU exceeds the working underlay path. Apply the limit to forwarded LAN traffic, gateway probes, and replies. Preserve smaller advertised segment sizes and unrelated traffic. Persist and remove these rules with the other owned Site Link rules. Verify real HTTPS transfers as well as TCP connection establishment.
 
 Apply isolation to packets from attachment tunnel IPs as well as LAN IPs. Preserve traffic initiated by the hub.
 
