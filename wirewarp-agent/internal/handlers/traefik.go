@@ -681,8 +681,8 @@ func (h *EdgeHandlers) traefikPollLoop(ctx context.Context) {
 
 func (h *EdgeHandlers) pollAndEmitTraefik(ctx context.Context, retry bool) {
 	payload := collectTraefik()
+	payload["access_log"] = h.collectTraefikAccessStatus(ctx, payload["running"] == true)
 	if h.tryEmitTraefik(payload) {
-		h.emitTraefikAccessEvents(ctx)
 		return
 	}
 	if retry {
@@ -693,8 +693,8 @@ func (h *EdgeHandlers) pollAndEmitTraefik(ctx context.Context, retry bool) {
 				return
 			case <-time.After(2 * time.Second):
 			}
+			payload["access_log"] = h.collectTraefikAccessStatus(ctx, payload["running"] == true)
 			if h.tryEmitTraefik(payload) {
-				h.emitTraefikAccessEvents(ctx)
 				return
 			}
 		}
@@ -849,12 +849,15 @@ func countTraefikRoutes() int {
 
 // --- security_events emitters ---
 
-func (h *EdgeHandlers) emitTraefikAccessEvents(ctx context.Context) {
+func (h *EdgeHandlers) emitTraefikAccessEvents(ctx context.Context) error {
 	raw, err := readTraefikAccessJournal(ctx)
 	if err != nil {
-		log.Printf("[security-events] traefik access log: %v", err)
-		return
+		return err
 	}
+	return h.emitTraefikAccessBatch(raw, writeTraefikEventsCursor)
+}
+
+func (h *EdgeHandlers) emitTraefikAccessBatch(raw string, writeCursor func(string) error) error {
 	accessEvents, cursor := parseTraefikJSONAccessEvents(raw)
 	securityEvents, legacyCursor := parseTraefikAccessSecurityEvents(raw)
 	if legacyCursor != "" {
@@ -885,13 +888,14 @@ func (h *EdgeHandlers) emitTraefikAccessEvents(ctx context.Context) {
 	}
 	totalEvents := len(accessEvents) + len(securityEvents)
 	if cursor != "" && shouldAdvanceTraefikEventsCursor(totalEvents, emitOK) {
-		if err := writeTraefikEventsCursor(cursor); err != nil {
-			log.Printf("[security-events] write traefik cursor: %v", err)
+		if err := writeCursor(cursor); err != nil {
+			return fmt.Errorf("write traefik access cursor: %w", err)
 		}
 	}
-	if totalEvents == 0 {
-		return
+	if !emitOK {
+		return fmt.Errorf("access event delivery is unavailable; journal cursor retained")
 	}
+	return nil
 }
 
 func shouldAdvanceTraefikEventsCursor(eventCount int, emitOK bool) bool {
@@ -899,8 +903,16 @@ func shouldAdvanceTraefikEventsCursor(eventCount int, emitOK bool) bool {
 }
 
 func readTraefikAccessJournal(ctx context.Context) (string, error) {
+	return readTraefikAccessJournalFrom(ctx, traefikEventsCursorPath)
+}
+
+func readTraefikAccessJournalFrom(ctx context.Context, cursorPath string) (string, error) {
 	args := []string{"-u", traefikUnitName, "--no-pager", "-o", "cat", "--show-cursor"}
-	if cursor := readTraefikEventsCursor(); cursor != "" {
+	cursor, err := readTraefikEventsCursor(cursorPath)
+	if err != nil {
+		return "", fmt.Errorf("read traefik access cursor: %w", err)
+	}
+	if cursor != "" {
 		args = append(args, "--after-cursor", cursor)
 	} else {
 		args = append(args, "--since", "5 minutes ago")
@@ -912,12 +924,15 @@ func readTraefikAccessJournal(ctx context.Context) (string, error) {
 	return string(out), nil
 }
 
-func readTraefikEventsCursor() string {
-	data, err := os.ReadFile(traefikEventsCursorPath)
-	if err != nil {
-		return ""
+func readTraefikEventsCursor(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", nil
 	}
-	return strings.TrimSpace(string(data))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 func writeTraefikEventsCursor(cursor string) error {

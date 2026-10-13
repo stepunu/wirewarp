@@ -660,6 +660,40 @@ async def handle_traefik_status(agent_id: str, msg: dict, db: AsyncSession) -> N
     if agent:
         agent.last_seen = now
 
+    access = msg.get("access_log")
+    if isinstance(access, dict) and isinstance(access.get("running"), bool) and isinstance(access.get("installed"), bool):
+        from app.models.edge_component_state import EdgeComponentState
+        from app.models.edge_node import EdgeNode
+        from app.services.edge_ops import default_component_desired
+
+        owner = await db.get(EdgeNode, uuid.UUID(str(agent_id)))
+        row = await db.scalar(select(EdgeComponentState).where(EdgeComponentState.agent_id == agent_id, EdgeComponentState.component == "access_log"))
+        if row is None:
+            row = EdgeComponentState(agent_id=uuid.UUID(str(agent_id)), component="access_log", desired=default_component_desired(owner, "access_log") if owner else "disabled")
+            db.add(row)
+        row.installed = access["installed"]
+        row.running = access["running"]
+        row.last_error = access.get("error") if isinstance(access.get("error"), str) else None
+        row.phase = component_phase(row.installed, row.running, row.last_error) if row.installed or row.running or row.last_error else "disabled"
+        row.updated_at = now
+        if owner is not None and owner.edge_state == "enabled" and owner.edge_mode == "security_edge":
+            await db.flush()
+            desired = (await db.scalars(select(EdgeComponentState).where(EdgeComponentState.agent_id == agent_id))).all()
+            cs = await db.scalar(select(CrowdSecSnapshot).where(CrowdSecSnapshot.agent_id == agent_id))
+            cache = await db.scalar(select(EdgeCacheSnapshot).where(EdgeCacheSnapshot.agent_id == agent_id, EdgeCacheSnapshot.backend == "nginx_proxy_cache"))
+            actual = {
+                "traefik": (running, err),
+                "crowdsec": (bool(cs and cs.running), (cs.last_error or cs.error) if cs else None),
+                "appsec": (bool(cs and cs.running and cs.appsec_enabled and cs.bouncer_registered), (cs.last_error or cs.error) if cs else None),
+                "access_log": (row.running, row.last_error),
+                "nginx_cache": (bool(cache and cache.running), cache.last_error if cache else None),
+            }
+            configured = {component.component: component.desired for component in desired}
+            required = [actual[name] for name in actual if configured.get(name, default_component_desired(owner, name)) == "enabled"]
+            if row.desired == "disabled" and row.running:
+                required.append((False, "Disabled access collection is still running"))
+            owner.edge_install_phase = "degraded" if any(error for healthy, error in required if not healthy) else "healthy" if all(healthy for healthy, error in required) else "pending"
+
     await db.commit()
     emit_traefik_changed()
     emit_edge_changed()

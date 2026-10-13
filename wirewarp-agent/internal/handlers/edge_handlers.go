@@ -19,6 +19,7 @@ type EdgeHandlers struct {
 	cfg             *config.Config
 	emit            atomic.Pointer[EmitFn]
 	mu              sync.Mutex
+	accessLogMu     sync.Mutex
 	applyDesired    func(context.Context) error
 	persistSecrets  func(TraefikACMEParams, func() error) error
 	managedService  func(string) (bool, error)

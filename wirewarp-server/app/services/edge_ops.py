@@ -154,6 +154,7 @@ async def build_edge_desired_state(
         ensure_edge_enabled(server)
     if relay_only:
         static_config = build_traefik_static_config()
+        static_config.pop("accessLog", None)
         static_config.pop("certificatesResolvers", None)
         static_config.pop("experimental", None)
         static_config["entryPoints"] = await edge_entrypoints(db, agent_id)
@@ -185,6 +186,10 @@ async def build_edge_desired_state(
             }
 
     static_config = build_traefik_static_config(letsencrypt=letsencrypt)
+    components = await load_component_states(agent_id, db)
+    access_log = components.get("access_log")
+    if access_log is not None and access_log.desired != "enabled":
+        static_config.pop("accessLog", None)
     static_config["entryPoints"] = await edge_entrypoints(db, agent_id)
     dynamic_config = await build_traefik_dynamic_config(agent_id, db)
     dynamic_config.update(await relay_dynamic_config(db, agent_id))
