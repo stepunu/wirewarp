@@ -257,7 +257,7 @@ func verifySiteOwnership(ctx context.Context, saved *config.Config, p *config.Si
 			if len(fields) < 2 {
 				continue
 			}
-			for _, value := range strings.Split(strings.Join(fields[1:], ""), ",") {
+			for _, value := range strings.Fields(strings.ReplaceAll(strings.Join(fields[1:], " "), ",", " ")) {
 				prefix, err := netip.ParsePrefix(value)
 				if err == nil {
 					actual[fields[0]] = append(actual[fields[0]], prefix.Masked())

@@ -391,6 +391,8 @@ func TestSiteLiveHubAllowedIPsOwnershipRejectsConflicts(t *testing.T) {
 		ok           bool
 	}{
 		{"owned", p.TransitPeers[0].WireGuardPublicKey + "\t192.168.20.0/24,10.21.0.10/32\n" + p.TransitPeers[1].WireGuardPublicKey + "\t192.168.0.0/24,10.21.0.20/32\n", true},
+		{"owned-space-separated", p.TransitPeers[0].WireGuardPublicKey + "\t10.21.0.3/32 192.168.20.0/24\n" + p.TransitPeers[1].WireGuardPublicKey + "\t10.21.0.2/32 192.168.0.0/24\n", true},
+		{"foreign-space-separated", p.TransitPeers[0].WireGuardPublicKey + "\t10.21.0.3/32 192.168.20.0/24\n" + p.TransitPeers[1].WireGuardPublicKey + "\t10.21.0.2/32 192.168.0.0/24\nforeign\t10.21.0.4/32 192.168.20.0/25\n", false},
 		{"missing", p.TransitPeers[0].WireGuardPublicKey + "\t192.168.20.0/24\n", false},
 		{"broad", p.TransitPeers[0].WireGuardPublicKey + "\t0.0.0.0/0\n" + p.TransitPeers[1].WireGuardPublicKey + "\t192.168.0.0/24\n", false},
 		{"foreign", p.TransitPeers[0].WireGuardPublicKey + "\t192.168.20.0/24\n" + p.TransitPeers[1].WireGuardPublicKey + "\t192.168.0.0/24\nforeign\t192.168.20.0/25\n", false},
