@@ -61,6 +61,41 @@ func TestOwnedSaveExcludesForeignPoliciesAndRules(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedIdentityCannotAdoptForeignJournal(t *testing.T) {
+	s, _, calls := testStore(t)
+	if err := s.Save(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(s.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*calls = nil
+	if err := s.ValidateIdentity("foreign", "/etc/wirewarp/agent.yaml"); err == nil {
+		t.Fatal("foreign journal accepted")
+	}
+	if err := s.ValidateIdentity("agent-a", "/etc/wirewarp/another.yaml"); err == nil {
+		t.Fatal("another installation journal accepted")
+	}
+	if err := s.ValidateIdentity("agent-a", "/etc/wirewarp/agent.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(s.Path)
+	if err != nil || string(before) != string(after) || len(*calls) != 0 {
+		t.Fatal("identity check changed journal or firewall", err)
+	}
+}
+
+func TestAuthenticatedIdentityAbsentJournalDoesNotCreateState(t *testing.T) {
+	s, _, calls := testStore(t)
+	if err := s.ValidateIdentity("agent-a", "/etc/wirewarp/agent.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(s.Path)); !os.IsNotExist(err) || len(*calls) != 0 {
+		t.Fatal("identity check created persistence state", err)
+	}
+}
+
 func TestPersistenceRejectsUnsafeUFWAndUnitFailure(t *testing.T) {
 	for _, kind := range []string{"unsafe", "unit"} {
 		t.Run(kind, func(t *testing.T) {

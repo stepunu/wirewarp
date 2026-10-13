@@ -201,5 +201,5 @@ async def test_ws_agent_ping_gets_application_pong(db, fake_manager, session_mak
         cmd.return_value = (False, "noop")
         await main_module.agent_websocket(FakeWS())
 
-    assert {"type": "authenticated"} in received
+    assert {"type": "authenticated", "agent_id": str(agent.id)} in received
     assert {"type": "agent_pong", "nonce": "n-1"} in received

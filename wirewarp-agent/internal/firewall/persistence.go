@@ -73,6 +73,26 @@ func Check(ctx context.Context) error {
 	return err
 }
 
+// ValidateIdentity checks an existing journal without adopting or restoring it.
+func ValidateIdentity(agentID, configPath string) error {
+	defaultMu.RLock()
+	s := defaultStore
+	defaultMu.RUnlock()
+	return s.ValidateIdentity(agentID, configPath)
+}
+
+func (s *Store) ValidateIdentity(agentID, configPath string) error {
+	if agentID == "" {
+		return fmt.Errorf("owned firewall identity is missing")
+	}
+	path, err := filepath.Abs(configPath)
+	if err != nil {
+		return fmt.Errorf("owned firewall config path is invalid")
+	}
+	_, err = s.load(agentID, path)
+	return err
+}
+
 // Preflight checks every reserved chain before a runtime can replace it.
 // Legacy rules must come from the caller's saved desired state.
 func Preflight(ctx context.Context, legacy map[string][]string) error {

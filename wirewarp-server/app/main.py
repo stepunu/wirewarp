@@ -163,10 +163,11 @@ async def agent_websocket(websocket: WebSocket):
                     await websocket.close()
                     return
 
+                agent_id = str(agent.id)
                 agent.status = "connected"
                 agent.last_seen = datetime.now(timezone.utc)
                 await db.commit()
-                await websocket.send_text(json.dumps({"type": "authenticated"}))
+                await websocket.send_text(json.dumps({"type": "authenticated", "agent_id": agent_id}))
 
             else:
                 await websocket.send_text(json.dumps({"type": "error", "message": "Expected register or auth message"}))

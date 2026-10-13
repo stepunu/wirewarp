@@ -187,7 +187,10 @@ func (c *Client) connect(ctx context.Context) error {
 			}
 			return fmt.Errorf("auth rejected: %s", resp["message"])
 		}
-		log.Printf("[ws] authenticated as agent %s", saved.AgentID)
+		if err := c.acceptAuthenticatedIdentity(resp["agent_id"]); err != nil {
+			return err
+		}
+		log.Printf("[ws] authenticated as agent %s", c.cfg.Snapshot().AgentID)
 	} else {
 		if err := send(map[string]string{
 			"type":       "register",
